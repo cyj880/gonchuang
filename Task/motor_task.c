@@ -1,0 +1,852 @@
+#include "motor_task.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include <math.h>
+#include "Emm_V5.h"
+#include "route_rx.h"
+#include "pid.h"
+#include "odom_task.h"
+#include "lunqu_imu.h"
+#include "uart8.h"
+
+/**
+  * 四路 Emm_V5 步进闭环电机控制任务（CAN2，500Kbps）
+  * ------------------------------------------------------------------
+  * 参考例程：gcs-gold-medal-main/yyb_stm32/can_ZDT/yyb_move.c
+  *   car_move(v_x, v_y, w)  —— 麦轮运动学 + 四轮速度模式
+  * 本任务全部使用**速度模式**（Emm_V5_Vel_Control，功能码 0xF6）：
+  *   直行 / 平移 / 45° 斜走 / 原地自转都只是 vx、vy、w 的不同组合，
+  *   位置模式（Emm_V5_Pos_Control）仅作为备用接口保留，任务里不调用。
+  *
+  * 与例程的差异（移植要点）：
+  *   1. 例程每帧之间 delay_ms(1) 空过 CAN，这里改为 Emm_V5 的"同步标志 + 广播帧"，
+  *      四轮指令全部缓存后一次性广播，真正同时起步（也可由 MOTOR_SYNC_START 改回逐条下发）；
+  *   2. 例程在裸机 while(1) 里跑，这里延时统一 vTaskDelay(pdMS_TO_TICKS(x))，
+  *      不能用 Delay_ms（那是 SysTick 忙等，会打断 FreeRTOS 节拍）；
+  *   3. CAN 初始化改由 board.c 的 board_init() 提供，main.c 中调用。
+  * ------------------------------------------------------------------
+  */
+
+/* ---------------- 电机地址 & 安装方向映射 ----------------
+   下标 0 ~ 3 依次对应例程的 speed[1] ~ speed[4]（左前/右前/左后/右后按实际接线）
+     Motor_Addr   : 电机自己的 CAN 地址（ZDT 出厂默认 1~4，可用上位机改）
+     Motor_FwdDir : 该电机"正速度"对应的方向位 0 = CW 正转，1 = CCW 反转
+                    —— 实车跑起来发现某个轮子方向反了，就把这一位的 0/1 对调
+   例程原始写法（yyb_move.c 第 28~55 行）：
+     speed[1] -> 地址 2，正速度 -> dir 0        speed[3] -> 地址 3，正速度 -> dir 0
+     speed[2] -> 地址 1，正速度 -> dir 1        speed[4] -> 地址 4，正速度 -> dir 1
+
+   ---- 车体布局对应关系（关键，装错车走不了直线）----
+     下标0 speed[1] = 左前轮 = addr 2   ┐ 左侧
+     下标2 speed[3] = 左后轮 = addr 3   ┘
+     下标1 speed[2] = 右前轮 = addr 1   ┐ 右侧
+     下标3 speed[4] = 右后轮 = addr 4   ┘
+   即：**addr 2 与 addr 3 必须是同一侧的两个轮子（一前一后）；
+        addr 1 与 addr 4 是另一侧的两个轮子**。
+   另一组对应关系是"斜对角"：addr 2 与 addr 4 在一条对角线上（左前↔右后），
+                             addr 1 与 addr 3 在另一条对角线上（右前↔左后）。
+
+   ---- 怎么一眼验证装对了（看轮子转向，不用上车跑）----
+     · 跑"原地自转"（w≠0）时：同一侧的两个轮子应该朝同一个方向转。
+       若看到的是同一条对角线上的两个轮子同向 → 地址配对错了。
+     · 跑"左右平移"（vx≠0）时：同一条对角线上的两个轮子应该朝同一方向转。
+     · 判断依据：自转项 w 只在同侧之间符号相同；左右项 vx 只在对角之间符号相同。
+   */
+static const uint8_t Motor_Addr[MOTOR_NUM]   = {2, 1, 3, 4};
+/* 实车标定(2026-09-25): 本车前/后两组电机安装方向镜像 —— 例程原始 {0,1,0,1} 下
+   vy>0(前进)实车表现为左平移。对调 LF/RR 两位得 {1,1,0,0}, 并在 Motor_Move()
+   里对 vx 列取反(两处必须配套修改), vx/vy/w 三个轴的方向才与注释约定一致。 */
+static const uint8_t Motor_FwdDir[MOTOR_NUM] = {1, 1, 0, 0};
+
+/**
+  * @brief  速度取绝对值并限幅为 RPM 值
+  */
+static uint16_t motor_clamp(int v)
+{
+    if (v < 0)
+    {
+        v = -v;
+    }
+    if (v > MOTOR_MAX_VEL)
+    {
+        v = MOTOR_MAX_VEL;
+    }
+    return (uint16_t)v;
+}
+
+/**
+  * @brief  有符号速度 -> 方向位（0 = CW，1 = CCW），自动套用安装方向映射
+  */
+static uint8_t motor_dir(uint8_t idx, int speed)
+{
+    uint8_t fwd = Motor_FwdDir[idx];
+    return (speed >= 0) ? fwd : (uint8_t)(1 - fwd);
+}
+
+/**
+  * @brief  一次控制四个电机（速度模式）
+  * @param  s1 ~ s4 ：四轮带符号转速(RPM)，正负即方向
+  * @note   四帧指令全部发出后，若 MOTOR_SYNC_START = 1 再广播同步帧，
+  *         四轮同一时刻起步，避免各帧间隔造成的走偏
+  */
+void Motor_SetSpeed4(int s1, int s2, int s3, int s4)
+{
+    int sp[MOTOR_NUM];
+    uint8_t i;
+
+    sp[0] = s1;
+    sp[1] = s2;
+    sp[2] = s3;
+    sp[3] = s4;
+
+    for (i = 0; i < MOTOR_NUM; i++)
+    {
+        Emm_V5_Vel_Control(Motor_Addr[i],
+                           motor_dir(i, sp[i]),
+                           motor_clamp(sp[i]),
+                           MOTOR_DEF_ACC,
+                           (bool)MOTOR_SYNC_START);
+    }
+
+#if MOTOR_SYNC_START
+    Emm_V5_Synchronous_motion(0x00);   /* 广播地址 0x00：全部电机同时执行缓存的指令 */
+#endif
+}
+
+/**
+  * @brief  麦轮底盘移动（例程矩阵 + 本车 vx 列取反 + w 列实车修正）
+  * @param  vx ：**左右轴**，> 0 左移（RPM）
+  * @param  vy ：**前后轴**，> 0 前进（RPM）
+  * @param  w  ：自转，> 0 逆时针（RPM）
+  * @note   注意轴的命名：v_x 管左右、v_y 管前后（不是常见的 x=前后）。
+  *         判断依据是矩阵结构 —— 四行里系数全为 +1 的那一项才是前后轴：
+  *           vy 列：+ + + +  → 四轮同速同向 = 前后（麦轮直行）
+  *           vx 列：- + + -  → 按**对角线**分成两组 = 左右平移
+  *           w  列：+ + - -  → **1&2号同向、3&4号反向**（实车标定：
+  *              与原地旋转脉冲命令 CCW={s,s,-,-} 的正确模式一致；
+  *              例程原始 w 列为 - + - +，本车实转方向分组不符，已修正）
+  */
+void Motor_Move(int vx, int vy, int w)
+{
+    /*  例程 yyb_move.c 原始矩阵:
+          speed[1] = +v_x + v_y - w;
+          speed[2] = -v_x + v_y + w;
+          speed[3] = -v_x + v_y - w;
+          speed[4] = +v_x + v_y + w;
+        本车两处实车修正（缺一不可）：
+        1) vx 列整体取反 —— 前后两组电机安装方向镜像（原矩阵下 vy>0 实际左移）；
+        2) w 列改为 + + - - —— 实车正确的自转分组是 1&2 同向、3&4 反向
+           （与 Motor_FwdDir={1,1,0,0} 标定的脉冲命令 CCW 模式一致）： */
+    Motor_SetSpeed4( -vx + vy + w,
+                      vx + vy + w,
+                      vx + vy - w,
+                     -vx + vy - w);
+}
+
+/**
+  * @brief  45° 斜向平移
+  * @param  dir_x ：+1 含向左分量 / -1 含向右分量
+  * @param  dir_y ：+1 含向前分量 / -1 含向后分量（对应 Motor_Move 的 vy 约定）
+  * @param  speed ：合成速度(RPM)，量级与直行相同
+ * @note   把速度按 0.7071 分解到 vx / vy，代入运动学矩阵后正好是 2v 与 0：
+ *           左前 45°：speed[1] = 0，speed[2] = 2v，speed[3] = 2v，speed[4] = 0
+ *         即对角线上只有两个轮子出力、另两个完全停转 —— 这是麦轮的固有特性，
+ *         所以 45° 斜走的轮速是合成速度的 1.414 倍，命令值别贴限幅上限。
+ *         出力的轮子（对应上面的车体布局）：
+ *           左前 / 右后 45° → addr 1（右前）+ addr 3（左后）
+ *           右前 / 左后 45° → addr 2（左前）+ addr 4（右后）
+  */
+void Motor_MoveDiagonal(int8_t dir_x, int8_t dir_y, uint16_t speed)
+{
+    int vx = (int)speed * MOTOR_DIAG_COEF / 10000;   /* 0.7071 × speed */
+    int vy = vx;
+
+    if (dir_x < 0)
+    {
+        vx = -vx;
+    }
+    if (dir_y < 0)
+    {
+        vy = -vy;
+    }
+
+    Motor_Move(vx, vy, 0);
+}
+
+/**
+  * @brief  四轮位置模式（相对运动，四轮同步起步）
+  * @param  pulse[4] ：pulse[i] 符号 = 方向，绝对值 = 脉冲数(0 ~ 2^32-1)
+  * @note   与例程 car_move_distance_x/y() 里 Emm_V5_Pos_Control(..., false, true)
+  *         完全一致：raF = false 相对运动，snF = true 多机同步
+  */
+void Motor_MovePulses(const int32_t pulse[MOTOR_NUM])
+{
+    uint8_t i;
+
+    for (i = 0; i < MOTOR_NUM; i++)
+    {
+        Emm_V5_Pos_Control(Motor_Addr[i],
+                           motor_dir(i, (int)pulse[i]),
+                           MOTOR_DEF_VEL,
+                           MOTOR_DEF_ACC,
+                           (uint32_t)ABS(pulse[i]),
+                           false,
+                           true);
+    }
+
+    Emm_V5_Synchronous_motion(0x00);
+}
+
+/**
+  * @brief  立即停止四轮
+  * @note   这里不用同步标志，逐轮立即停 —— 停机要可靠，不能等广播帧
+  */
+void Motor_Stop(void)
+{
+    uint8_t i;
+
+    for (i = 0; i < MOTOR_NUM; i++)
+    {
+        Emm_V5_Stop_Now(Motor_Addr[i], false);
+    }
+}
+
+/**
+  * @brief  使能 / 失能四轮
+  * @param  state ：true 使能（FOC 上电抱死），false 失能（自然松开）
+  */
+void Motor_Enable(bool state)
+{
+    uint8_t i;
+
+    for (i = 0; i < MOTOR_NUM; i++)
+    {
+        Emm_V5_En_Control(Motor_Addr[i], state, false);
+    }
+}
+
+#if MOTOR_TASK_AUTO_DEMO
+/**
+  * @brief  自检动作的一步：以 (vx, vy, w) 跑 ms 毫秒后停下
+  */
+static void motor_demo_step(int vx, int vy, int w, uint32_t ms)
+{
+    Motor_Move(vx, vy, w);
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    Motor_Stop();
+    vTaskDelay(pdMS_TO_TICKS(300));   /* 停稳再切下一个动作 */
+}
+
+/**
+  * @brief  自检动作的一步：向 45° 斜向 (dir_x, dir_y) 跑 ms 毫秒后停下
+  */
+static void motor_demo_diag(int8_t dir_x, int8_t dir_y, uint32_t ms)
+{
+    Motor_MoveDiagonal(dir_x, dir_y, MOTOR_DEF_VEL);
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    Motor_Stop();
+    vTaskDelay(pdMS_TO_TICKS(300));
+}
+#endif
+
+#if !MOTOR_TASK_AUTO_DEMO
+/**
+  * @brief  方向 + 脉冲数 -> 四轮位置模式脉冲表
+  * @param  dir  ：PULSE_DIR_FWD/BACK/LEFT/RIGHT/FL/FR/BL/BR（route_rx.h）
+  * @param  n    ：出力轮脉冲数（1 ~ PULSE_MAX，route_rx 解析时已限幅）
+  * @note   与 Motor_Move 的运动学一致（vx 列已取反的版本）：
+  *           前进/后退 = 四轮同向；左移/右移与四个45°斜向 = 对角两轮出力，
+  *           斜向出力轮各走 n 脉冲，另两轮停转（车体位移约为直走的0.707倍）
+  */
+static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
+{
+    int32_t s = (int32_t)n;
+
+    switch (dir)
+    {
+    case PULSE_DIR_BACK:   out[0] = -s; out[1] = -s; out[2] = -s; out[3] = -s; break;
+    case PULSE_DIR_LEFT:   out[0] = -s; out[1] =  s; out[2] =  s; out[3] = -s; break;
+    case PULSE_DIR_RIGHT:  out[0] =  s; out[1] = -s; out[2] = -s; out[3] =  s; break;
+    case PULSE_DIR_FL:     out[0] =  0; out[1] =  s; out[2] =  s; out[3] =  0; break;
+    case PULSE_DIR_FR:     out[0] =  s; out[1] =  0; out[2] =  0; out[3] =  s; break;
+    case PULSE_DIR_BL:     out[0] = -s; out[1] =  0; out[2] =  0; out[3] = -s; break;
+    case PULSE_DIR_BR:     out[0] =  0; out[1] = -s; out[2] = -s; out[3] =  0; break;
+    case PULSE_DIR_CCW:    out[0] =  s; out[1] =  s; out[2] = -s; out[3] = -s; break;
+    case PULSE_DIR_CW:     out[0] = -s; out[1] = -s; out[2] =  s; out[3] =  s; break;
+    default:               out[0] =  s; out[1] =  s; out[2] =  s; out[3] =  s; break;
+    }
+}
+#endif
+
+/* ---- 位置闭环（串口 05 帧触发，目标=编码值；里程计 pos 反馈） ----
+   位置环: pos误差 -> vy(RPM); 航向环: yaw误差 -> w(RPM), BNO085接入前yaw恒0即w=0。
+   到位: |pos-目标| ≤ POS_TOL_COUNTS 立即停车(爬行段低速, 停车必落容差内)。
+   整定: 先 Kp(0.0005起, 太慢加大/振荡减小), 再 Ki(消除稳态误差), Kd 默认关闭
+   (里程计约35ms刷新一次位置, 微分对量化噪声敏感)。 */
+#define POS_TOL_COUNTS      5000     /* 到位容差(编码值): 目标±5000, 进入即停车 */
+#define POS_QR_SLOW_COUNTS  100000   /* 二维码缓行区(编码值, ≈152mm): 距目标小于此值
+                                            -> 低速行驶+开启二维码判停, 扫到码即停车 */
+#define POS_QR_SLOW_RPM     6        /* 缓行速度(RPM), 低速下里程计滞后<1mm */
+
+/* ---- 二维码校准段(PHASE_QRCAL): 扫到码后横向平移, 使码中心对准画面 300~340 ---- */
+#define QR_TOL_PX           20       /* 对位容差(像素): |x-320|<=20 即 300~340 */
+#define QR_CAL_KP           0.05f    /* 像素误差 -> 横移速度(RPM): vx = -KP*err(负=err正码偏右车右移) */
+#define QR_CAL_VMAX         15       /* 横移速度限幅(RPM) */
+#define QR_CAL_TIMEOUT_MS   10000u   /* 校准总超时, 超时兜底停车并回传pos */
+#define QR_LOST_MS          2000u    /* 校准中连续丢码判定, 超过则兜底停车并回传pos */
+#define POS_OUT_MAX_RPM     100      /* 位置PID输出限幅(RPM) */
+#define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
+
+#define POS_PID_KP          0.0005f  /* 误差(编码值) -> RPM */
+#define POS_PID_KI          0.0003f
+#define POS_PID_KD          0.0f     /* 微分默认关闭 */
+#define POS_ERR_INT_MAX     30000.0f /* 积分限幅(编码值) */
+
+#define POS_YAW_TARGET      0.0f     /* 航向保持目标(deg), BNO085接入前yaw恒0 */
+#define YAW_PID_KP          2.0f     /* 误差(deg) -> RPM */
+#define YAW_PID_KI          0.5f
+#define YAW_PID_KD          0.0f
+#define YAW_OUT_MAX_RPM     50
+#define YAW_ERR_INT_MAX     30.0f    /* 积分限幅(deg) */
+#define YAW_OUT_SIGN        (-1.0f)  /*航向纠正方向: 实车45°斜走实测越纠越偏, 已翻转。
+                                        适用于直线/缓行/校准/45°的yaw保持(共用YawPID);
+                                        换陀螺仪(轮趣<->BNO085)后若再反, 回来改这里*/
+#define TURN_OUT_SIGN       (+1.0f)  /*原地转向输出方向: 与yaw保持独立, 转向实测反了则翻转*/
+
+#define POS_LEG1_RPM        30       /* 45°斜走段: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
+
+/* ---- 场地与点位(编码值) ----
+   注意: 两启停区出发时X轮计数方向镜像 —— 同一"场地右上角",
+   区一(右前去程)坐标系下 pos=POS_HOME_POS, 区二(左前去程)下 pos=X总长-POS_HOME_POS ---- */
+#define POS_X_SPAN          1450000  /* 场地X向总长(编码值, 实测丈量) */
+#define POS_HOME_POS        200000   /* 右上角点位(区一坐标系) */
+
+/* ---- 任务阶段状态机(串口05/06帧驱动) ----
+   阶段号即枚举值, 与"RunFlag"语义一一对应, 维护时只看这里:
+     1 = PHASE_DIAG  45°斜走段(leg_dir=1右前/2左前), 段末自动衔接直线
+     2 = PHASE_LINE  直线行驶段(纯PID直行)
+     5 = PHASE_SLOW  缓行直行+扫码判停段(距目标<QR_SLOW时由LINE切入)
+     3 = PHASE_DONE  已到位/已扫到码, 停车保持
+     4 = PHASE_TURN  原地转向段(yaw闭环)
+     6 = PHASE_QRCAL 二维码校准段(横向平移对位到画面300~340, 停车+回传pos)
+     7 = PHASE_HOME  回右上角点位段(直线同款PID, 方向由误差自动决定)
+     0 = PHASE_IDLE  空闲, 等待命令
+   流转: DIAG --段末--> LINE --距目标<QR_SLOW--> SLOW --扫到码--> QRCAL --对位完成--> DONE
+   帧流程不变: 45°段帧 + 直线段帧(排队) 两帧触发一条完整任务链;
+   07一键帧等价于两帧连发。 */
+typedef enum
+{
+    PHASE_IDLE = 0,
+    PHASE_DIAG = 1,
+    PHASE_LINE = 2,
+    PHASE_DONE = 3,
+    PHASE_TURN = 4,
+    PHASE_SLOW = 5,
+    PHASE_QRCAL = 6,
+    PHASE_HOME = 7
+} TaskPhase;
+
+/* 新任务可启动判定: 空闲 或 已完成停车。
+   单帧=单步指令: 车停着(DONE)就必须立即执行下一帧(实车bug: 停车后发帧只回ACK不走车);
+   07整体链同理(链的前置判断在链内部: 各段自动衔接, 无需外部状态)。 */
+#define PHASE_CAN_START(p)  ((p) == PHASE_IDLE || (p) == PHASE_DONE)
+
+/* ---- 原地转向闭环(05帧 sub=2左转/sub=3右转, param=角度deg) ----
+   反馈: IMU_GetYaw()直读当前陀螺仪最新值(中断刷新, 滞后<=10ms)。
+   若经 OdomTask(35ms RS485轮询节奏)透传, 高速段每盲区多转2~3°, 会来回振荡!
+   以触发时刻航向为原点计算相对角, 角差全程归一, 无±180°环绕跳变。 */
+#define TURN_TOL_DEG        2.0f     /* 到位容差(deg), 进入即停车(留滞后余量) */
+#define TURN_CREEP_DEG      20.0f    /* 爬行带(deg): 带内固定低速逼近 */
+#define TURN_CREEP_RPM      4        /* 爬行转速(RPM) */
+#define TURN_OUT_MAX_RPM    30       /* 转向PID输出限幅(RPM), 过大易超调 */
+#define TURN_TIMEOUT_MS     15000u   /* 转向最长运行时间, 超时自动停车(陀螺仪无效兜底) */
+#define TURN_PID_KP         0.4f     /* 误差(deg) -> RPM: 车体转动惯量大+ZDT速度跟随
+                                             有滞后, 增益须保守(参照直线环稳定比例) */
+#define TURN_PID_KI         0.1f     /* 先关积分防振荡; 到位有固定偏差再小量加入 */
+#define TURN_PID_KD         25.0f    /* 微分先行阻尼(10ms拍内角差仅~0.25°/拍, Kd须大):
+                                             满速25°/s时提供~5RPM反向阻尼, 压住冲过 */
+#define TURN_ERR_INT_MAX    45.0f    /* 积分限幅(deg) */
+#define TURN_SLEW_RPM       3        /* 软件限斜率: 每拍(10ms)速度变化上限(RPM)。
+                                        命令阶跃会激励ZDT内部斜率跟随导致惯性甩尾超调
+                                        (开源工程同款电机靠此招稳住90°转弯), 必加 */
+
+static PID_t PosPID;    /* 位置环: 里程计pos -> vy(RPM) */
+static PID_t YawPID;    /* 航向环: yaw误差 -> w(RPM) */
+static PID_t TurnPID;   /* 转向环: 相对角误差 -> w(RPM) */
+
+/**
+  * @brief  角差归一: a-b 收敛到 (-180,180], 用于相对角计算(避开±180°跳变)
+  */
+static float turn_angdiff(float a, float b)
+{
+    float d = a - b;
+    while (d > 180.0f)   d -= 360.0f;
+    while (d <= -180.0f) d += 360.0f;
+    return d;
+}
+
+/**
+  * @brief  四轮电机任务
+  * @note   MOTOR_TASK_AUTO_DEMO = 1 时循环跑自检动作；
+  *         = 0 时轮询执行 ZigBee(UART7) 收到的命令：
+  *           03 脉冲定距: 回ACK -> 使能 -> 延时1s -> 位置模式走N脉冲 -> 走完自停
+  *           05/06 定位闭环: PID驱动到目标pos(容差±5000), 06中止; 参数见上方宏
+  */
+void MotorTask(void *pvParameters)
+{
+    (void)pvParameters;
+
+    /* 等 1s：让 main() 里的上电提示音（Delay_ms 忙等）先跑完再接管 */
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+#if MOTOR_TASK_AUTO_DEMO
+    Motor_Enable(true);   /* 四轮使能；若电机上电即自使能，这一步可注释掉 */
+
+    for (;;)
+    {
+        motor_demo_step(0,  MOTOR_DEF_VEL, 0, 1000);   /* 前进      （vy 前后轴） */
+        motor_demo_step(0, -MOTOR_DEF_VEL, 0, 1000);   /* 后退      （vy 前后轴） */
+        motor_demo_step( MOTOR_DEF_VEL, 0, 0, 1000);   /* 左平移    （vx 左右轴） */
+        motor_demo_step(-MOTOR_DEF_VEL, 0, 0, 1000);   /* 右平移    （vx 左右轴） */
+
+        motor_demo_diag( 1,  1, 1000);                 /* 左前 45°  */
+        motor_demo_diag( 1, -1, 1000);                 /* 右前 45°  */
+        motor_demo_diag(-1,  1, 1000);                 /* 左后 45°  */
+        motor_demo_diag(-1, -1, 1000);                 /* 右后 45°  */
+
+        motor_demo_step(0, 0,  MOTOR_DEF_VEL, 1000);   /* 原地逆时针 */
+        motor_demo_step(0, 0, -MOTOR_DEF_VEL, 1000);   /* 原地顺时针 */
+
+        vTaskDelay(pdMS_TO_TICKS(2000));               /* 停 2s 再来一轮 */
+    }
+#else
+    /* ---- 位置/转向闭环状态(串口 05/06 帧控制) ----
+       当前阶段见 TaskPhase 枚举(0空闲/1斜走/2直线/3完成/4转向) */
+    TaskPhase    phase = PHASE_IDLE;
+    int32_t      qr_pos_mark = 0;   /*二维码校准完成时刻的里程计pos(回传上位机)*/
+    TickType_t   qrstart = 0;       /*校准段起始时刻*/
+    int32_t      pos_target = 0;    /*直线段目标位置*/
+    int32_t      leg1_end = 0;      /*45°段: 段末位置(编码值, 按绝对值判定)*/
+    uint8_t      leg_dir = 1;       /*45°段方向: 1=右前45°(sub=1) 2=左前45°(sub=4)*/
+    int32_t      leg1_next = 0;     /*FR45段结束后的直线目标*/
+    uint8_t      leg1_next_valid = 0;
+    float        yaw_start = 0.0f;  /*转向段: 触发时刻航向(相对角原点)*/
+    float        turn_target = 0.0f;/*转向段: 相对目标角(左+右-)*/
+    int          turn_w_last = 0;   /*转向段: 上一拍实际输出w(软件限斜率基准)*/
+    TickType_t   posrun_start = 0;
+
+    PID_Init(&PosPID);                         /*清运行状态, 增益随后重设*/
+    PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
+    PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
+    PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
+    PID_Init(&YawPID);
+    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+
+    for (;;)
+    {
+        ZbeeCmd c;
+
+        if (cmd_get(&c))
+        {
+            switch (c.type)
+            {
+            case CMD_PULSE:
+                if (!PHASE_CAN_START(phase)) break;        /*任务运行中: 忽略脉冲命令*/
+                cmd_tx_ack(&c);
+                Motor_Enable(true);                        /* 确保四轮使能(FOC抱死) */
+                vTaskDelay(pdMS_TO_TICKS(1000));           /* 接收后 1s 启动 */
+                {
+                    int32_t pulse4[MOTOR_NUM];
+                    pulse_build(pulse4, c.dir, c.param);
+                    Motor_MovePulses(pulse4);              /* 位置模式四轮同步, 走完自停 */
+                }
+                break;
+
+            case CMD_POS_GO:
+                cmd_tx_ack(&c);
+                if (c.sub == 2 || c.sub == 3)          /*原地转向闭环: 2=左转 3=右转, param=角度deg*/
+                {
+                    float d = (float)c.param;
+                    if (d < 1.0f)   d = 1.0f;
+                    if (d > 179.0f) d = 179.0f;
+                    if (!PHASE_CAN_START(phase)) break;    /*任务运行中: 忽略*/
+                    yaw_start    = IMU_GetYaw();      /*以当前航向为原点(最新值, 避开±180环绕)*/
+                    turn_target  = (c.sub == 2) ? d : -d;   /*yaw逆时针增: 左+右-*/
+                    posrun_start = xTaskGetTickCount();
+                    PID_Init(&TurnPID);
+                    TurnPID.Kp = TURN_PID_KP;  TurnPID.Ki = TURN_PID_KI;  TurnPID.Kd = TURN_PID_KD;
+                    TurnPID.ErrorIntMax =  TURN_ERR_INT_MAX;  TurnPID.ErrorIntMin = -TURN_ERR_INT_MAX;
+                    TurnPID.OutMax =  TURN_OUT_MAX_RPM;  TurnPID.OutMin = -TURN_OUT_MAX_RPM;
+                    turn_w_last = 0;                   /*限斜率基准归零*/
+                    Motor_Enable(true);
+                    phase = PHASE_TURN;
+                }
+                else if (c.sub == 1 || c.sub == 4)     /*45°斜走段: 1=右前 4=左前, param=段末位置*/
+                {
+                    leg_dir      = (c.sub == 1) ? 1 : 2;
+                    leg1_end     = (int32_t)c.param;
+                    posrun_start = xTaskGetTickCount();
+                    PID_Init(&YawPID);                 /*清运行状态, 斜走段yaw保持用*/
+                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+                    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+                    Motor_Enable(true);
+                    phase = PHASE_DIAG;
+                }
+                else if (c.sub == 5)                   /*缓行扫码段(单独触发): param=缓行目标pos*/
+                {
+                    if (!PHASE_CAN_START(phase)) break;
+                    pos_target   = (int32_t)c.param;
+                    posrun_start = xTaskGetTickCount();
+                    PID_Init(&YawPID);                 /*缓行段yaw保持用*/
+                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+                    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+                    Motor_Enable(true);
+                    phase = PHASE_SLOW;
+                }
+                else if (c.sub == 6)                   /*二维码校准段(单独触发): param=0*/
+                {
+                    if (!PHASE_CAN_START(phase)) break;
+                    qrstart = xTaskGetTickCount();
+                    PID_Init(&YawPID);                 /*校准段yaw保持用*/
+                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+                    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+                    Motor_Enable(true);
+                    phase = PHASE_QRCAL;
+                }
+                else if (c.sub == 7)                   /*回右上角点位段: param=0自动按出发区算目标
+                                                         (区一=POS_HOME_POS, 区二=X总长-POS_HOME_POS);
+                                                         param非0=手动指定(调试)*/
+                {
+                    if (!PHASE_CAN_START(phase)) break;
+                    if (c.param != 0)
+                        pos_target = (int32_t)c.param;
+                    else if (leg_dir == 1)             /*出发区一(右前去程)*/
+                        pos_target = POS_HOME_POS;
+                    else                               /*出发区二(左前去程): 计数镜像*/
+                        pos_target = POS_X_SPAN - POS_HOME_POS;
+                    posrun_start = xTaskGetTickCount();
+                    PID_Init(&PosPID);                 /*直线同款PID算法*/
+                    PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
+                    PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
+                    PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
+                    PID_Init(&YawPID);
+                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+                    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+                    Motor_Enable(true);
+                    phase = PHASE_HOME;
+                }
+                else if (phase == PHASE_DIAG)          /*斜走段运行中: 排队为下一段(段末自动衔接直线)*/
+                {
+                    leg1_next       = (int32_t)c.param;
+                    leg1_next_valid = 1;
+                }
+                else                                   /*直线PID段: param=目标位置*/
+                {
+                    pos_target   = (int32_t)c.param;
+                    posrun_start = xTaskGetTickCount();
+                    PID_Init(&PosPID);                         /* 清运行状态 */
+                    PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
+                    PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
+                    PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
+                    PID_Init(&YawPID);
+                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+                    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+                    Motor_Enable(true);
+                    phase = PHASE_LINE;
+                }
+                break;
+
+            case CMD_CHAIN:                        /*一键任务链: dir=1右前/4左前
+                                                     param=45°段末, param2=直线目标;
+                                                     后续自动: 衔接直线->缓行->扫码停车*/
+                cmd_tx_ack(&c);
+                if (!PHASE_CAN_START(phase)) break;    /*任务运行中: 忽略(先发06中止)*/
+                leg_dir         = (c.dir == 4) ? 2 : 1;
+                leg1_end        = (int32_t)c.param;
+                leg1_next       = (int32_t)c.param2;
+                leg1_next_valid = 1;
+                posrun_start    = xTaskGetTickCount();
+                PID_Init(&YawPID);                     /*清运行状态, 斜走段yaw保持用*/
+                YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+                YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+                YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+                Motor_Enable(true);
+                phase = PHASE_DIAG;
+                break;
+
+            case CMD_POS_ABORT:
+                cmd_tx_ack(&c);
+                phase = PHASE_IDLE;
+                leg1_next_valid = 0;
+                turn_w_last = 0;
+                Motor_Stop();                              /* 中止: 立即停车 */
+                break;
+
+            default:
+                break;
+            }
+        }
+
+        /*---- 45°斜走段(匀速+航向保持; |里程计pos|≥段末位置 -> 无缝转直线PID段) ----
+           移动方向由 vx:vy=1:1 轮速比决定, 车头朝向由 yaw 闭环独立锁住 —— 麦轮两通道解耦 */
+        if (phase == PHASE_DIAG)
+        {
+            OdomData_t o;
+            odometry_get(&o);
+
+            YawPID.Target = POS_YAW_TARGET;
+            YawPID.Actual = IMU_GetYaw();                     /*直读最新yaw(不经35ms透传)*/
+            PID_Update(&YawPID);
+
+            if (leg_dir == 1)
+                Motor_Move(-POS_LEG1_RPM / 2, POS_LEG1_RPM / 2, (int)(YawPID.Out * YAW_OUT_SIGN));   /*右前45°: LF+RR出力*/
+            else
+                Motor_Move(+POS_LEG1_RPM / 2, POS_LEG1_RPM / 2, (int)(YawPID.Out * YAW_OUT_SIGN));   /*左前45°: RF+LR出力*/
+
+            if (fabsf((float)o.enc_pos[ODOM_POS_AXIS]) >= (float)leg1_end)
+            {
+                if (leg1_next_valid)
+                {
+                    /*无缝衔接直线段: 里程计累计不清, 目标绝对值直接生效*/
+                    pos_target   = leg1_next;
+                    posrun_start = xTaskGetTickCount();
+                    PID_Init(&PosPID);
+                    PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
+                    PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
+                    PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
+                    PID_Init(&YawPID);
+                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+                    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+                    phase = PHASE_LINE;                /*无缝衔接: 进入直线行驶段*/
+                }
+                else
+                {
+                    phase = PHASE_DONE;                /*无排队直线: 段末即停*/
+                    Motor_Stop();
+                }
+            }
+            else if ((xTaskGetTickCount() - posrun_start) > pdMS_TO_TICKS(POS_RUN_TIMEOUT_MS))
+            {
+                phase = PHASE_IDLE;                              /*超时保护*/
+                leg1_next_valid = 0;
+                Motor_Stop();
+            }
+        }
+
+        /*---- 原地转向闭环(10ms周期; 直接读BNO085中断数据, 滞后<=10ms) ----*/
+        if (phase == PHASE_TURN)
+        {
+            float rel_now, err, aerr;
+
+            rel_now = turn_angdiff(IMU_GetYaw(), yaw_start);  /*当前相对起点角(-180,180]*/
+            err  = turn_angdiff(turn_target - rel_now, 0.0f);  /*剩余角差, 全程归一无跳变*/
+            aerr = fabsf(err);
+
+            if (aerr <= (float)TURN_TOL_DEG)
+            {
+                phase = PHASE_IDLE;
+                turn_w_last = 0;
+                Motor_Stop();                          /*到位停车(闭环步进抱死保持)*/
+            }
+            else if (aerr <= (float)TURN_CREEP_DEG)
+            {
+                /*低速爬行段: 固定小转速逼近, 积分冻结(35ms滞后会产生来回振荡)*/
+                int8_t creep_dir = (err > 0) ? 1 : -1;
+                TurnPID.Target = turn_target;
+                TurnPID.Actual = turn_target - err;    /*rel_now的连续展开: 环绕跳变被err归一吸收*/
+                PID_Update(&TurnPID);
+                TurnPID.ErrorInt = 0;
+                /*爬行速度同样过限斜率, 与PID段衔接连续无跳变*/
+                if (creep_dir * TURN_CREEP_RPM > turn_w_last + TURN_SLEW_RPM)
+                    turn_w_last += TURN_SLEW_RPM;
+                else if (creep_dir * TURN_CREEP_RPM < turn_w_last - TURN_SLEW_RPM)
+                    turn_w_last -= TURN_SLEW_RPM;
+                else
+                    turn_w_last = creep_dir * TURN_CREEP_RPM;
+                Motor_Move(0, 0, turn_w_last);
+            }
+            else
+            {
+                if ((xTaskGetTickCount() - posrun_start) > pdMS_TO_TICKS(TURN_TIMEOUT_MS))
+                {
+                    phase = PHASE_IDLE;                      /*超时保护: 陀螺仪无效或被卡住*/
+                    turn_w_last = 0;
+                    Motor_Stop();
+                }
+                else
+                {
+                    int w_raw;
+                    TurnPID.Target = turn_target;
+                    TurnPID.Actual = turn_target - err;
+                    PID_Update(&TurnPID);
+                    /*软件限斜率(移植自开源工程): 每拍速度最多变化TURN_SLEW_RPM,
+                      命令永不阶跃, 不激励ZDT内部斜率跟随, 消除惯性甩尾超调*/
+                    w_raw = (int)(TurnPID.Out * TURN_OUT_SIGN);
+                    if (w_raw > turn_w_last + TURN_SLEW_RPM)      w_raw = turn_w_last + TURN_SLEW_RPM;
+                    else if (w_raw < turn_w_last - TURN_SLEW_RPM) w_raw = turn_w_last - TURN_SLEW_RPM;
+                    turn_w_last = w_raw;
+                    Motor_Move(0, 0, w_raw);
+                }
+            }
+        }
+
+        /*---- 回右上角点位段(10ms 周期): 直线同款PID算法,
+           目标由出发区自动换算(区一200000 / 区二1250000, 见sub=7分支) ----
+           方向由误差自动决定: 启停区一(右前去程)回程误差为负=观感后退;
+           启停区二(左前去程)车头朝向不同=观感直行 —— 控制上同一套闭环。
+           接近目标<QR_SLOW时降为缓行速度(不扫码), 到位±TOL停车进DONE ---- */
+        if (phase == PHASE_HOME)
+        {
+            OdomData_t o;
+            odometry_get(&o);
+            float err = (float)pos_target - (float)o.enc_pos[ODOM_POS_AXIS];
+            float aerr = fabsf(err);
+
+            if (aerr <= (float)POS_TOL_COUNTS)
+            {
+                phase = PHASE_DONE;                        /*已到右上角点位*/
+                Motor_Stop();
+            }
+            else if ((xTaskGetTickCount() - posrun_start) > pdMS_TO_TICKS(POS_RUN_TIMEOUT_MS))
+            {
+                phase = PHASE_IDLE;                        /*超时保护*/
+                Motor_Stop();
+            }
+            else
+            {
+                int vy;
+                PosPID.Target = (float)pos_target;
+                PosPID.Actual = (float)o.enc_pos[ODOM_POS_AXIS];
+                PID_Update(&PosPID);
+
+                YawPID.Target = POS_YAW_TARGET;
+                YawPID.Actual = IMU_GetYaw();
+                PID_Update(&YawPID);
+
+                vy = (int)PosPID.Out;
+                if (aerr <= (float)POS_QR_SLOW_COUNTS)     /*接近点位: 限缓行速度*/
+                {
+                    if (vy > POS_QR_SLOW_RPM)  vy =  POS_QR_SLOW_RPM;
+                    if (vy < -POS_QR_SLOW_RPM) vy = -POS_QR_SLOW_RPM;
+                }
+                Motor_Move(0, vy, (int)(YawPID.Out * YAW_OUT_SIGN));
+            }
+        }
+
+        /*---- 直线行驶段(10ms 周期; 里程计pos约35ms刷新一次) ----
+           纯PID直行; 距目标<QR_SLOW时切入 PHASE_SLOW(缓行+扫码) */
+        if (phase == PHASE_LINE)
+        {
+            OdomData_t o;
+            odometry_get(&o);
+            float err = (float)pos_target - (float)o.enc_pos[ODOM_POS_AXIS];
+            float aerr = fabsf(err);
+
+            if (aerr <= (float)POS_QR_SLOW_COUNTS)
+            {
+                phase = PHASE_SLOW;                        /*进入缓行区: 切缓行扫码段*/
+                PosPID.ErrorInt = 0;                       /*清积分, 缓行段不用PID积分*/
+            }
+            else if ((xTaskGetTickCount() - posrun_start) > pdMS_TO_TICKS(POS_RUN_TIMEOUT_MS))
+            {
+                phase = PHASE_IDLE;                        /*超时保护: 目标不可达*/
+                Motor_Stop();
+            }
+            else
+            {
+                PosPID.Target = (float)pos_target;
+                PosPID.Actual = (float)o.enc_pos[ODOM_POS_AXIS];
+                PID_Update(&PosPID);
+
+                YawPID.Target = POS_YAW_TARGET;
+                YawPID.Actual = IMU_GetYaw();      /*直读最新yaw(不经35ms透传)*/
+                PID_Update(&YawPID);
+
+                Motor_Move(0, (int)PosPID.Out, (int)(YawPID.Out * YAW_OUT_SIGN));
+            }
+        }
+
+        /*---- 缓行直行+扫码段(10ms 周期; 由直线段距目标<QR_SLOW切入) ----
+           低速逼近+开启二维码判停; 扫到码立即停车(码的位置即最终停靠点);
+           走到目标仍未扫到码则到位兜底停车; 06帧可中止 */
+        if (phase == PHASE_SLOW)
+        {
+            OdomData_t o;
+            odometry_get(&o);
+            float err = (float)pos_target - (float)o.enc_pos[ODOM_POS_AXIS];
+            float aerr = fabsf(err);
+
+            if (aerr <= (float)POS_TOL_COUNTS)
+            {
+                phase = PHASE_DONE;                        /*缓行区尽头仍未扫到码: 兜底停*/
+                Motor_Stop();
+            }
+            else if (UART8_CamHasTarget())                 /*MaixCam 扫到二维码*/
+            {
+                phase = PHASE_QRCAL;                       /*进入二维码校准段(横向对位)*/
+                qrstart = xTaskGetTickCount();
+            }
+            else
+            {
+                int8_t slow_dir = (err > 0) ? 1 : -1;
+                YawPID.Target = POS_YAW_TARGET;
+                YawPID.Actual = IMU_GetYaw();              /*缓行段仍保持航向*/
+                PID_Update(&YawPID);
+
+                Motor_Move(0, slow_dir * POS_QR_SLOW_RPM, (int)(YawPID.Out * YAW_OUT_SIGN));
+            }
+        }
+
+        /*---- 二维码校准段(扫到码后切入): 横向平移使码中心对准画面300~340 ----
+           CamError = x-320, 正=码偏右(车偏左) -> 车右移; 麦轮vx通道纯平移,
+           yaw保持独立锁住车头; 对位完成即停车, 记录此刻里程计pos并经
+           UART7发0x08帧回传上位机; 丢码/总超时兜底停车同样回传 ---- */
+        if (phase == PHASE_QRCAL)
+        {
+            OdomData_t o;
+            int16_t cerr;
+            uint8_t finish = 0;
+
+            odometry_get(&o);
+            cerr = UART8_CamError();
+
+            if (UART8_CamHasTarget() && cerr >= -QR_TOL_PX && cerr <= QR_TOL_PX)
+                finish = 1;                                /*对位完成: x已入300~340*/
+            else if (!UART8_CamHasTarget() &&
+                     (xTaskGetTickCount() - qrstart) > pdMS_TO_TICKS(QR_LOST_MS))
+                finish = 1;                                /*校准中丢码超时: 兜底*/
+            else if ((xTaskGetTickCount() - qrstart) > pdMS_TO_TICKS(QR_CAL_TIMEOUT_MS))
+                finish = 1;                                /*总超时: 兜底*/
+
+            if (finish)
+            {
+                qr_pos_mark = o.enc_pos[ODOM_POS_AXIS];    /*记录此刻里程计pos*/
+                Motor_Stop();
+                route_tx_qrpos(qr_pos_mark);               /*0x08帧回传上位机*/
+                phase = PHASE_DONE;
+            }
+            else
+            {
+                int vx = (int)(-(float)cerr * QR_CAL_KP);  /*码偏右(err>0)->vx负(右移)*/
+                YawPID.Target = POS_YAW_TARGET;
+                YawPID.Actual = IMU_GetYaw();              /*校准中仍锁车头*/
+                PID_Update(&YawPID);
+
+                if (vx > QR_CAL_VMAX)  vx = QR_CAL_VMAX;
+                if (vx < -QR_CAL_VMAX) vx = -QR_CAL_VMAX;
+                Motor_Move(vx, 0, (int)(YawPID.Out * YAW_OUT_SIGN));
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+#endif
+}

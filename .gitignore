@@ -1,0 +1,13 @@
+# 编译产物
+Objects/
+Listings/
+DebugConfig/
+EventRecorderStub.scvd
+
+# 编译日志
+build_log*.txt
+build_check.log
+
+# Keil 个人视图缓存
+*.uvguix.*
+*.bak
