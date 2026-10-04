@@ -4,6 +4,7 @@
 #include "Key.h"
 #include "LED.h"
 #include "lcd_task.h"
+#include "lunqu_imu.h"
 
 /**
   * 按键任务（源自 STM32F407 例程 key_task.c 移植）
@@ -41,6 +42,6 @@ void KeyTask(void *pvParameters)
 //按键松开回调函数：切换 LCD 页面（路线坐标页 / 任务码页），并翻转红色指示灯
 static void KEY1_ClickedCallback(void)
 {
-    LCD_TogglePage();
+    IMU_SetZero();          /*PB2: 重新记零点(当前朝向=0°)*/
     LED_Red_Toggle();       /*按键反馈，不需要可删掉这一行*/
 }

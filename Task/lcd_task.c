@@ -78,7 +78,7 @@ static void lcd_draw_odom(void)
     lcd_odom_cmd_line();
 
     LCD_SetColor(LCD_WHITE);
-    LCD_Printf(0, 76, LCD_6X8, "yaw %-6d", (int)IMU_GetYaw());
+    LCD_Printf(0, 76, LCD_6X8, "yaw %-6d", (int)IMU_GetYawAbs360());   /*0~360, 零点=上电/按PB2*/
 
     lcd_odom_cam_line();            /*MaixCam 坐标*/
 }
@@ -99,7 +99,7 @@ static void lcd_update_odom(void)
     LCD_SetColor(LCD_CYAN);
     LCD_Printf(0, 52, LCD_6X8, "E1:%s E2:%s", o.online[0] ? "ON" : "OFF", o.online[1] ? "ON" : "OFF");
     lcd_odom_cmd_line();
-    LCD_Printf(0, 76, LCD_6X8, "yaw %-6d", (int)IMU_GetYaw());
+    LCD_Printf(0, 76, LCD_6X8, "yaw %-6d", (int)IMU_GetYawAbs360());   /*0~360, 零点=上电/按PB2*/
     lcd_odom_cam_line();            /*MaixCam 坐标*/
 }
 

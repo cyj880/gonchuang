@@ -2,6 +2,7 @@
 #include "lunqu_imu.h"
 #include "bno08x_uart_rvc.h"
 #include <string.h>
+#include <math.h>
 
 /**
   ******************************************************************************
@@ -20,6 +21,12 @@
   */
 
 LunquData_t lunqu_data;
+
+/* ---- 零点机制: 上电/按PB2时刻的朝向 = 0 deg, yaw以相对零点输出 ----
+   闭环(IMU_GetYaw)用+-180相对角(PID连续); 显示(IMU_GetYawAbs360)用0~360 */
+static float    lq_yaw_zero_deg = 0.0f;
+static uint8_t  lq_zero_done = 0;
+static float    lq_yaw_raw_deg = 0.0f;
 
 /* ---- 例程同款缓冲与标志 ---- */
 static uint8_t Fd_data[64];
@@ -46,6 +53,27 @@ static float LqF32(const uint8_t *p)
     float f;
     memcpy(&f, p, 4);        /*CM4 小端, 与官方 DATA_Trans 例程一致*/
     return f;
+}
+
+/* ---- 角度归一 ---- */
+static float LqNorm180(float a)
+{
+    while (a > 180.0f)   a -= 360.0f;
+    while (a <= -180.0f) a += 360.0f;
+    return a;
+}
+static float LqNorm360(float a)
+{
+    a = fmodf(a, 360.0f);
+    if (a < 0.0f) a += 360.0f;
+    return a;
+}
+
+/* ---- PB2按键: 重新记零点(当前朝向=0 deg) ---- */
+void Lunq_SetZero(void)
+{
+    lq_yaw_zero_deg = lq_yaw_raw_deg;
+    lq_zero_done = 1;
 }
 
 void Lunqu_Init(uint32_t baud)
@@ -126,8 +154,16 @@ void Lunq_RxByte(uint8_t Usart_Receive)
             {
                 lunqu_data.roll      = LqF32(&Fd_rsahrs[19]) * 57.29578f;
                 lunqu_data.pitch     = LqF32(&Fd_rsahrs[23]) * 57.29578f;
-                lunqu_data.yaw       = LqF32(&Fd_rsahrs[27]) * 57.29578f;
+                lq_yaw_raw_deg       = LqF32(&Fd_rsahrs[27]) * 57.29578f;
                 lunqu_data.yaw_speed = LqF32(&Fd_rsahrs[15]) * 57.29578f;
+
+                if (!lq_zero_done)            /*上电首帧: 当前朝向=0 deg*/
+                {
+                    lq_yaw_zero_deg = lq_yaw_raw_deg;
+                    lq_zero_done = 1;
+                }
+                lunqu_data.yaw       = LqNorm180(lq_yaw_raw_deg - lq_yaw_zero_deg);
+                lunqu_data.yaw_abs360 = LqNorm360(lq_yaw_raw_deg - lq_yaw_zero_deg);
             }
         }
         memset(Fd_data, 0, 64);
@@ -144,5 +180,25 @@ float IMU_GetYaw(void)
 {
     if (lunqu_RunFlag)  return lunqu_data.yaw;
     if (Bno085_RunFlag) return bno08x_data.yaw;
+    return 0.0f;
+}
+
+/* ---- PB2按键: 重新记零点(轮趣=当前朝向归0; BNO085上电自带零基准, 空操作) ---- */
+void IMU_SetZero(void)
+{
+    if (lunqu_RunFlag) Lunq_SetZero();
+}
+
+/* ---- LCD显示: yaw 0~360(相对零点) ---- */
+static float LqNorm360_pub(float a)
+{
+    a = fmodf(a, 360.0f);
+    if (a < 0.0f) a += 360.0f;
+    return a;
+}
+float IMU_GetYawAbs360(void)
+{
+    if (lunqu_RunFlag)  return LqNorm360_pub(lunqu_data.yaw);
+    if (Bno085_RunFlag) return LqNorm360_pub(bno08x_data.yaw);
     return 0.0f;
 }
