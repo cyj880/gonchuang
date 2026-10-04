@@ -48,7 +48,7 @@
             SUB: 0x00=直线定位(T=目标pos,反馈轴=ODOM_POS_AXIS)
                  0x01=右前45°段(T=段末pos,段末自动衔接直线段)
                  0x04=左前45°段(T=段末pos,同上)
-                 0x05=缓行扫码段(T=缓行目标pos)  0x06=二维码校准(T=0)
+                 0x05=缓行扫码段(T=缓行目标pos, 扫到码即停)
                  0x07=回右上角点位段(T=目标pos, 场地右上角=200000)
                  0x02=原地左转(T=角度deg 1~179)  0x03=原地右转(T=角度deg)
    06 中止帧: AA 55 | 06 | SUM | 0D 0A                       (6字节)
@@ -73,9 +73,7 @@
        SUM = 07+01+60+E3+16+00+10+EB+09 = 65
        发送: AA 55 07 01 60 E3 16 00 10 EB 09 00 65 0D 0A               */
 #define CMD_CHAIN        0x07    /* 上位机 -> 车端：一键任务链(45°+直线+缓行扫码) */
-/* ---- 二维码校准完成帧(车端 -> 上位机): AA 55 08 | pos0..pos3(小端) | SUM | 0D 0A ----
-   pos = 校准停车时刻的里程计位置(编码值, 反馈轴=ODOM_POS_AXIS) ---- */
-#define CMD_QRPOS        0x08    /* 车端 -> 上位机：二维码校准完成, 载荷=此刻里程计pos */
+
 
 /* ---- 动作指令帧(上位机 -> 车端, 7字节): AA 55 | 04 | BATCH | CODE | SUM | 0D 0A ----
    BATCH: 1=第一批 2=第二批
@@ -122,7 +120,7 @@ uint8_t route_ready(uint8_t batch);   /* batch: 1~2 */
 void route_clear_ready(uint8_t batch);
 RouteFrame* route_get(uint8_t batch);
 void route_tx_uplink(uint8_t batch);  /* 经 UART7(ZigBee) 按命令字 02 帧回传该批坐标到网页(旧接口, 已被逐帧回传取代, 保留备用) */
-void route_tx_qrpos(int32_t pos);     /* 经 UART7(ZigBee) 发 0x08 帧: 二维码校准完成时的pos */
+
 
 
 #endif

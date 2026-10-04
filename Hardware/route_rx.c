@@ -377,30 +377,6 @@ void route_tx_uplink(uint8_t batch)
     xSemaphoreGive(s_uart7_tx_mutex);
 }
 
-/* ================= 二维码校准完成帧(0x08): 校准停车时刻的里程计pos 回传上位机 ================= */
-void route_tx_qrpos(int32_t pos)
-{
-    uint8_t sum = CMD_QRPOS;
-    uint8_t i;
-
-    if (s_uart7_tx_mutex == 0) return;
-    if (xSemaphoreTake(s_uart7_tx_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
-
-    UART7_SendByte(FRAME_HEAD1);
-    UART7_SendByte(FRAME_HEAD2);
-    UART7_SendByte(CMD_QRPOS);
-    for (i = 0; i < 4; i++)
-    {
-        uint8_t b = (uint8_t)((uint32_t)pos >> (8 * i));   /*小端*/
-        UART7_SendByte(b);
-        sum += b;
-    }
-    UART7_SendByte(sum);
-    UART7_SendByte(FRAME_TAIL1);
-    UART7_SendByte(FRAME_TAIL2);
-    xSemaphoreGive(s_uart7_tx_mutex);
-}
-
 /* ================= 命令槽取用与应答（03/05/06 通用） =================
    get：MotorTask 取走新命令（先清 ready 再取值，ISR 新帧会重新置 ready）。
    last：LCD 只读最后一条（无清零）。

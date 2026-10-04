@@ -288,12 +288,6 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
                                             -> 低速行驶+开启二维码判停, 扫到码即停车 */
 #define POS_QR_SLOW_RPM     6        /* 缓行速度(RPM), 低速下里程计滞后<1mm */
 
-/* ---- 二维码校准段(PHASE_QRCAL): 扫到码后横向平移, 使码中心对准画面 300~340 ---- */
-#define QR_TOL_PX           20       /* 对位容差(像素): |x-320|<=20 即 300~340 */
-#define QR_CAL_KP           0.05f    /* 像素误差 -> 横移速度(RPM): vx = -KP*err(负=err正码偏右车右移) */
-#define QR_CAL_VMAX         15       /* 横移速度限幅(RPM) */
-#define QR_CAL_TIMEOUT_MS   10000u   /* 校准总超时, 超时兜底停车并回传pos */
-#define QR_LOST_MS          2000u    /* 校准中连续丢码判定, 超过则兜底停车并回传pos */
 #define POS_OUT_MAX_RPM     100      /* 位置PID输出限幅(RPM) */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
 
@@ -328,10 +322,10 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
      5 = PHASE_SLOW  缓行直行+扫码判停段(距目标<QR_SLOW时由LINE切入)
      3 = PHASE_DONE  已到位/已扫到码, 停车保持
      4 = PHASE_TURN  原地转向段(yaw闭环)
-     6 = PHASE_QRCAL 二维码校准段(横向平移对位到画面300~340, 停车+回传pos)
      7 = PHASE_HOME  回右上角点位段(直线同款PID, 方向由误差自动决定)
-     0 = PHASE_IDLE  空闲, 等待命令
-   流转: DIAG --段末--> LINE --距目标<QR_SLOW--> SLOW --扫到码--> QRCAL --对位完成--> DONE
+     0 = PHASE_IDLE  空闲, 等待命令(扫到码停车后=DONE, 同样可接新帧继续行走)
+   流转: DIAG --段末--> LINE --距目标<QR_SLOW--> SLOW --扫到码--> DONE
+         (停车后等待上位机下一动作帧继续行走)
    帧流程不变: 45°段帧 + 直线段帧(排队) 两帧触发一条完整任务链;
    07一键帧等价于两帧连发。 */
 typedef enum
@@ -342,7 +336,6 @@ typedef enum
     PHASE_DONE = 3,
     PHASE_TURN = 4,
     PHASE_SLOW = 5,
-    PHASE_QRCAL = 6,
     PHASE_HOME = 7
 } TaskPhase;
 
@@ -423,8 +416,6 @@ void MotorTask(void *pvParameters)
     /* ---- 位置/转向闭环状态(串口 05/06 帧控制) ----
        当前阶段见 TaskPhase 枚举(0空闲/1斜走/2直线/3完成/4转向) */
     TaskPhase    phase = PHASE_IDLE;
-    int32_t      qr_pos_mark = 0;   /*二维码校准完成时刻的里程计pos(回传上位机)*/
-    TickType_t   qrstart = 0;       /*校准段起始时刻*/
     int32_t      pos_target = 0;    /*直线段目标位置*/
     int32_t      leg1_end = 0;      /*45°段: 段末位置(编码值, 按绝对值判定)*/
     uint8_t      leg_dir = 1;       /*45°段方向: 1=右前45°(sub=1) 2=左前45°(sub=4)*/
@@ -506,40 +497,6 @@ void MotorTask(void *pvParameters)
                     YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
                     Motor_Enable(true);
                     phase = PHASE_SLOW;
-                }
-                else if (c.sub == 6)                   /*二维码校准段(单独触发): param=0*/
-                {
-                    if (!PHASE_CAN_START(phase)) break;
-                    qrstart = xTaskGetTickCount();
-                    PID_Init(&YawPID);                 /*校准段yaw保持用*/
-                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
-                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
-                    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
-                    Motor_Enable(true);
-                    phase = PHASE_QRCAL;
-                }
-                else if (c.sub == 7)                   /*回右上角点位段: param=0自动按出发区算目标
-                                                         (区一=POS_HOME_POS, 区二=X总长-POS_HOME_POS);
-                                                         param非0=手动指定(调试)*/
-                {
-                    if (!PHASE_CAN_START(phase)) break;
-                    if (c.param != 0)
-                        pos_target = (int32_t)c.param;
-                    else if (leg_dir == 1)             /*出发区一(右前去程)*/
-                        pos_target = POS_HOME_POS;
-                    else                               /*出发区二(左前去程): 计数镜像*/
-                        pos_target = POS_X_SPAN - POS_HOME_POS;
-                    posrun_start = xTaskGetTickCount();
-                    PID_Init(&PosPID);                 /*直线同款PID算法*/
-                    PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
-                    PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
-                    PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
-                    PID_Init(&YawPID);
-                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
-                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
-                    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
-                    Motor_Enable(true);
-                    phase = PHASE_HOME;
                 }
                 else if (phase == PHASE_DIAG)          /*斜走段运行中: 排队为下一段(段末自动衔接直线)*/
                 {
@@ -791,8 +748,8 @@ void MotorTask(void *pvParameters)
             }
             else if (UART8_CamHasTarget())                 /*MaixCam 扫到二维码*/
             {
-                phase = PHASE_QRCAL;                       /*进入二维码校准段(横向对位)*/
-                qrstart = xTaskGetTickCount();
+                phase = PHASE_DONE;                        /*扫到码: 立即停车, 等待上位机下一动作帧*/
+                Motor_Stop();
             }
             else
             {
@@ -805,46 +762,6 @@ void MotorTask(void *pvParameters)
             }
         }
 
-        /*---- 二维码校准段(扫到码后切入): 横向平移使码中心对准画面300~340 ----
-           CamError = x-320, 正=码偏右(车偏左) -> 车右移; 麦轮vx通道纯平移,
-           yaw保持独立锁住车头; 对位完成即停车, 记录此刻里程计pos并经
-           UART7发0x08帧回传上位机; 丢码/总超时兜底停车同样回传 ---- */
-        if (phase == PHASE_QRCAL)
-        {
-            OdomData_t o;
-            int16_t cerr;
-            uint8_t finish = 0;
-
-            odometry_get(&o);
-            cerr = UART8_CamError();
-
-            if (UART8_CamHasTarget() && cerr >= -QR_TOL_PX && cerr <= QR_TOL_PX)
-                finish = 1;                                /*对位完成: x已入300~340*/
-            else if (!UART8_CamHasTarget() &&
-                     (xTaskGetTickCount() - qrstart) > pdMS_TO_TICKS(QR_LOST_MS))
-                finish = 1;                                /*校准中丢码超时: 兜底*/
-            else if ((xTaskGetTickCount() - qrstart) > pdMS_TO_TICKS(QR_CAL_TIMEOUT_MS))
-                finish = 1;                                /*总超时: 兜底*/
-
-            if (finish)
-            {
-                qr_pos_mark = o.enc_pos[ODOM_POS_AXIS];    /*记录此刻里程计pos*/
-                Motor_Stop();
-                route_tx_qrpos(qr_pos_mark);               /*0x08帧回传上位机*/
-                phase = PHASE_DONE;
-            }
-            else
-            {
-                int vx = (int)(-(float)cerr * QR_CAL_KP);  /*码偏右(err>0)->vx负(右移)*/
-                YawPID.Target = POS_YAW_TARGET;
-                YawPID.Actual = IMU_GetYaw();              /*校准中仍锁车头*/
-                PID_Update(&YawPID);
-
-                if (vx > QR_CAL_VMAX)  vx = QR_CAL_VMAX;
-                if (vx < -QR_CAL_VMAX) vx = -QR_CAL_VMAX;
-                Motor_Move(vx, 0, (int)(YawPID.Out * YAW_OUT_SIGN));
-            }
-        }
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
