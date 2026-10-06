@@ -127,7 +127,7 @@ void route_rx_byte(uint8_t ch)
         else if (ch == CMD_ACTION)                 rx_state = RX_BATCH;   /*批号后跟1字节动作码*/
         else if (ch == CMD_PULSE)  { rx_p_idx = 0; rx_p_len = 5; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_GO) { rx_p_idx = 0; rx_p_len = 5; rx_state = RX_P_DATA; }
-        else if (ch == CMD_POS_ABORT) rx_state = RX_SUM;   /*无载荷, 累加和=命令字本身*/
+        else if (ch == CMD_POS_ABORT || ch == CMD_RUNALL) rx_state = RX_SUM;   /*无载荷, 累加和=命令字本身*/
         else if (ch == CMD_CHAIN)  { rx_p_idx = 0; rx_p_len = 9; rx_state = RX_P_DATA; }
         else                       rx_state = RX_H1;
         break;
@@ -276,9 +276,15 @@ void route_rx_byte(uint8_t ch)
             }
             else if (rx_cmd == CMD_ACTION)
             {
-                g_act_code = rx_act;                             /*最近动作码(1前进/2后退/3顺/4逆, 备用)*/
+                g_act_code = rx_act;                             /*最近动作码(1前进/2后退/3顺/4逆)*/
                 g_act_new  = 1;
                 echo_push_frame(rx_frame_buf, rx_frame_len);     /*动作帧也原样回传网页*/
+            }
+            else if (rx_cmd == CMD_RUNALL)
+            {
+                g_cmd.type   = CMD_RUNALL;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready  = 1;
             }
         }
         rx_state = RX_H1;
@@ -315,6 +321,16 @@ void route_rx_poll(void)
         if ((xTaskGetTickCount() - rx_last_tick) > pdMS_TO_TICKS(200))
             rx_state = RX_H1;                    /*帧中途超时: 丢弃半帧重新同步*/
     }
+}
+
+uint8_t route_act_get(void)
+{
+    if (g_act_new)
+    {
+        g_act_new = 0;
+        return g_act_code;
+    }
+    return 0;
 }
 
 void route_echo_flush(void)

@@ -73,6 +73,9 @@
        SUM = 07+01+60+E3+16+00+10+EB+09 = 65
        发送: AA 55 07 01 60 E3 16 00 10 EB 09 00 65 0D 0A               */
 #define CMD_CHAIN        0x07    /* 上位机 -> 车端：一键任务链(45°+直线+缓行扫码) */
+/* ---- 一键任务数组帧(车端按内置任务步骤表从当前步骤连跑至尾) ----
+   12 帧: AA 55 12 12 0D 0A (4字节, 无载荷) ---- */
+#define CMD_RUNALL       0x12    /* 上位机 -> 车端：一键执行任务步骤数组 */
 
 
 /* ---- 动作指令帧(上位机 -> 车端, 7字节): AA 55 | 04 | BATCH | CODE | SUM | 0D 0A ----
@@ -115,6 +118,7 @@ typedef struct
 void route_rx_init(void);             /* 初始化UART7发送互斥(main.c调度器前调用) */
 void route_rx_byte(uint8_t ch);       /* 中断里喂字节 */
 void route_rx_poll(void);             /* 帧中途超时复位(任务上下文周期调用, LCD_Task 10ms) */
+uint8_t route_act_get(void);          /* 取走04动作帧动作码(1前进/2后退/3顺/4逆), 0=无新帧 */
 void route_echo_flush(void);          /* 回传FIFO排空: 逐字节经UART7原样发回网页(任务上下文) */
 uint8_t route_ready(uint8_t batch);   /* batch: 1~2 */
 void route_clear_ready(uint8_t batch);
