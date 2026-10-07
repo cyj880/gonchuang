@@ -5,7 +5,7 @@ DebugConfig/
 EventRecorderStub.scvd
 
 # 编译日志
-build_log*.txt
+build_*.txt
 build_check.log
 
 # Keil 个人视图缓存
