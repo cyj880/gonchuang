@@ -296,7 +296,7 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define POS_PID_KD          0.0f     /* 微分默认关闭 */
 #define POS_ERR_INT_MAX     30000.0f /* 积分限幅(编码值) */
 
-#define POS_YAW_TARGET      0.0f     /* 航向保持目标(deg), BNO085接入前yaw恒0 */
+#define POS_YAW_TARGET      0.0f     /* (已废弃) 航向保持目标改为每步起始朝向 yaw_hold */
 #define YAW_PID_KP          2.0f     /* 误差(deg) -> RPM */
 #define YAW_PID_KI          0.5f
 #define YAW_PID_KD          0.0f
@@ -305,7 +305,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define YAW_OUT_SIGN        (-1.0f)  /*航向纠正方向: 实车45°斜走实测越纠越偏, 已翻转。
                                         适用于直线/缓行/校准/45°的yaw保持(共用YawPID);
                                         换陀螺仪(轮趣<->BNO085)后若再反, 回来改这里*/
-#define TURN_OUT_SIGN       (+1.0f)  /*原地转向输出方向: 与yaw保持独立, 转向实测反了则翻转*/
+#define TURN_OUT_SIGN       (-1.0f)  /*原地转向输出方向: 实车"左转发成右转270°"已实测, 翻转。
+                                        与YAW_OUT_SIGN同值(两者闭环的都是IMU增方向)*/
 
 #define POS_LEG1_RPM        30       /* 45°斜走段: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
 
@@ -365,7 +366,8 @@ typedef struct
 
 /* 图二"第一批"动作序列(黄色物料) —— target=每步相对步长(正前进/负后退), 全部走里程计1 */
 static const TaskStep task_z1[] = {
-    {STEPT_LINE, 0, 0,   650000},   /*前进650000: 启停区1-右上角45度-扫码区(车头朝下直行)*/
+    {STEPT_DIAG, 5, 1,   100000},   /*45度斜走: 纵向计到100000(启停区1-右上角45度, 方向码实测调)*/
+    {STEPT_LINE, 0, 0,   650000},   /*切换直线: 继续纵向到650000(扫码区)*/
     {STEPT_LINE, 0, 0,  -550000},   /*后退550000: 扫码区-右上角(650000-100000)*/
     {STEPT_TURN, 3, 0,         0},  /*顺时针转90度(车头变为朝场地左)*/
     {STEPT_LINE, 0, 0,   634000},   /*前进(估算1050mm): 到原料区横向位置——实测改*/
@@ -436,6 +438,9 @@ static float        yaw_start = 0.0f;  /*转向段起始航向*/
 static float        turn_target = 0.0f;/*转向段目标相对角*/
 static int          turn_w_last = 0;   /*转向限斜率基准*/
 static TickType_t   posrun_start = 0;  /*本步骤起始时刻*/
+static float        yaw_hold = 0.0f;   /*本步航向保持目标: 每步启动时刻的车头朝向(相对零点±180)*/
+static int32_t      seg_base[2] = {0, 0};   /*段计数基准: 每90°转弯结束后重置为当前计数,
+                                            段内目标值都是"相对本段零点"的绝对计数*/
 static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基准)*/
 static uint8_t      line_axis = 0;     /*直线段反馈轴: 0=里程计1(vy) 1=里程计2(vx)*/
 static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
@@ -456,12 +461,14 @@ static void task_step_start(const TaskStep *st)
         diag_start = o0.enc_pos[0];        /*相对步长基准(当前计数)*/
         leg_dir = (st->dir == 5) ? 1 : (st->dir == 4) ? 2 : (st->dir == 7) ? 3 : 4;
         leg1_end = st->target;
+        yaw_hold = IMU_GetYaw();           /*本步保持朝向=启动时刻车头(转弯后为新朝向)*/
         PID_Init(&YawPID);
         YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
         YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
         YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
         phase = PHASE_DIAG;
         break;
+    }
 
     case STEPT_LINE:                        /*直线PID(axis选反馈轮/输出通道), target=相对步长*/
     {
@@ -469,6 +476,7 @@ static void task_step_start(const TaskStep *st)
         odometry_get(&o0);
         line_axis  = st->axis;
         pos_target = ((line_axis == 0) ? o0.enc_pos[0] : o0.enc_pos[1]) + st->target;
+        yaw_hold    = IMU_GetYaw();        /*本步保持朝向=启动时刻车头*/
         PID_Init(&PosPID);
         PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
         PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
@@ -483,6 +491,7 @@ static void task_step_start(const TaskStep *st)
         YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
         phase = PHASE_LINE;
         break;
+    }
 
     case STEPT_SLOW:                        /*缓行+扫码(axis选反馈轮), target=相对步长*/
     {
@@ -490,12 +499,14 @@ static void task_step_start(const TaskStep *st)
         odometry_get(&o0);
         pos_target = ((slow_axis == 0) ? o0.enc_pos[0] : o0.enc_pos[1]) + st->target;
         slow_axis  = st->axis;
+        yaw_hold    = IMU_GetYaw();        /*本步保持朝向=启动时刻车头*/
         PID_Init(&YawPID);
         YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
         YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
         YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
         phase = PHASE_SLOW;
         break;
+    }
 
     case STEPT_TURN:                        /*原地转90°(dir=3顺/-90, 4逆/+90)*/
         yaw_start    = IMU_GetYaw();
@@ -573,9 +584,9 @@ void MotorTask(void *pvParameters)
         {
             switch (c.type)
             {
-            case CMD_ACTION:                       /*04动作帧: 单步执行任务数组当前步骤*/
+            case CMD_ACTION:                       /*04动作帧: 单步执行任务数组当前步骤
+                                                     (CODE仅作步进触发, 动作内容由表决定)*/
                 if (!PHASE_CAN_START(phase)) break;    /*运动中忽略(先06)*/
-                if (route_act_get() == 0) break;       /*无新动作码(防重放)*/
                 array_mode = 0;
                 task_step_start(&task_z1[step_idx]);   /*执行当前步骤, 完成自动step_idx++*/
                 break;
@@ -702,7 +713,7 @@ void MotorTask(void *pvParameters)
             OdomData_t o;
             odometry_get(&o);
 
-            YawPID.Target = POS_YAW_TARGET;
+            YawPID.Target = yaw_hold;
             YawPID.Actual = IMU_GetYaw();                     /*直读最新yaw(不经35ms透传)*/
             PID_Update(&YawPID);
 
@@ -756,6 +767,10 @@ void MotorTask(void *pvParameters)
 
             if (aerr <= (float)TURN_TOL_DEG)
             {
+                OdomData_t o;
+                odometry_get(&o);
+                seg_base[0] = o.enc_pos[0];            /*转弯结束: 里程计重新计数(段基准归零)*/
+                seg_base[1] = o.enc_pos[1];
                 turn_w_last = 0;
                 task_step_done();                      /*到位: 推进步骤(停车在done内)*/
             }
@@ -830,7 +845,7 @@ void MotorTask(void *pvParameters)
                 PosPID.Actual = (float)o.enc_pos[ODOM_POS_AXIS];
                 PID_Update(&PosPID);
 
-                YawPID.Target = POS_YAW_TARGET;
+                YawPID.Target = yaw_hold;
                 YawPID.Actual = IMU_GetYaw();
                 PID_Update(&YawPID);
 
@@ -853,7 +868,8 @@ void MotorTask(void *pvParameters)
             float err, aerr, out;
             odometry_get(&o);
             cur  = (line_axis == 0) ? o.enc_pos[0] : o.enc_pos[1];
-            err  = (float)pos_target - (float)cur;
+            int32_t seg = seg_base[line_axis];
+            err  = (float)pos_target - (float)(cur - seg);   /*段基准系: 转弯后从0重新计数*/
             aerr = fabsf(err);
 
             if (aerr <= (float)POS_TOL_COUNTS)
@@ -868,7 +884,7 @@ void MotorTask(void *pvParameters)
             }
             else
             {
-                YawPID.Target = POS_YAW_TARGET;
+                YawPID.Target = yaw_hold;
                 YawPID.Actual = IMU_GetYaw();          /*直读最新yaw*/
                 PID_Update(&YawPID);
 
@@ -907,7 +923,8 @@ void MotorTask(void *pvParameters)
             float err, aerr;
             odometry_get(&o);
             cur  = (slow_axis == 0) ? o.enc_pos[0] : o.enc_pos[1];
-            err  = (float)pos_target - (float)cur;
+            int32_t seg = seg_base[slow_axis];
+            err  = (float)pos_target - (float)(cur - seg);   /*段基准系: 转弯后从0重新计数*/
             aerr = fabsf(err);
 
             if (UART8_CamHasTarget() || aerr <= (float)POS_TOL_COUNTS)
@@ -917,7 +934,7 @@ void MotorTask(void *pvParameters)
             else
             {
                 int8_t slow_dir = (err > 0) ? 1 : -1;
-                YawPID.Target = POS_YAW_TARGET;
+                YawPID.Target = yaw_hold;
                 YawPID.Actual = IMU_GetYaw();          /*缓行段仍保持航向*/
                 PID_Update(&YawPID);
 

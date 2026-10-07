@@ -83,11 +83,11 @@ const MODES = [
   { id:'tr90',    name:'原地右转(05/03)',  sub:3 },
   { id:'abort',   name:'中止(06)',         cmd:0x06 },
   { id:'runall',  name:'一键任务数组(0x12)', cmd:0x12 },
-  { id:'pulse',   name:'脉冲定距(03)',     cmd:0x03 },
+  { id:'pulse',   name:'脉冲定距(0x10)',     cmd:0x10 },
 ];
 let cur = 'chain';
 
-/* 脉冲方向表(03帧) */
+/* 脉冲方向表(0x10帧) */
 const PULSE_DIRS = [
   ['00','前进'],['01','后退'],['02','左移'],['03','右移'],
   ['04','左前45°'],['05','右前45°'],['06','左后45°'],['07','右后45°'],
@@ -225,7 +225,7 @@ el('gen').onclick = () => {
       cmd = 0x12; payload = [];
       desc = '一键任务数组';
     } else if (cur === 'pulse') {
-      cmd = 0x03;
+      cmd = 0x10;
       const d = parseInt(el('pdir').value, 16), n = num('pn');
       if (isNaN(n) || n < 1 || n > 1000000) throw '脉冲数须在 1~1000000';
       payload = [d, ...i32le(n)];

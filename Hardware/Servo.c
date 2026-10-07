@@ -128,9 +128,20 @@ void Servo270_Init(void)
   */
 void Servo270_SetAngle(float Angle)
 {
+    /* 残差累积: 目标脉宽按浮点计算, 不足1个CCR计数的零头滚存到下一次,
+       消除缓动曲线两端"每拍增量小于PWM分辨率"造成的丢步蠕动 */
+    static float s_res = 0.0f;
+
     if (Angle < 0.0f)         Angle = 0.0f;                      //限幅保护
     if (Angle > SERVO270_RANGE) Angle = SERVO270_RANGE;
 
-    TIM_SetCompare1(TIM5, (uint16_t)(SERVO270_PULSE_MIN +
-                    (SERVO270_PULSE_MAX - SERVO270_PULSE_MIN) * Angle / SERVO270_RANGE));
+    float pulse = SERVO270_PULSE_MIN +
+                  (SERVO270_PULSE_MAX - SERVO270_PULSE_MIN) * Angle / SERVO270_RANGE
+                  + s_res;
+    int32_t ccr = (int32_t)(pulse + 0.5f);                       //四舍五入到1us
+    s_res = pulse - (float)ccr;                                  //零头滚存
+
+    if (ccr < (int32_t)SERVO270_PULSE_MIN)  ccr = (int32_t)SERVO270_PULSE_MIN;
+    if (ccr > (int32_t)SERVO270_PULSE_MAX)  ccr = (int32_t)SERVO270_PULSE_MAX;
+    TIM_SetCompare1(TIM5, (uint16_t)ccr);
 }

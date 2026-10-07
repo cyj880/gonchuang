@@ -276,8 +276,11 @@ void route_rx_byte(uint8_t ch)
             }
             else if (rx_cmd == CMD_ACTION)
             {
-                g_act_code = rx_act;                             /*最近动作码(1前进/2后退/3顺/4逆)*/
-                g_act_new  = 1;
+                g_cmd.type   = CMD_ACTION;                       /*提交进命令槽: MotorTask 取到才执行*/
+                g_cmd.dir    = rx_act;                           /*动作码 1前进/2后退/3顺/4逆*/
+                g_cmd.sub    = 0;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready  = 1;
                 echo_push_frame(rx_frame_buf, rx_frame_len);     /*动作帧也原样回传网页*/
             }
             else if (rx_cmd == CMD_RUNALL)

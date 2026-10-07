@@ -90,7 +90,7 @@ int main(void)
 	Buzzer_Init();
 
 //    xTaskCreate(LED_FlowTask, "LED_Flow", 256, NULL, 2, NULL);
-    xTaskCreate(Servo_Task, "Servo", 256, NULL, 2, NULL); /* 270°转盘对位:15/135/255°三工位循环,每3s一步;去程三次缓动,255→15回程五次缓动(加速度连续) */
+    xTaskCreate(Servo_Task, "Servo", 256, NULL, 3, NULL);  /*优先级3(高于RS485忙等): 20ms拍不被调度抖动拉长*/ /* 270°转盘对位:15/135/255°三工位循环,每3s一步;去程三次缓动,255→15回程五次缓动(加速度连续) */
     /* RouteTask 已并入 LCD_Task（收帧回传 + 坐标/任务码两页轮显），不再单独创建 */
     xTaskCreate(KeyTask, "Key", 256, NULL, 2, NULL);   /* PB2按键：松开翻转红色LED */
     xTaskCreate(MotorTask, "Motor", 512, NULL, 2, NULL); /* 四轮 Emm_V5 电机（CAN2） */
