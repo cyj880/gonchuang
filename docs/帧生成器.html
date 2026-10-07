@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>物流小车 串口帧生成器 V3</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: "Microsoft YaHei", sans-serif; }
+  body { background: #1a1d24; color: #e0e4ea; padding: 16px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 20px; color: #4fc3f7; margin-bottom: 4px; }
+  .sub { color: #8892a0; font-size: 12px; margin-bottom: 14px; }
+  .card { background: #232733; border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .modes { display: flex; flex-wrap: wrap; gap: 8px; }
+  .mode-btn { background: #2d3342; border: 1px solid #3a4155; color: #cdd5e0; padding: 10px 14px;
+              border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .mode-btn.active { background: #0d47a1; border-color: #4fc3f7; color: #fff; }
+  .params { margin-top: 12px; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  label { min-width: 130px; font-size: 13px; color: #9fb0c3; }
+  input, select { background: #1a1d24; border: 1px solid #3a4155; color: #fff; padding: 8px 10px;
+                  border-radius: 6px; font-size: 15px; width: 180px; }
+  input:focus { outline: none; border-color: #4fc3f7; }
+  .hint { font-size: 12px; color: #6b7686; }
+  .conv { font-size: 12px; color: #80cbc4; }
+  .btn { background: #0d47a1; color: #fff; border: none; padding: 12px 26px; border-radius: 8px;
+         font-size: 16px; cursor: pointer; }
+  .btn:hover { background: #1565c0; }
+  .btn:active { transform: scale(0.98); }
+  .btn.warn { background: #b71c1c; }
+  .hexout { font-family: Consolas, monospace; font-size: 20px; letter-spacing: 2px; color: #a5d6a7;
+            background: #10131a; padding: 14px; border-radius: 8px; word-break: break-all; margin-top: 10px;
+            min-height: 24px; border: 1px solid #2d3342; }
+  .bytes { margin-top: 8px; font-size: 12px; color: #8892a0; line-height: 1.8; }
+  .bytes b { color: #4fc3f7; font-weight: normal; }
+  .err { color: #ef9a9a; font-size: 13px; margin-top: 6px; }
+  .copyok { color: #a5d6a7; font-size: 13px; margin-left: 10px; }
+  table.hist { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.hist td { padding: 4px 6px; border-bottom: 1px solid #2d3342; font-family: Consolas, monospace; }
+  table.hist td:first-child { color: #6b7686; font-family: inherit; white-space: nowrap; }
+  table.hist td:last-child { width: 40px; }
+  .mini { background: none; border: 1px solid #3a4155; color: #9fb0c3; border-radius: 4px;
+          cursor: pointer; padding: 2px 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .dirsel { display: flex; gap: 6px; }
+  .dirsel .mode-btn { padding: 8px 12px; }
+</style>
+</head>
+<body>
+
+<h1>物流小车 串口帧生成器</h1>
+<div class="sub">UART7 · ZigBee · 115200-8-N-1 · 帧格式 AA 55 | CMD | 载荷 | SUM | 0D 0A · SUM=(CMD+载荷)累加和低8位</div>
+
+<div class="card">
+  <div class="modes" id="modes"></div>
+  <div class="params" id="params"></div>
+  <div class="row" style="margin-top:6px">
+    <button class="btn" id="gen">生成帧</button>
+    <span class="err" id="err"></span>
+  </div>
+  <div class="hexout" id="hexout">— 点击"生成帧" —</div>
+  <div class="row" style="margin-top:8px">
+    <button class="btn" id="copy" style="background:#2e7d32">复制 HEX</button>
+    <span class="copyok" id="copyok"></span>
+  </div>
+  <div class="bytes" id="bytes"></div>
+</div>
+
+<div class="card">
+  <div style="font-size:13px; color:#9fb0c3; margin-bottom:6px">生成历史(点"复制"可重新复制)</div>
+  <table class="hist" id="hist"></table>
+</div>
+
+<script>
+/* ---------------- 模式定义 ---------------- */
+const MODES = [
+  { id:'chain',   name:'一键任务链(07)',  cmd:0x07 },
+  { id:'line',    name:'直线行驶(05/00)',  sub:0 },
+  { id:'fr45',    name:'右前45°(05/01)',   sub:1 },
+  { id:'fl45',    name:'左前45°(05/04)',   sub:4 },
+  { id:'slow',    name:'缓行扫码(05/05)',  sub:5 },
+  { id:'home',    name:'回右上角(05/07)',  sub:7 },
+  { id:'tl90',    name:'原地左转(05/02)',  sub:2 },
+  { id:'tr90',    name:'原地右转(05/03)',  sub:3 },
+  { id:'abort',   name:'中止(06)',         cmd:0x06 },
+  { id:'runall',  name:'一键任务数组(0x12)', cmd:0x12 },
+  { id:'pulse',   name:'脉冲定距(03)',     cmd:0x03 },
+];
+let cur = 'chain';
+
+/* 脉冲方向表(03帧) */
+const PULSE_DIRS = [
+  ['00','前进'],['01','后退'],['02','左移'],['03','右移'],
+  ['04','左前45°'],['05','右前45°'],['06','左后45°'],['07','右后45°'],
+  ['08','原地逆时针'],['09','原地顺时针']
+];
+
+const el = id => document.getElementById(id);
+
+/* ---------------- 工具 ---------------- */
+function i32le(n) {           // int32 -> 4字节小端(hex字符串数组)
+  n = n | 0;
+  return [(n & 255), ((n >>> 8) & 255), ((n >>> 16) & 255), ((n >>> 24) & 255)];
+}
+function buildFrame(cmd, payload) {
+  const bytes = [0xAA, 0x55, cmd, ...payload];
+  let sum = cmd;
+  payload.forEach(b => sum += b);
+  bytes.push(sum & 255, 0x0D, 0x0A);
+  return bytes;
+}
+function toHex(bytes) { return bytes.map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' '); }
+function num(id) { return parseInt(el(id).value, 10); }
+const COUNTS_PER_MM = 655.36;   // 131072 / 200mm
+
+/* ---------------- 参数区渲染 ---------------- */
+function posInput(id, label, def) {
+  return `<div class="row">
+    <label>${label}(编码值)</label>
+    <input type="number" id="${id}" value="${def}">
+    <input type="number" id="${id}_mm" placeholder="或填mm" style="width:110px">
+    <span class="conv" id="${id}_c"></span>
+  </div>`;
+}
+function render() {
+  const m = MODES.find(x => x.id === cur);
+  el('modes').innerHTML = MODES.map(x =>
+    `<button class="mode-btn ${x.id===cur?'active':''}" onclick="pick('${x.id}')">${x.name}</button>`).join('');
+
+  let h = '';
+  if (cur === 'chain') {
+    h = `<div class="row"><label>45°方向</label>
+         <div class="dirsel">
+           <button class="mode-btn active" id="dir_fr" onclick="setDir(1)">右前45°(启停区一)</button>
+           <button class="mode-btn" id="dir_fl" onclick="setDir(4)">左前45°(启停区二)</button>
+         </div></div>` +
+      posInput('diag_end', '45°段末位置', 1500000) +
+      posInput('line_tgt', '直线段目标', 650000) +
+      `<div class="hint">一条帧跑完整链: 45°斜走到段末 → 直线行驶 → 距目标15cm转缓行+扫码 → 扫到码停车(等上位机下一动作帧)</div>`;
+  } else if (['line','fr45','fl45','slow'].includes(cur)) {
+    const lbl = { line:'直线目标', fr45:'45°段末位置', fl45:'45°段末位置', slow:'缓行目标' }[cur];
+    const def = { line:650000, fr45:150000, fl45:150000, slow:650000 }[cur];
+    h = posInput('p1', lbl, def) +
+        `<div class="hint">${{line:'PID直行+航向保持; 距目标15cm自动转缓行扫码',
+                              fr45:'右前45°斜走(LF+RR), 段末自动衔接已排队的直线帧',
+                              fl45:'左前45°斜走(RF+LR), 段末自动衔接已排队的直线帧',
+                              slow:'6RPM缓行+扫到二维码即进校准段; 走到目标兜底停',
+                              slow:'6RPM缓行+扫到二维码即进校准段; 走到目标兜底停'}[cur]}</div>`;
+  } else if (cur === 'home') {
+    h = `<div class="row"><label>出发启停区</label>
+         <div class="dirsel">
+           <button class="mode-btn active" id="z1" onclick="setZone(1)">启停区一(右前去程)</button>
+           <button class="mode-btn" id="z2" onclick="setZone(2)">启停区二(左前去程)</button>
+         </div></div>` +
+        posInput('p1', '右上角目标(自动按区填)', 200000) +
+        `<div class="hint">两区出发时X轮计数方向镜像: 区一右上角=200000, 区二右上角=1450000-200000=1250000(自动换算);
+         也可手动改目标值。车以直线PID回到目标, 方向自动(区一观感=倒退, 区二观感=直行)</div>`;
+  } else if (cur === 'tl90' || cur === 'tr90') {
+    h = `<div class="row"><label>转向角度(度, 1~179)</label><input type="number" id="ang" value="90"></div>
+         <div class="hint">yaw闭环原地转向, ±2°内停车</div>`;
+  } else if (cur === 'pulse') {
+    h = `<div class="row"><label>方向</label><select id="pdir">
+        ${PULSE_DIRS.map(d=>`<option value="${d[0]}">${d[0]} ${d[1]}</option>`).join('')}</select></div>
+        <div class="row"><label>脉冲数(1~1000000)</label><input type="number" id="pn" value="10000"></div>
+        <div class="hint">纯开环位置模式, 四轮同步走完自停</div>`;
+  } else if (cur === 'abort') {
+    h = `<div class="hint">任意阶段发此帧立即停车回空闲</div>`;
+  }
+  el('params').innerHTML = h;
+  el('err').textContent = '';
+  el('hexout').textContent = '— 点击"生成帧" —';
+  el('bytes').innerHTML = '';
+  ['p1','diag_end','line_tgt'].forEach(bindConv);
+}
+let legDir = 1;   // 1=右前(区一) 4=左前(区二)
+function setDir(d) {
+  legDir = d;
+  el('dir_fr').className = 'mode-btn ' + (d===1?'active':'');
+  el('dir_fl').className = 'mode-btn ' + (d===4?'active':'');
+}
+let homeZone = 1; // 1=区一 2=区二
+function setZone(z) {
+  homeZone = z;
+  el('z1').className = 'mode-btn ' + (z===1?'active':'');
+  el('z2').className = 'mode-btn ' + (z===2?'active':'');
+  el('p1').value = (z===1) ? 200000 : (1450000 - 200000);
+  el('p1_mm').value = ((z===1?200000:1250000)/COUNTS_PER_MM).toFixed(0);
+  el('p1_c').textContent = '≈ ' + ((z===1?200000:1250000)/COUNTS_PER_MM).toFixed(0) + ' mm';
+}
+function bindConv(id) {
+  const inp = el(id), mm = el(id+'_mm'), cv = el(id+'_c');
+  if (!inp) return;
+  const upd = () => {
+    const v = parseInt(inp.value, 10);
+    if (!isNaN(v)) { cv.textContent = '≈ ' + (v/COUNTS_PER_MM).toFixed(0) + ' mm';
+                     if (document.activeElement !== mm) mm.value = (v/COUNTS_PER_MM).toFixed(0); }
+    else cv.textContent = '';
+  };
+  const updRev = () => {
+    const v = parseFloat(mm.value);
+    if (!isNaN(v)) { inp.value = Math.round(v * COUNTS_PER_MM); upd(); }
+  };
+  inp.addEventListener('input', upd);
+  mm.addEventListener('input', updRev);
+  upd();
+}
+function pick(id) { cur = id; render(); }
+
+/* ---------------- 生成 ---------------- */
+let lastBytes = null;
+el('gen').onclick = () => {
+  el('err').textContent = '';
+  let cmd, payload, desc = '';
+
+  try {
+    if (cur === 'chain') {
+      cmd = 0x07;
+      const a = num('diag_end'), b = num('line_tgt');
+      if (isNaN(a) || isNaN(b)) throw '请填写两个位置值';
+      payload = [legDir, ...i32le(a), ...i32le(b)];
+      desc = `一键链: ${legDir===1?'右前':'左前'}45°到${a} → 直线到${b}`;
+    } else if (cur === 'abort') {
+      cmd = 0x06; payload = [];
+      desc = '中止一切';
+    } else if (cur === 'runall') {
+      cmd = 0x12; payload = [];
+      desc = '一键任务数组';
+    } else if (cur === 'pulse') {
+      cmd = 0x03;
+      const d = parseInt(el('pdir').value, 16), n = num('pn');
+      if (isNaN(n) || n < 1 || n > 1000000) throw '脉冲数须在 1~1000000';
+      payload = [d, ...i32le(n)];
+      desc = `脉冲 ${el('pdir').selectedOptions[0].textContent} ${n}`;
+    } else if (cur === 'tl90' || cur === 'tr90') {
+      cmd = 0x05;
+      const a = num('ang');
+      if (isNaN(a) || a < 1 || a > 179) throw '角度须在 1~179';
+      payload = [cur==='tl90'?2:3, ...i32le(a)];
+      desc = `原地${cur==='tl90'?'左':'右'}转 ${a}°`;
+    } else {  // line/fr45/fl45/slow/home: 05帧, 参数=位置
+      cmd = 0x05;
+      const m = MODES.find(x => x.id === cur);
+      const v = num('p1');
+      if (isNaN(v)) throw '请填写位置值';
+      payload = [m.sub, ...i32le(v)];
+      const zoneNote = cur==='home' ? `(${homeZone===1?'区一':'区二'}右上角)` : '';
+      desc = `${m.name}${zoneNote} 到 ${v}`;
+    }
+
+    lastBytes = buildFrame(cmd, payload);
+    el('hexout').textContent = toHex(lastBytes);
+    // 字节解释
+    const names = ['AA 帧头','55 帧头', 'CMD ' + cmd.toString(16).toUpperCase().padStart(2,'0')];
+    let expl = names.map((n,i)=>`<b>[${i}]</b>${n}`).join(' &nbsp; ');
+    let sum = cmd;
+    payload.forEach((b,i) => {
+      expl += ` &nbsp; <b>[${i+3}]</b>0x${b.toString(16).padStart(2,'0').toUpperCase()}`;
+      sum += b;
+    });
+    const si = 3 + payload.length;
+    expl += ` &nbsp; <b>[${si}]</b>SUM=0x${(sum&255).toString(16).padStart(2,'0').toUpperCase()}`;
+    expl += ` &nbsp; <b>[${si+1}][${si+2}]</b>0D 0A 帧尾`;
+    el('bytes').innerHTML = `<b>${desc}</b><br>` + expl;
+    addHist(desc, toHex(lastBytes));
+  } catch (e) {
+    el('err').textContent = '错误: ' + e;
+  }
+};
+
+el('copy').onclick = () => {
+  if (!lastBytes) return;
+  navigator.clipboard.writeText(toHex(lastBytes)).then(
+    () => { el('copyok').textContent = '已复制 ✓'; setTimeout(()=>el('copyok').textContent='',1500); },
+    () => {  // file:// 下剪贴板可能受限, 提供选中兜底
+      const r = document.createRange(); r.selectNodeContents(el('hexout'));
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el('copyok').textContent = '已全选, Ctrl+C 复制';
+    });
+};
+
+/* ---------------- 历史 ---------------- */
+let hist = [];
+function addHist(desc, hex) {
+  hist.unshift({ desc, hex });
+  if (hist.length > 20) hist.pop();
+  el('hist').innerHTML = hist.map((h,i) =>
+    `<tr><td>${h.desc}</td><td>${h.hex}</td><td><button class="mini" onclick="copyAt(${i})">复制</button></td></tr>`).join('');
+}
+function copyAt(i) {
+  navigator.clipboard.writeText(hist[i].hex).then(() => {
+    el('copyok').textContent = '已复制历史 ✓'; setTimeout(()=>el('copyok').textContent='',1500);
+  });
+}
+
+render();
+</script>
+</body>
+</html>

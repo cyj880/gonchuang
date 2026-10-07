@@ -359,28 +359,26 @@ typedef struct
 {
     uint8_t type;      /*步骤类型*/
     uint8_t dir;       /*斜走方向码 / 转弯方向(3顺4逆)*/
-    uint8_t axis;      /*闭环反馈轴: 0=纵向(里程计1) 1=横向(里程计2)*/
-    int32_t target;    /*目标pos(编码值, 可为负)*/
+    uint8_t axis;      /*闭环反馈轴: 0=纵向(里程计1, 默认) 1=横向(里程计2, 预留)*/
+    int32_t target;    /*相对步长(编码值): 正=沿当前车头前进, 负=后退; 45°斜走=斜向距离*/
 } TaskStep;
 
-/* 图二"第一批"动作序列(黄色物料) */
+/* 图二"第一批"动作序列(黄色物料) —— target=每步相对步长(正前进/负后退), 全部走里程计1 */
 static const TaskStep task_z1[] = {
-    {STEPT_LINE, 0, 1,   650000},   /*前进-启停区1-右上角45度-扫码区(Y轴闭环到扫码点)*/
-    {STEPT_LINE, 0, 1,   100000},   /*后退-右上角(Y轴倒退回停车点)*/
+    {STEPT_LINE, 0, 0,   650000},   /*前进650000: 启停区1-右上角45度-扫码区(车头朝下直行)*/
+    {STEPT_LINE, 0, 0,  -550000},   /*后退550000: 扫码区-右上角(650000-100000)*/
+    {STEPT_TURN, 3, 0,         0},  /*顺时针转90度(车头变为朝场地左)*/
+    {STEPT_LINE, 0, 0,   634000},   /*前进(估算1050mm): 到原料区横向位置——实测改*/
+    {STEPT_TURN, 4, 0,         0},  /*逆时针转90度(车头回朝场地下方)*/
+    {STEPT_LINE, 0, 0,  1253000},   /*前进(估算2075mm): 到粗加工区——实测改*/
+    {STEPT_TURN, 3, 0,         0},  /*顺时针转90度(车头朝场地左)*/
+    {STEPT_LINE, 0, 0,   300000},   /*前进(估算500mm): 到左下角/暂存区横向位——实测改*/
     {STEPT_TURN, 3, 0,         0},  /*顺时针转90度*/
-    {STEPT_LINE, 0, 0,   250000},   /*前进-原料区(X轴闭环, 估算250000)*/
-    {STEPT_TURN, 4, 0,         0},  /*逆时针转90度*/
-    {STEPT_LINE, 0, 1,  1370000},   /*前进-粗加工区(Y轴闭环, 估算1370000)*/
-    {STEPT_TURN, 3, 0,         0},  /*顺时针转90度*/
-    {STEPT_LINE, 0, 0,  1330000},   /*前进-左下角(X轴闭环, 估算)*/
-    {STEPT_TURN, 3, 0,         0},  /*顺时针转90度*/
-    {STEPT_LINE, 0, 0,   725000},   /*前进-暂存区(X轴闭环, 估算725000)*/
+    {STEPT_LINE, 0, 0,   544000},   /*前进(估算900mm): 到暂存区纵向位——实测改*/
 };
 #define TASK_Z1_N  (sizeof(task_z1) / sizeof(task_z1[0]))
 
-/* ---- 区域pos参考表(估算, 实测后修正) ----
-   启停区1零点=0  右上角=100000  扫码区=650000  原料区≈250000
-   粗加工区≈1370000  暂存区≈725000(横向)  启停区2=1450000 */
+/* ---- 各步骤步长=两测量点间距(mm)x604.17, 实测后直接改上表数值 ---- */
 
 /* ---- 原地转向闭环(05帧 sub=2左转/sub=3右转, param=角度deg) ----
    反馈: IMU_GetYaw()直读当前陀螺仪最新值(中断刷新, 滞后<=10ms)。
@@ -438,6 +436,7 @@ static float        yaw_start = 0.0f;  /*转向段起始航向*/
 static float        turn_target = 0.0f;/*转向段目标相对角*/
 static int          turn_w_last = 0;   /*转向限斜率基准*/
 static TickType_t   posrun_start = 0;  /*本步骤起始时刻*/
+static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基准)*/
 static uint8_t      line_axis = 0;     /*直线段反馈轴: 0=里程计1(vy) 1=里程计2(vx)*/
 static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
 static void task_step_done(void);
@@ -450,7 +449,11 @@ static void task_step_start(const TaskStep *st)
 
     switch (st->type)
     {
-    case STEPT_DIAG:                        /*45°斜走(带yaw保持, 段末判定|pos|>=|target|)*/
+    case STEPT_DIAG:                        /*45°斜走(带yaw保持, 段末判定走过|target|)*/
+    {
+        OdomData_t o0;
+        odometry_get(&o0);
+        diag_start = o0.enc_pos[0];        /*相对步长基准(当前计数)*/
         leg_dir = (st->dir == 5) ? 1 : (st->dir == 4) ? 2 : (st->dir == 7) ? 3 : 4;
         leg1_end = st->target;
         PID_Init(&YawPID);
@@ -460,9 +463,12 @@ static void task_step_start(const TaskStep *st)
         phase = PHASE_DIAG;
         break;
 
-    case STEPT_LINE:                        /*直线PID(axis选反馈轮/输出通道)*/
-        pos_target = st->target;
+    case STEPT_LINE:                        /*直线PID(axis选反馈轮/输出通道), target=相对步长*/
+    {
+        OdomData_t o0;
+        odometry_get(&o0);
         line_axis  = st->axis;
+        pos_target = ((line_axis == 0) ? o0.enc_pos[0] : o0.enc_pos[1]) + st->target;
         PID_Init(&PosPID);
         PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
         PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
@@ -478,8 +484,11 @@ static void task_step_start(const TaskStep *st)
         phase = PHASE_LINE;
         break;
 
-    case STEPT_SLOW:                        /*缓行+扫码(axis选反馈轮)*/
-        pos_target = st->target;
+    case STEPT_SLOW:                        /*缓行+扫码(axis选反馈轮), target=相对步长*/
+    {
+        OdomData_t o0;
+        odometry_get(&o0);
+        pos_target = ((slow_axis == 0) ? o0.enc_pos[0] : o0.enc_pos[1]) + st->target;
         slow_axis  = st->axis;
         PID_Init(&YawPID);
         YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
@@ -706,7 +715,7 @@ void MotorTask(void *pvParameters)
             else                                    /*左后45°: LF+RR反转*/
                 Motor_Move(POS_LEG1_RPM / 2, -POS_LEG1_RPM / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
 
-            if (fabsf((float)o.enc_pos[ODOM_POS_AXIS]) >= (float)leg1_end)
+            if (fabsf((float)(o.enc_pos[ODOM_POS_AXIS] - diag_start)) >= fabsf((float)leg1_end))
             {
                 if (!array_mode && leg1_next_valid)
                 {
