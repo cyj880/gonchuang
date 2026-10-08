@@ -396,6 +396,7 @@ static const TaskStep task_z1[] = {
 #define TURN_MIN_RPM        12       /* PID输出最低有效转速(RPM) */
 #define TURN_SETTLE_TICKS   8        /* 到位后连续确认次数(10ms/次) */
 #define TURN_TIMEOUT_MS     15000u   /* 转向最长运行时间, 超时自动停车(陀螺仪无效兜底) */
+#define TURN_FULL_TIMEOUT_MS 60000u  /* 相对大角度转向(180~360°)的最长运行时间 */
 #define TURN_PID_KP         0.75f    /* 误差(deg) -> RPM: 远段快速，接近目标自动减速
                                              有滞后, 增益须保守(参照直线环稳定比例) */
 #define TURN_PID_KI         0.0f     /* 关闭积分，避免停下后的反复补偿 */
@@ -453,6 +454,10 @@ static uint8_t      leg1_next_valid = 0;
 static uint8_t      leg_dir = 1;       /*斜走轮组: 1右前 2左前 3右后 4左后*/
 static float        yaw_start = 0.0f;  /*转向段起始航向*/
 static float        turn_target = 0.0f;/*转向段目标相对角*/
+static uint8_t      turn_accumulate = 0; /*相对0~360°使用连续累计角*/
+static float        turn_travel = 0.0f;
+static float        turn_yaw_last = 0.0f;
+static uint32_t     turn_timeout_ms = TURN_TIMEOUT_MS;
 static int          turn_w_last = 0;   /*转向限斜率基准*/
 static uint8_t      turn_settle_ticks = 0; /*到位停车稳定确认计数*/
 static TickType_t   posrun_start = 0;  /*本步骤起始时刻*/
@@ -572,6 +577,26 @@ static void debug_route_start(void)
     Motor_Enable(true);
 }
 
+/* 所有原地转向复用同一初始化，防止累计角/限斜率沿用上一次状态。 */
+static void turn_run_start(float start_yaw, float delta, uint8_t accumulate)
+{
+    yaw_start = turn_yaw_last = start_yaw;
+    turn_target = delta;
+    turn_accumulate = accumulate;
+    turn_travel = 0.0f;
+    turn_timeout_ms = (accumulate && fabsf(delta) >= 180.0f) ?
+                      TURN_FULL_TIMEOUT_MS : TURN_TIMEOUT_MS;
+    posrun_start = xTaskGetTickCount();
+    PID_Init(&TurnPID);
+    TurnPID.Kp = TURN_PID_KP;  TurnPID.Ki = TURN_PID_KI;  TurnPID.Kd = TURN_PID_KD;
+    TurnPID.ErrorIntMax = TURN_ERR_INT_MAX;  TurnPID.ErrorIntMin = -TURN_ERR_INT_MAX;
+    TurnPID.OutMax = TURN_OUT_MAX_RPM;  TurnPID.OutMin = -TURN_OUT_MAX_RPM;
+    turn_w_last = 0;
+    turn_settle_ticks = 0;
+    Motor_Enable(true);
+    phase = PHASE_TURN;
+}
+
 /* ---- 启动一个步骤: 按类型设置对应阶段参数并切换 phase ---- */
 static void task_step_start(const TaskStep *st)
 {
@@ -629,14 +654,7 @@ static void task_step_start(const TaskStep *st)
     }
 
     case STEPT_TURN:                        /*原地转90°(dir=3顺/-90, 4逆/+90)*/
-        yaw_start    = IMU_GetYaw();
-        turn_target  = (st->dir == 3) ? -90.0f : 90.0f;
-        PID_Init(&TurnPID);
-        TurnPID.Kp = TURN_PID_KP;  TurnPID.Ki = TURN_PID_KI;  TurnPID.Kd = TURN_PID_KD;
-        TurnPID.ErrorIntMax =  TURN_ERR_INT_MAX;  TurnPID.ErrorIntMin = -TURN_ERR_INT_MAX;
-        TurnPID.OutMax =  TURN_OUT_MAX_RPM;  TurnPID.OutMin = -TURN_OUT_MAX_RPM;
-        turn_settle_ticks = 0;
-        phase = PHASE_TURN;
+        turn_run_start(IMU_GetYaw(), (st->dir == 3) ? -90.0f : 90.0f, 0);
         break;
 
     default:
@@ -733,17 +751,7 @@ void MotorTask(void *pvParameters)
                     if (d < 1.0f)   d = 1.0f;
                     if (d > 179.0f) d = 179.0f;
                     if (!PHASE_CAN_START(phase)) break;    /*任务运行中: 忽略*/
-                    yaw_start    = IMU_GetYaw();      /*以当前航向为原点(最新值, 避开±180环绕)*/
-                    turn_target  = (c.sub == 2) ? d : -d;   /*yaw逆时针增: 左+右-*/
-                    posrun_start = xTaskGetTickCount();
-                    PID_Init(&TurnPID);
-                    TurnPID.Kp = TURN_PID_KP;  TurnPID.Ki = TURN_PID_KI;  TurnPID.Kd = TURN_PID_KD;
-                    TurnPID.ErrorIntMax =  TURN_ERR_INT_MAX;  TurnPID.ErrorIntMin = -TURN_ERR_INT_MAX;
-                    TurnPID.OutMax =  TURN_OUT_MAX_RPM;  TurnPID.OutMin = -TURN_OUT_MAX_RPM;
-                    turn_w_last = 0;                   /*限斜率基准归零*/
-                    turn_settle_ticks = 0;
-                    Motor_Enable(true);
-                    phase = PHASE_TURN;
+                    turn_run_start(IMU_GetYaw(), (c.sub == 2) ? d : -d, 0);
                 }
                 else if (c.sub == 1 || c.sub == 4)     /*45°斜走段: 1=右前 4=左前, param=段末位置*/
                 {
@@ -794,9 +802,24 @@ void MotorTask(void *pvParameters)
                 }
                 break;
 
-            case CMD_POS_ADV:                         /*08高级运动: 直线/右前45° + 目标yaw*/
+            case CMD_POS_ADV:                         /*08高级运动: 直线/斜行/原地转向*/
                 cmd_tx_ack(&c);
                 if (!PHASE_CAN_START(phase)) break;
+                if (c.sub == 2)                         /*绝对目标yaw: P=0, FLAGS=bit1*/
+                {
+                    float now_yaw = IMU_GetYaw();
+                    float target_yaw = yaw_abs360_to_signed((float)c.yaw_target);
+                    array_mode = 0;
+                    turn_run_start(now_yaw, turn_angdiff(target_yaw, now_yaw), 0);
+                    break;
+                }
+                if (c.sub == 3 || c.sub == 4)            /*相对左/右转0~360°，保持所选方向*/
+                {
+                    float delta = (float)c.param;
+                    array_mode = 0;
+                    turn_run_start(IMU_GetYaw(), (c.sub == 3) ? delta : -delta, 1);
+                    break;
+                }
                 if (c.sub == 1)
                 {
                     array_mode = 0;
@@ -972,11 +995,27 @@ void MotorTask(void *pvParameters)
         {
             float rel_now, err, aerr;
 
-            rel_now = turn_angdiff(IMU_GetYaw(), yaw_start);  /*当前相对起点角(-180,180]*/
-            err  = turn_angdiff(turn_target - rel_now, 0.0f);  /*剩余角差, 全程归一无跳变*/
+            if (turn_accumulate)
+            {
+                float current_yaw = IMU_GetYaw();
+                turn_travel += turn_angdiff(current_yaw, turn_yaw_last);
+                turn_yaw_last = current_yaw;
+                rel_now = turn_travel;
+                err = turn_target - rel_now;          /*270/360°不能折算成最短角差*/
+            }
+            else
+            {
+                rel_now = turn_angdiff(IMU_GetYaw(), yaw_start);
+                err = turn_angdiff(turn_target - rel_now, 0.0f);
+            }
             aerr = fabsf(err);
 
-            if (aerr <= (float)TURN_TOL_DEG)
+            if ((xTaskGetTickCount() - posrun_start) >= pdMS_TO_TICKS(turn_timeout_ms))
+            {
+                turn_w_last = 0;
+                pos_run_abort();                     /*所有转向区间均适用超时停车*/
+            }
+            else if (aerr <= (float)TURN_TOL_DEG)
             {
                 turn_w_last = 0;
                 if (turn_settle_ticks == 0)
@@ -1007,13 +1046,6 @@ void MotorTask(void *pvParameters)
             }
             else
             {
-                if ((xTaskGetTickCount() - posrun_start) > pdMS_TO_TICKS(TURN_TIMEOUT_MS))
-                {
-                    phase = PHASE_IDLE;                      /*超时保护: 陀螺仪无效或被卡住*/
-                    turn_w_last = 0;
-                    Motor_Stop();
-                }
-                else
                 {
                     int w_raw;
                     turn_settle_ticks = 0;

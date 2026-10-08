@@ -79,8 +79,8 @@ const MODES = [
   { id:'fl45',    name:'左前45°(05/04)',   sub:4 },
   { id:'slow',    name:'缓行扫码(05/05)',  sub:5 },
   { id:'home',    name:'回右上角(05/07)',  sub:7 },
-  { id:'tl90',    name:'原地左转(05/02)',  sub:2 },
-  { id:'tr90',    name:'原地右转(05/03)',  sub:3 },
+  { id:'tl90',    name:'原地左转/目标yaw', sub:2 },
+  { id:'tr90',    name:'原地右转/目标yaw', sub:3 },
   { id:'abort',   name:'中止(06)',         cmd:0x06 },
   { id:'runall',  name:'一键任务数组(0x12)', cmd:0x12 },
   { id:'pulse',   name:'脉冲定距(0x10)',     cmd:0x10 },
@@ -171,8 +171,12 @@ function render() {
         `<div class="hint">两区出发时X轮计数方向镜像: 区一右上角=200000, 区二右上角=1450000-200000=1250000(自动换算);
          也可手动改目标值。车以直线PID回到目标, 方向自动(区一观感=倒退, 区二观感=直行)</div>`;
   } else if (cur === 'tl90' || cur === 'tr90') {
-    h = `<div class="row"><label>转向角度(度, 1~179)</label><input type="number" id="ang" value="90"></div>
-         <div class="hint">yaw闭环原地转向, ±2°内停车</div>`;
+    h = `<div class="row"><label>角度模式</label><select id="turnMode" onchange="toggleTurnMode()">
+           <option value="abs">绝对目标 yaw（0~360°）</option>
+           <option value="rel">相对转角（0~360°）</option>
+         </select></div>
+         <div class="row"><label id="turnAngleLabel">目标偏航角(0~360°)</label><input type="number" id="ang" value="90" min="0" max="360" step="1"></div>
+         <div class="hint" id="turnHint">输入90°表示转到陀螺仪绝对90°；STM32按最短方向转动，360°与0°为同一朝向，±2°内停车。相对模式才使用左转/右转方向。</div>`;
   } else if (cur === 'pulse') {
     h = `<div class="row"><label>方向</label><select id="pdir">
         ${PULSE_DIRS.map(d=>`<option value="${d[0]}">${d[0]} ${d[1]}</option>`).join('')}</select></div>
@@ -205,6 +209,19 @@ function setZone(z) {
 function toggleYaw() {
   const row = el('yawRow');
   if (row) row.style.display = el('yawMode').value === 'target' ? 'flex' : 'none';
+}
+function toggleTurnMode() {
+  const abs = el('turnMode').value === 'abs';
+  const label = el('turnAngleLabel');
+  const input = el('ang');
+  const hint = el('turnHint');
+  if (!label || !input || !hint) return;
+  label.textContent = abs ? '目标偏航角(0~360°)' : '相对转角(0~360°)';
+  input.min = '0';
+  input.max = '360';
+  hint.textContent = abs ?
+    '输入90°表示转到陀螺仪绝对90°；STM32按最短方向转动，360°与0°为同一朝向，±2°内停车。相对模式才使用左转/右转方向。' :
+    '从当前车头向左或向右转指定角度，范围0~360°；0°保持当前位置，360°按所选方向完整转一圈。';
 }
 function bindConv(id) {
   const inp = el(id), mm = el(id+'_mm'), cv = el(id+'_c');
@@ -251,11 +268,20 @@ el('gen').onclick = () => {
       payload = [d, ...i32le(n)];
       desc = `脉冲 ${el('pdir').selectedOptions[0].textContent} ${n}`;
     } else if (cur === 'tl90' || cur === 'tr90') {
-      cmd = 0x05;
-      const a = num('ang');
-      if (isNaN(a) || a < 1 || a > 179) throw '角度须在 1~179';
-      payload = [cur==='tl90'?2:3, ...i32le(a)];
-      desc = `原地${cur==='tl90'?'左':'右'}转 ${a}°`;
+      const text = el('ang').value.trim();
+      const a = Number(text);
+      if (text === '' || !Number.isInteger(a)) throw '角度须为整数';
+      if (el('turnMode').value === 'abs') {
+        if (a < 0 || a > 360) throw '目标偏航角须在 0~360°';
+        cmd = 0x08;
+        payload = [2, 2, 0, 0, 0, 0, ...i16le(a)];
+        desc = `原地转到绝对yaw ${a}°`;
+      } else {
+        if (a < 0 || a > 360) throw '相对转角须在 0~360°';
+        cmd = 0x08;
+        payload = [cur==='tl90'?3:4, 0, ...i32le(a), 0, 0];
+        desc = `原地${cur==='tl90'?'左':'右'}转 ${a}°（相对）`;
+      }
     } else if (cur === 'line' || cur === 'fr45') {
       cmd = 0x08;
       const diagonal = cur === 'fr45';
