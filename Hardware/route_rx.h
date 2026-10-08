@@ -119,6 +119,7 @@ uint8_t cmd_get(ZbeeCmd *c);                     /* 取走一条新命令，1=�
 void cmd_last(ZbeeCmd *c, uint8_t *cnt);         /* LCD 只读最后命令 */
 void cmd_tx_ack(const ZbeeCmd *c);               /* 按原命令字+载荷回应答帧(任务上下文) */
 uint8_t route_debug_take(uint8_t batch);          /* 原子检查并消费本批启动资格 */
+uint8_t route_debug_branch(uint8_t batch);        /* 0=无已标定分支, 1=回右上角, 2=去中心点复合流程 */
 
 typedef struct
 {

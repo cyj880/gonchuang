@@ -470,10 +470,12 @@ static uint8_t      line_axis = 0;     /*直线段反馈轴: 0=里程计1(vy) 1=
 static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
 static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
 static uint8_t      debug_route_step = 0;   /*1=到右上角45度, 2=到扫码区*/
+static uint8_t      debug_route_branch = 0; /*0=未知停止, 1=回右上角, 2=去中心点复合*/
 static uint8_t      debug_pause_active = 0;
-static uint8_t      debug_pause_next = 0;   /*2=鸣叫后启动直线, 0=鸣叫后结束*/
+static uint8_t      debug_pause_next = 0;   /*2=扫码, 3=分支直线, 0=结束*/
 static TickType_t   debug_pause_until = 0;
 static void task_step_done(void);
+static void turn_run_start(float start_yaw, float delta, uint8_t accumulate);
 
 typedef enum { POS_RUNNING, POS_REACHED, POS_FAILED } PosRunState;
 
@@ -513,6 +515,7 @@ static void pos_run_abort(void)
     array_mode = 0;
     debug_route_active = 0;
     debug_route_step = 0;
+    debug_route_branch = 0;
     if (debug_pause_active) Buzzer_Off();
     debug_pause_active = 0;
     debug_pause_next = 0;
@@ -538,16 +541,16 @@ static void diag_run_start(uint8_t direction, int32_t distance, float heading)
     phase = PHASE_DIAG;
 }
 
-static void debug_point_pause_start(uint8_t next_step)
+static void debug_point_pause_start(uint8_t next_step, uint32_t duration_ms)
 {
     Motor_Stop();
     Buzzer_On();
     debug_pause_active = 1;
     debug_pause_next = next_step;
-    debug_pause_until = xTaskGetTickCount() + pdMS_TO_TICKS(500);
+    debug_pause_until = xTaskGetTickCount() + pdMS_TO_TICKS(duration_ms);
 }
 
-static void debug_line_start(void)
+static void debug_line_start(int32_t value, uint8_t relative, float heading)
 {
     OdomData_t o;
     int32_t current;
@@ -555,9 +558,9 @@ static void debug_line_start(void)
     odometry_get(&o);
     line_axis = ODOM_POS_AXIS;
     current = o.enc_pos[line_axis];
-    pos_target = current + 520000;                  /*右上角45度→扫码区: 相对累加*/
+    pos_target = relative ? current + value : value;
     pos_run_start(current);
-    yaw_hold = yaw_abs360_to_signed(0.0f);          /*目标LCD yaw=0°*/
+    yaw_hold = yaw_abs360_to_signed(heading);
     PID_Init(&PosPID);
     PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
     PosPID.ErrorIntMax = POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
@@ -569,10 +572,17 @@ static void debug_line_start(void)
     phase = PHASE_LINE;
 }
 
-static void debug_route_start(void)
+static void debug_turn_start(float target_yaw)
+{
+    float now_yaw = IMU_GetYaw();
+    turn_run_start(now_yaw, turn_angdiff(yaw_abs360_to_signed(target_yaw), now_yaw), 0);
+}
+
+static void debug_route_start(uint8_t branch)
 {
     debug_route_active = 1;
     debug_route_step = 1;
+    debug_route_branch = branch;
     diag_run_start(1, 100000, yaw_abs360_to_signed(0.0f)); /*启停区1→右上角45度*/
     Motor_Enable(true);
 }
@@ -870,7 +880,7 @@ void MotorTask(void *pvParameters)
                     break;                         /*未完整上传/非批次1: 只确认收帧, 保持停车*/
                 array_mode = 0;
                 leg1_next_valid = 0;
-                debug_route_start();
+                debug_route_start(route_debug_branch(1));
                 break;
 
             case CMD_CHAIN:                        /*一键任务链: dir=1右前/4左前
@@ -889,6 +899,7 @@ void MotorTask(void *pvParameters)
                 array_mode = 0;
                 debug_route_active = 0;
                 debug_route_step = 0;
+                debug_route_branch = 0;
                 if (debug_pause_active) Buzzer_Off();
                 debug_pause_active = 0;
                 debug_pause_next = 0;
@@ -915,13 +926,23 @@ void MotorTask(void *pvParameters)
                 {
                     debug_pause_next = 0;
                     debug_route_step = 2;
-                    debug_line_start();
+                    debug_line_start(520000, 1, 0.0f);       /*右上角45度→扫码区*/
+                }
+                else if (debug_pause_next == 3)
+                {
+                    debug_pause_next = 0;
+                    debug_route_step = 3;
+                    if (debug_route_branch == 1)
+                        debug_line_start(100000, 0, 0.0f);   /*扫码区→右上角*/
+                    else
+                        debug_line_start(700000, 0, 0.0f);   /*扫码区→中心复合流程校准位置*/
                 }
                 else
                 {
                     debug_pause_next = 0;
                     debug_route_active = 0;
                     debug_route_step = 0;
+                    debug_route_branch = 0;
                     phase = PHASE_DONE;
                 }
             }
@@ -972,7 +993,7 @@ void MotorTask(void *pvParameters)
                 {
                     if (debug_route_active && debug_route_step == 1)
                     {
-                        debug_point_pause_start(2);
+                        debug_point_pause_start(2, 500);       /*右上角45度*/
                     }
                     else
                     {
@@ -1023,7 +1044,16 @@ void MotorTask(void *pvParameters)
                 if (++turn_settle_ticks >= TURN_SETTLE_TICKS)
                 {
                     turn_settle_ticks = 0;
-                    task_step_done();                  /*稳定到位: 推进步骤*/
+                    if (debug_route_active && debug_route_step == 4)
+                    {
+                        Motor_Stop();
+                        debug_route_step = 5;
+                        debug_line_start(500000, 1, 90.0f);    /*中心复合流程: yaw90下相对前进*/
+                    }
+                    else
+                    {
+                        task_step_done();                  /*稳定到位: 推进步骤*/
+                    }
                 }
             }
             else if (aerr <= (float)TURN_CREEP_DEG)
@@ -1126,7 +1156,27 @@ void MotorTask(void *pvParameters)
             {
                 if (debug_route_active && debug_route_step == 2)
                 {
-                    debug_point_pause_start(0);        /*扫码区: 鸣叫后结束*/
+                    if (debug_route_branch == 0)
+                        debug_point_pause_start(0, 3000);      /*未知后续路段: 停车报警3秒*/
+                    else
+                        debug_point_pause_start(3, 500);       /*已知分支: 到扫码区短暂停留*/
+                }
+                else if (debug_route_active && debug_route_step == 3)
+                {
+                    if (debug_route_branch == 2)
+                    {
+                        Motor_Stop();
+                        debug_route_step = 4;
+                        debug_turn_start(90.0f);               /*中心复合流程: 绝对yaw90*/
+                    }
+                    else
+                    {
+                        debug_point_pause_start(0, 500);       /*右上角: 已知目标完成*/
+                    }
+                }
+                else if (debug_route_active && debug_route_step == 5)
+                {
+                    debug_point_pause_start(0, 500);           /*中心点: 已知目标完成*/
                 }
                 else
                 {

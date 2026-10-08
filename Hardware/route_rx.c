@@ -34,12 +34,27 @@
 #define CMD_POS_ABORT 0x06
 #define CMD_POS_ADV   0x08
 #define CMD_DEBUG_RUN 0x13
+#define ROUTE_DEBUG_SEG_MAX 32u
 #define FRAME_TAIL1   0x0D
 #define FRAME_TAIL2   0x0A
 
 static RouteFrame g_route[2];
 static volatile uint8_t route_upload_action[2];
 static volatile uint8_t route_upload_segment[2];
+typedef struct
+{
+    uint8_t action;
+    uint8_t cmd;
+    uint8_t count;
+    uint16_t x[ROUTE_MAX_PT];
+    uint16_t y[ROUTE_MAX_PT];
+} DebugRouteSegment;
+static DebugRouteSegment debug_segments[2][ROUTE_DEBUG_SEG_MAX];
+static volatile uint8_t debug_segment_count[2];
+static volatile uint8_t route_upload_active[2];
+static volatile uint8_t pending_action_valid;
+static volatile uint8_t pending_action_batch;
+static volatile uint8_t pending_action_code;
 
 /* ---- UART7 帧级发送互斥 ----
    cmd_tx_ack(MotorTask) 与 route_tx_uplink(LCD_Task) 跨任务共用 UART7,
@@ -317,12 +332,35 @@ void route_rx_byte(uint8_t ch)
             {
                 g_route[rx_batch - 1].ready = 1;                 /*帧尾校验通过, 正式提交*/
                 route_upload_segment[rx_batch - 1] = 1;
+                if (pending_action_valid && pending_action_batch == rx_batch &&
+                    debug_segment_count[rx_batch - 1] < ROUTE_DEBUG_SEG_MAX)
+                {
+                    DebugRouteSegment *s = &debug_segments[rx_batch - 1][debug_segment_count[rx_batch - 1]++];
+                    uint8_t i;
+                    s->action = pending_action_code;
+                    s->cmd = rx_cmd;
+                    s->count = rx_cnt;
+                    for (i = 0; i < rx_cnt; i++)
+                    {
+                        s->x[i] = (uint16_t)rx_buf[4 * i] | ((uint16_t)rx_buf[4 * i + 1] << 8);
+                        s->y[i] = (uint16_t)rx_buf[4 * i + 2] | ((uint16_t)rx_buf[4 * i + 3] << 8);
+                    }
+                }
+                pending_action_valid = 0;
                 echo_push_frame(rx_frame_buf, rx_frame_len);     /*整帧原样入回传FIFO, LCD_Task排空发回网页*/
             }
             else if (rx_cmd == CMD_ACTION)
             {
                 g_act_code = rx_act;                             /*路线上传只记录动作，不提交运动命令*/
                 g_act_new = 1;
+                if (!route_upload_active[rx_batch - 1])
+                {
+                    route_upload_active[rx_batch - 1] = 1;
+                    debug_segment_count[rx_batch - 1] = 0;
+                }
+                pending_action_valid = 1;
+                pending_action_batch = rx_batch;
+                pending_action_code = rx_act;
                 route_upload_action[rx_batch - 1] = 1;
                 route_upload_segment[rx_batch - 1] = 0;
                 echo_push_frame(rx_frame_buf, rx_frame_len);     /*动作帧也原样回传网页*/
@@ -416,9 +454,53 @@ uint8_t route_debug_take(uint8_t batch)
     {
         route_upload_action[batch - 1] = 0;
         route_upload_segment[batch - 1] = 0;
+        route_upload_active[batch - 1] = 0;
     }
     taskEXIT_CRITICAL();
     return ready;
+}
+
+static uint8_t route_near(uint16_t a, uint16_t b, uint16_t tol)
+{
+    return (a > b) ? (uint8_t)(a - b <= tol) : (uint8_t)(b - a <= tol);
+}
+
+static uint8_t route_is_qr(uint16_t x, uint16_t y)
+{
+    return (uint8_t)(route_near(x, 2000, 80) && route_near(y, 1200, 180));
+}
+
+static uint8_t route_is_ru(uint16_t x, uint16_t y)
+{
+    return (uint8_t)(route_near(x, 2000, 80) && route_near(y, 1900, 80));
+}
+
+static uint8_t route_is_center(uint16_t x, uint16_t y)
+{
+    return (uint8_t)(route_near(x, 1200, 80) && route_near(y, 1200, 180));
+}
+
+uint8_t route_debug_branch(uint8_t batch)
+{
+    uint8_t i, j;
+    uint8_t branch = 0;
+    if (batch < 1 || batch > 2) return 0;
+    taskENTER_CRITICAL();
+    for (i = 0; i < debug_segment_count[batch - 1]; i++)
+    {
+        DebugRouteSegment *s = &debug_segments[batch - 1][i];
+        for (j = 1; j < s->count; j++)
+        {
+            if (route_is_qr(s->x[j - 1], s->y[j - 1]) &&
+                route_is_center(s->x[j], s->y[j]))
+                branch = 2;
+            else if (!branch && route_is_qr(s->x[j - 1], s->y[j - 1]) &&
+                     route_is_ru(s->x[j], s->y[j]))
+                branch = 1;
+        }
+    }
+    taskEXIT_CRITICAL();
+    return branch;
 }
 
 /* ================= 坐标回传：按命令字 02 帧经 UART7(ZigBee) 发回网页 =================
