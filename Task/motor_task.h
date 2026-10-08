@@ -79,5 +79,6 @@ void Motor_Enable(bool state);
 /* FreeRTOS 任务入口 */
 void MotorTask(void *pvParameters);
 uint8_t Motor_NoNext(void);             /*未知下一段时返回1，供LCD显示no next*/
+int32_t Motor_RoutePos(int32_t encoder_pos); /*原始编码值换算为最近路线的累计pos*/
 
 #endif

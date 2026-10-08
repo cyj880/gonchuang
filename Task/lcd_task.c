@@ -87,6 +87,8 @@ static void lcd_draw_odom(void)
     LCD_Printf(0, 76, LCD_6X8, "yaw %-6d", (int)IMU_GetYawAbs360());   /*0~360, 零点=上电/按PB2*/
 
     lcd_odom_cam_line();            /*MaixCam 坐标*/
+    LCD_SetColor(LCD_WHITE);
+    LCD_Printf(0, 110, LCD_6X8, "pos:%-11ld", (long)Motor_RoutePos(o.enc_pos[ODOM_POS_AXIS]));
 }
 
 /* 100ms 数值行刷新：等宽字体，格式左对齐补空格，覆盖上一次的旧数字 */
@@ -107,6 +109,8 @@ static void lcd_update_odom(void)
     lcd_odom_cmd_line();
     LCD_Printf(0, 76, LCD_6X8, "yaw %-6d", (int)IMU_GetYawAbs360());   /*0~360, 零点=上电/按PB2*/
     lcd_odom_cam_line();            /*MaixCam 坐标*/
+    LCD_SetColor(LCD_WHITE);
+    LCD_Printf(0, 110, LCD_6X8, "pos:%-11ld", (long)Motor_RoutePos(o.enc_pos[ODOM_POS_AXIS]));
 }
 
 /* ================= 任务主体: 只显示 ODOM 主页面 ================= */

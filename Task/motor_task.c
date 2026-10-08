@@ -473,6 +473,7 @@ static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
 static uint8_t      debug_route_step = 0;   /*1斜行/2扫码/3校准或回右上/4内部转向/5中心/6路线转向*/
 static uint16_t     debug_route_heading = 0; /*已完成动作的目标yaw，限定0/90/180/270*/
 static uint16_t     debug_goal_heading = 0;
+static volatile int32_t debug_pos_offset = 0; /*路线任务写，LCD读：路线pos=原始pos+偏移*/
 static RouteDebugLeg debug_route_leg;
 static uint8_t      debug_rule_index = 0;
 static uint8_t      debug_motion_index = 0;
@@ -593,7 +594,7 @@ static void debug_line_start(int32_t value, uint8_t relative, float heading)
     odometry_get(&o);
     line_axis = ODOM_POS_AXIS;
     current = o.enc_pos[line_axis];
-    pos_target = relative ? current + value : value;
+    pos_target = relative ? current + value : value - debug_pos_offset;
     pos_run_start(current);
     yaw_hold = yaw_abs360_to_signed(heading);
     PID_Init(&PosPID);
@@ -764,14 +765,30 @@ static void debug_motion_done(void)
 
 static void debug_route_start(void)
 {
+    OdomData_t o;
+    uint8_t have_leg;
     debug_route_active = 1;
-    debug_route_heading = 0;                         /*启停区1出发朝向对应LCD yaw=0*/
+    debug_route_heading = 0;                         /*两启停区车头均朝下，出发yaw=0*/
+    debug_pos_offset = 0;
     no_next_alarm = 0;
     Motor_Enable(true);
-    if (debug_leg_load())
+    have_leg = debug_leg_load();
+    if (debug_point_at(debug_route_leg.from_x, debug_route_leg.from_y) == RP_START2)
+    {
+        odometry_get(&o);
+        debug_pos_offset = 1450000 - o.enc_pos[ODOM_POS_AXIS];
+    }
+    if (have_leg)
+    {
         debug_leg_start();
+    }
     else
         debug_no_next_start();
+}
+
+int32_t Motor_RoutePos(int32_t encoder_pos)
+{
+    return encoder_pos + debug_pos_offset;
 }
 
 /* 所有原地转向复用同一初始化，防止累计角/限斜率沿用上一次状态。 */

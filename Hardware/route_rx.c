@@ -344,7 +344,8 @@ void route_rx_byte(uint8_t ch)
                     uint16_t first_x = (uint16_t)rx_buf[0] | ((uint16_t)rx_buf[1] << 8);
                     uint16_t first_y = (uint16_t)rx_buf[2] | ((uint16_t)rx_buf[3] << 8);
                     /*批次1从启停区重新上传时替换旧记录，不能把两次路线拼接。*/
-                    if (rx_batch == 1 && first_x == 2200 && first_y == 2200)
+                    if (rx_batch == 1 && first_x == 2200 &&
+                        (first_y == 2200 || first_y == 200))
                     {
                         debug_segment_count[0] = 0;
                         debug_upload_error[0] = 0;
