@@ -33,10 +33,13 @@
 #define CMD_POS_GO    0x05
 #define CMD_POS_ABORT 0x06
 #define CMD_POS_ADV   0x08
+#define CMD_DEBUG_RUN 0x13
 #define FRAME_TAIL1   0x0D
 #define FRAME_TAIL2   0x0A
 
 static RouteFrame g_route[2];
+static volatile uint8_t route_upload_action[2];
+static volatile uint8_t route_upload_segment[2];
 
 /* ---- UART7 帧级发送互斥 ----
    cmd_tx_ack(MotorTask) 与 route_tx_uplink(LCD_Task) 跨任务共用 UART7,
@@ -133,6 +136,7 @@ void route_rx_byte(uint8_t ch)
         else if (ch == CMD_POS_GO) { rx_p_idx = 0; rx_p_len = 5; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_ADV) { rx_p_idx = 0; rx_p_len = 8; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_ABORT || ch == CMD_RUNALL) rx_state = RX_SUM;   /*无载荷, 累加和=命令字本身*/
+        else if (ch == CMD_DEBUG_RUN) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_CHAIN)  { rx_p_idx = 0; rx_p_len = 9; rx_state = RX_P_DATA; }
         else                       rx_state = RX_H1;
         break;
@@ -173,9 +177,11 @@ void route_rx_byte(uint8_t ch)
             if (rx_cmd == CMD_PULSE)       bmax = PULSE_DIR_CW;   /*方向码 0~9*/
             else if (rx_cmd == CMD_POS_GO) bmax = 7;              /*子命令 0=直线 1=右前45° 2=左转 3=右转 4=左前45° 5=缓行扫码 6=二维码校准 7=回右上角*/
             else if (rx_cmd == CMD_POS_ADV) bmax = 1;              /*0=直线, 1=右前45°*/
+            else if (rx_cmd == CMD_DEBUG_RUN) bmax = 2;            /*启动批次1/2，当前仅实现批次1*/
             else if (rx_cmd == CMD_CHAIN)  bmax = 4;              /*方向: 仅1=右前 4=左前合法(见下)*/
             else { rx_state = RX_H1; break; }
             if (rx_cmd == CMD_CHAIN && ch != 1 && ch != 4) { rx_state = RX_H1; break; }
+            if (rx_cmd == CMD_DEBUG_RUN && ch < 1) { rx_state = RX_H1; break; }
             if (ch > bmax) { rx_state = RX_H1; break; }
             rx_p_dir = ch;                 /*复用: 03存方向, 05存子命令*/
         }
@@ -196,7 +202,8 @@ void route_rx_byte(uint8_t ch)
         if ((uint8_t)rx_sum_calc == ch)
         {
             if (rx_cmd == CMD_PULSE || rx_cmd == CMD_POS_GO || rx_cmd == CMD_POS_ADV ||
-                rx_cmd == CMD_CHAIN || rx_cmd == CMD_POS_ABORT || rx_cmd == CMD_RUNALL)
+                rx_cmd == CMD_CHAIN || rx_cmd == CMD_POS_ABORT || rx_cmd == CMD_RUNALL ||
+                rx_cmd == CMD_DEBUG_RUN)
             {
                 /* 位置命令在帧尾通过后再提交（见 RX_T2） */
                 rx_state = RX_T1;
@@ -307,16 +314,25 @@ void route_rx_byte(uint8_t ch)
             else if (rx_cmd == CMD_ROUTE || rx_cmd == CMD_ROUTE45)
             {
                 g_route[rx_batch - 1].ready = 1;                 /*帧尾校验通过, 正式提交*/
+                route_upload_segment[rx_batch - 1] = 1;
                 echo_push_frame(rx_frame_buf, rx_frame_len);     /*整帧原样入回传FIFO, LCD_Task排空发回网页*/
             }
             else if (rx_cmd == CMD_ACTION)
             {
-                g_cmd.type   = CMD_ACTION;                       /*提交进命令槽: MotorTask 取到才执行*/
-                g_cmd.dir    = rx_act;                           /*动作码 1前进/2后退/3顺/4逆*/
+                g_act_code = rx_act;                             /*路线上传只记录动作，不提交运动命令*/
+                g_act_new = 1;
+                route_upload_action[rx_batch - 1] = 1;
+                route_upload_segment[rx_batch - 1] = 0;
+                echo_push_frame(rx_frame_buf, rx_frame_len);     /*动作帧也原样回传网页*/
+            }
+            else if (rx_cmd == CMD_DEBUG_RUN)
+            {
+                g_cmd.type   = CMD_DEBUG_RUN;
+                g_cmd.param  = rx_p_dir;                         /*批次号*/
                 g_cmd.sub    = 0;
+                g_cmd.flags  = 0;
                 if (g_cmd.cnt < 255) g_cmd.cnt++;
                 g_cmd.ready  = 1;
-                echo_push_frame(rx_frame_buf, rx_frame_len);     /*动作帧也原样回传网页*/
             }
             else if (rx_cmd == CMD_RUNALL)
             {
@@ -387,6 +403,21 @@ void route_echo_flush(void)
 uint8_t   route_ready(uint8_t batch)         { return g_route[batch - 1].ready; }
 void      route_clear_ready(uint8_t batch)   { g_route[batch - 1].ready = 0; }
 RouteFrame* route_get(uint8_t batch)         { return &g_route[batch - 1]; }
+
+uint8_t route_debug_take(uint8_t batch)
+{
+    uint8_t ready;
+    if (batch < 1 || batch > 2) return 0;
+    taskENTER_CRITICAL();
+    ready = (uint8_t)(route_upload_action[batch - 1] && route_upload_segment[batch - 1]);
+    if (ready)
+    {
+        route_upload_action[batch - 1] = 0;
+        route_upload_segment[batch - 1] = 0;
+    }
+    taskEXIT_CRITICAL();
+    return ready;
+}
 
 /* ================= 坐标回传：按命令字 02 帧经 UART7(ZigBee) 发回网页 =================
    帧结构与下发帧同构（AA 55 | 02 | BATCH | N | 坐标小端 | SUM | 0D 0A），
@@ -516,6 +547,10 @@ void cmd_tx_ack(const ZbeeCmd *c)
     case CMD_POS_ABORT:
     case CMD_RUNALL:
         plen = 0;                    /*06中止/12连跑帧无载荷*/
+        break;
+    case CMD_DEBUG_RUN:
+        pl[0] = (uint8_t)(p & 0xFF); /*13=启动调试路线, 载荷为批次*/
+        plen = 1;
         break;
     default:
         return;

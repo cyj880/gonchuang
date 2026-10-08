@@ -1,0 +1,1789 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智能搬运赛场地图 · 批次路线规划 · ZigBee串口</title>
+<style>
+  :root{
+    --bg:#eef1f5; --panel:#fff; --line:#d8dce4; --txt:#1f2329;
+    --pri:#2f6fed; --pri-dark:#1e56c8; --muted:#6b7280;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;}
+  body{
+    font:14px/1.55 "Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+    background:var(--bg);color:var(--txt);
+    display:flex;flex-direction:column;overflow:hidden;
+  }
+  header{
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+    padding:8px 14px;background:#1c2b3a;color:#fff;flex:none;
+  }
+  header h1{font-size:15px;font-weight:600;margin-right:6px;white-space:nowrap;}
+  header .sub{font-size:11px;color:#9fb3c8;margin-right:auto;white-space:nowrap;}
+  .mode-btn{
+    border:1px solid #40566e;background:#26384c;color:#dce6f0;
+    padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;
+  }
+  .mode-btn:hover{background:#31485f;}
+  .mode-btn.active{background:var(--pri);border-color:var(--pri);color:#fff;}
+  header label{font-size:12px;color:#c8d4e0;display:flex;align-items:center;gap:3px;cursor:pointer;white-space:nowrap;}
+  .sep{width:1px;height:20px;background:#40566e;margin:0 2px;}
+  main{flex:1;display:flex;min-height:0;}
+  #canvasWrap{flex:1;position:relative;min-width:0;background:#e5e8ee;}
+  #map{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;}
+  #map.mode-nogo{cursor:crosshair;}
+  #map.panning{cursor:grabbing;}
+  aside{
+    width:380px;flex:none;background:var(--panel);border-left:1px solid var(--line);
+    overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:10px;
+  }
+  aside section{border:1px solid var(--line);border-radius:8px;padding:10px 11px;background:#fff;}
+  aside h2{font-size:13px;margin-bottom:8px;display:flex;align-items:center;gap:6px;}
+  aside h2 .cnt{font-size:11px;color:var(--muted);font-weight:normal;margin-left:auto;}
+  .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px;}
+  .row:last-child{margin-bottom:0;}
+  .btn{
+    border:1px solid var(--line);background:#f6f7f9;color:var(--txt);
+    padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12.5px;white-space:nowrap;
+  }
+  .btn:hover{background:#eceef2;}
+  .btn:disabled{opacity:.45;cursor:not-allowed;}
+  .btn.primary{background:var(--pri);border-color:var(--pri);color:#fff;}
+  .btn.primary:hover{background:var(--pri-dark);}
+  .btn.warn{background:#c98a00;border-color:#c98a00;color:#fff;}
+  .btn.warn:hover{background:#a87400;}
+  .btn.green{background:#189048;border-color:#189048;color:#fff;}
+  .btn.green:hover{background:#107038;}
+  .btn.danger{color:#d33;}
+  .btn.mini{padding:2px 8px;font-size:11.5px;}
+  .btn.active{background:var(--pri);border-color:var(--pri);color:#fff;}
+  select,input[type=text]{
+    border:1px solid var(--line);border-radius:6px;padding:4px 7px;font-size:12.5px;background:#fff;color:var(--txt);
+  }
+  input[type=text]{flex:1;min-width:0;}
+  input[type=range]{flex:1;min-width:0;accent-color:var(--pri);}
+  label.chk{font-size:12px;display:flex;align-items:center;gap:3px;cursor:pointer;white-space:nowrap;}
+  .param{display:flex;align-items:center;gap:8px;font-size:12.5px;margin-bottom:7px;}
+  .param .name{width:76px;flex:none;color:#444;}
+  .param .val{width:44px;flex:none;text-align:right;font-variant-numeric:tabular-nums;color:var(--pri-dark);}
+  .stat{font-size:12px;color:var(--muted);}
+  .stat b{color:var(--txt);}
+  ul.list{list-style:none;max-height:132px;overflow-y:auto;font-size:12.5px;}
+  ul.list li{
+    display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:5px;
+  }
+  ul.list li:nth-child(odd){background:#f6f7f9;}
+  ul.list .idx{color:var(--muted);width:26px;flex:none;}
+  ul.list .coord{flex:1;font-variant-numeric:tabular-nums;}
+  ul.list .del{border:none;background:none;color:#d33;cursor:pointer;font-size:12px;padding:1px 5px;border-radius:4px;}
+  ul.list .del:hover{background:#fdeaea;}
+  ul.list .empty{color:var(--muted);justify-content:center;padding:6px;}
+  .log{
+    height:150px;overflow-y:auto;background:#0f172a;color:#c9d6e8;
+    font:11.5px/1.6 Consolas,"Courier New",monospace;padding:6px 8px;border-radius:6px;
+    white-space:pre-wrap;word-break:break-all;
+  }
+  .log .rx{color:#7ee787;}
+  .log .tx{color:#79b8ff;}
+  .log .sys{color:#f0b429;}
+  #routeInfo{
+    font:11.5px/1.7 Consolas,"Courier New",monospace;background:#f6f8fb;
+    border:1px solid var(--line);border-radius:6px;padding:6px 8px;
+    max-height:190px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;
+  }
+  footer{
+    flex:none;display:flex;gap:18px;align-items:center;
+    padding:4px 14px;background:#1c2b3a;color:#9fb3c8;font-size:12px;
+  }
+  footer .coord{font-variant-numeric:tabular-nums;}
+  footer .right{margin-left:auto;}
+  footer .ok{color:#7ee787;}
+  .hint{font-size:11.5px;color:var(--muted);margin-top:5px;}
+  .radio-grp{display:flex;gap:0;border:1px solid var(--line);border-radius:6px;overflow:hidden;}
+  .radio-grp button{border:none;border-right:1px solid var(--line);background:#f6f7f9;padding:5px 14px;cursor:pointer;font-size:12.5px;}
+  .radio-grp button:last-child{border-right:none;}
+  .radio-grp button.on{background:var(--pri);color:#fff;}
+  @media (max-width:920px){
+    main{flex-direction:column;}
+    aside{width:auto;max-height:46vh;border-left:none;border-top:1px solid var(--line);}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🚚 智能搬运赛场地图</h1>
+  <span class="sub">2027第十届工创赛·智能搬运 ｜ 规划算法对齐 STM32 触摸屏版 ｜ 单位mm</span>
+  <button class="mode-btn active" data-mode="pan">✋ 平移/选择</button>
+  <button class="mode-btn" data-mode="nogo">🚫 禁行涂格</button>
+  <span class="sep"></span>
+  <label><input type="checkbox" id="chkGrid"> 网格</label>
+  <label><input type="checkbox" id="chkAxis" checked> 坐标轴</label>
+  <label><input type="checkbox" id="chkDim" checked> 标注</label>
+  <button class="mode-btn" id="btnFit">⤢ 复位视图</button>
+</header>
+
+<main>
+  <div id="canvasWrap"><canvas id="map"></canvas></div>
+  <aside>
+
+    <section>
+      <h2>🏁 任务批次路线（对齐 STM32）</h2>
+      <div class="row">
+        <span style="font-size:12.5px;">出发启停区</span>
+        <div class="radio-grp">
+          <button id="selStart1" class="on">启停区1</button>
+          <button id="selStart2">启停区2</button>
+        </div>
+      </div>
+      <div class="row">
+        <button class="btn warn" id="btnBatch1">规划第一批（黄）</button>
+        <button class="btn green" id="btnBatch2">规划第二批（绿）</button>
+        <button class="btn" id="btnClearRoute">清除</button>
+      </div>
+      <div class="row">
+        <button class="btn mini warn" id="btnSendB1">📡 发第一批坐标</button>
+        <button class="btn mini green" id="btnSendB2">📡 发第二批坐标</button>
+        <button class="btn mini" id="btnSendBoth">两批连发</button>
+        <button class="btn mini warn" id="btnDebugStart1" disabled title="先发送第一批并等待STM32回传完成">▶ 调试一键启动（批次1）</button>
+      </div>
+      <div class="param"><span class="name">车体包络</span><input type="range" id="pRadius" min="30" max="200" step="10" value="50"><span class="val" id="pRadiusV">50</span></div>
+      <div id="routeInfo">尚未规划。第一批：启停区→扫码区→原料区→粗加工区→暂存区
+第二批：暂存区→原料区→粗加工区→暂存区→回启停区（经右上角/右下角斜插，不经过45°点）</div>
+      <div class="row" style="margin-top:6px;">
+        <button class="btn mini" id="btnAnim">▶ 路线演示</button>
+        <button class="btn mini" id="btnAnimReset">↺ 复位</button>
+        <span style="font-size:12px;">速度</span>
+        <input type="range" id="pSpeed" min="100" max="1200" step="50" value="400" style="flex:1;">
+        <span class="stat" id="pSpeedV">400</span><span class="stat">mm/s</span>
+      </div>
+      <div class="hint">规划方式：在<strong>标准点位图</strong>（启停区1/2、右上角45度、右上角、扫码区、右下角45度、右下角、中心点、原料区、粗加工区、左上角、左下角、暂存区，共 13 点）上跑最短路，发送给 STM32 的关键点坐标<strong>全部取自车端点位表</strong>，同名点每次发送相同坐标。涂禁行格会把对应通道封死，路线自动绕行；通道全被封时报 NO PATH。车体包络=车体外接圆+安全余量，按实车调整（默认 50mm）。</div>
+      <div class="hint">🚦 45°点硬规则：45°点为<b>单向边（只允许 启停区→45°点）</b>，且<b>仅出现在第一批出发段</b>，此后任何段不再经过；<b>第二批全程不出现右上角45度/右下角45度</b>。回程（用户指定，固定）：启停区1 经 左上角→右上角→斜插回区；启停区2 经 <strong>左下角→右下角</strong>→斜插回区。</div>
+      <div class="hint">✂️ 直线途经点自动精简：关键点=任务站点+实际拐点。站点之间同一直线上的非任务点（如 左上角→右上角 直线上的 原料区、暂存区→扫码区 直线上的 中心点）不列为关键点、不发给车端；45°点永不剔除。</div>
+      <div class="hint">📡 帧协议（二进制，115200-8N1，蓝牙/ZigBee 透传）：<b>AA 55</b> | CMD | 批次(1/2) | [点数N | 坐标…mm,小端] | SUM | <b>0D 0A</b>，SUM=中间字节累加和低8位。CMD：<b>04</b>=动作指令帧；<b>01</b>=直角段坐标帧；<b>03</b>=含45°斜走的段坐标帧；<b>13</b>=调试一键启动帧。路线上传完成并收到STM32全部回传后，才可点击调试启动；启动帧为 <code>AA 55 13 01 14 0D 0A</code>。</div>
+      <div class="hint">📥 回传：车端把收到的每一帧（01/03 段帧、04 动作帧）<b>原样发回</b>，右上回传板按收到顺序显示指令词与坐标；收满发送帧数自动标“回传完成”并删除该批路线任务。
+    </section>
+
+    <section>
+      <h2>📍 现场标定 <span class="cnt">原料区/二维码板 随机 1100~1300</span></h2>
+      <div class="param"><span class="name">原料区X</span><input type="number" id="fieldRawX" min="1100" max="1300" step="10" value="1200"><span class="val">mm</span></div>
+      <div class="param"><span class="name">二维码板Y</span><input type="number" id="fieldQrY" min="1100" max="1300" step="10" value="1200"><span class="val">mm</span></div>
+      <div class="hint">现场量一眼实际位置填入（1100~1300，默认 1200=范围正中），地图与两批路线自动重算；重新“发送”即按新坐标执行。原料区偏离中线时路线自动经 北道口(1200,500) 保持直角。</div>
+    </section>
+
+    <section>
+      <h2>🚫 禁行区（含障碍标记） <span class="cnt" id="nogoCnt">0 格</span></h2>
+      <div class="row">
+        <button class="btn mini" id="btnNogoMode">🚫 涂格（工具栏也可开）</button>
+        <button class="btn mini" id="btnGridCycle">网格 24 列</button>
+        <button class="btn mini danger" id="btnNogoClear">清除禁行</button>
+      </div>
+      <div class="hint">按当前网格涂格；同一格再按一次确认删除（防误触）。比赛障碍（φ50×100 黑圆柱）直接涂它所在的格——碰撞检查与之前的障碍物功能完全一致；也可标记现场临时封路，与 STM32 禁行模式对应。</div>
+    </section>
+
+    <section>
+      <h2>📡 串口 / ZigBee</h2>
+      <div class="row">
+        <select id="baud">
+          <option>9600</option><option>19200</option><option>38400</option>
+          <option>57600</option><option selected>115200</option><option>230400</option>
+        </select>
+        <button class="btn primary" id="btnSerial">🔌 连接串口</button>
+        <button class="btn" id="btnSerialOff">断开</button>
+      </div>
+      <div class="stat" id="serialStat">未连接</div>
+      <div class="row" style="margin-top:6px;">
+        <input type="text" id="sendText" placeholder="要发送的内容">
+        <button class="btn" id="btnSend">发送</button>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="sendHex"> HEX发送</label>
+        <label class="chk"><input type="checkbox" id="sendCRLF" checked> 加\r\n</label>
+        <label class="chk"><input type="checkbox" id="recvHex"> HEX显示</label>
+        <label class="chk"><input type="checkbox" id="autoScroll" checked> 自动滚动</label>
+        <button class="btn mini" id="btnClearLog">清空</button>
+      </div>
+      <div class="log" id="log"><div class="sys">[系统] 串口日志就绪。ZigBee 模块请经 USB 转 TTL 接入电脑。</div></div>
+      <div class="hint">需 Chrome / Edge 浏览器（Web Serial API）。收发协议确定后在此扩展。</div>
+    </section>
+
+    <section>
+      <h2>💾 配置</h2>
+      <div class="row">
+        <button class="btn" id="btnExport">导出 JSON</button>
+        <button class="btn" id="btnImport">导入 JSON</button>
+        <input type="file" id="fileImport" accept=".json" style="display:none;">
+      </div>
+      <div class="hint">障碍、禁行格、规划参数会自动保存在浏览器本地。</div>
+    </section>
+
+  </aside>
+</main>
+
+<footer>
+  <span id="modeHint"></span>
+  <span class="coord" id="coordHint"></span>
+  <span class="right" id="footSerial">串口：未连接</span>
+</footer>
+
+<script>
+'use strict';
+/* =========================================================
+ * 智能搬运赛场地图 · 批次路线规划 · ZigBee串口
+ * 场地标定与规划算法 1:1 对齐 STM32 map_editor.c（触摸屏版）
+ * 场地坐标系：左上角为原点，单位 mm，2400×2400
+ * ========================================================= */
+
+/* ================= 场地常量（STM32 标定值） ================= */
+const FIELD = 2400;
+const TURNTABLE = {x:1200, y:100, r:200};   // 转盘圆心与占位半径(含裕量)
+// 禁行矩形：淡黄区×4 + 二维码识别带 + 暂存区平台 + 粗加工区平台
+const YELLOWS = [
+  {x0:550,  y0:550,  x1:1000, y1:1000},
+  {x0:1400, y0:550,  x1:1850, y1:1000},
+  {x0:550,  y0:1400, x1:1000, y1:1850},
+  {x0:1400, y0:1400, x1:1850, y1:1850},
+];
+const START_ZONES = [
+  {x0:2100, y0:0,    x1:2400, y1:300,  name:'启停区1'},
+  {x0:2100, y0:2100, x1:2400, y1:2400, name:'启停区2'},
+];
+const QR_BAND = {x0:2280, y0:1100, x1:2400, y1:1300};   // 二维码识别带
+const STORAGE_RECT = {x0:0,    y0:910,  x1:150,  y1:1490}; // 暂存区平台
+const ROUGH_RECT   = {x0:910,  y0:2250, x1:1490, y1:2400}; // 粗加工区平台
+// 固定任务站位（STM32 同款）
+const STATION = {
+  start1:{x:2200, y:200},  start2:{x:2200, y:2200},
+  qr:{x:2000, y:1200},     raw:{x:1200, y:500},
+  rough:{x:1200, y:2000},  storage:{x:400, y:1200},
+};
+const RAW_APPROACH_Y = 500;   // 转盘正前方唯一取料站位
+// 外圈阈值
+const OUTER_MIN = 550, OUTER_MAX = 1850;
+// 圆环编号：暂存区自下而上1/2/3；粗加工区自右向左1/2/3（与图3一致）
+const STORAGE_RINGS = [{x:75,y:1350,n:1},{x:75,y:1200,n:2},{x:75,y:1050,n:3}];
+const ROUGH_RINGS   = [{x:1350,y:2325,n:1},{x:1200,y:2325,n:2},{x:1050,y:2325,n:3}];
+// 转盘上的 3 个物料位（120° 分布，分布半径 100）
+const DISC_ANGLES = [90,210,330];               // 物料位角度(随现场标定联动)
+const DISC_HOLES = DISC_ANGLES.map(a=>({
+  x: TURNTABLE.x + 100*Math.cos(a*Math.PI/180),
+  y: TURNTABLE.y + 100*Math.sin(a*Math.PI/180),
+}));
+
+/* ===== 现场标定：原料区/二维码板随机位置联动（1100~1300，默认1200=范围正中） =====
+   输入现场实际位置 -> 点位/地图/路线自动联动; 偏离中线时连线按坐标直达(微斜为用户许可例外,无辅助拐点) */
+function applyField(){
+  const fx=state.field.rawX, fy=2400-state.field.qrY;   /* 输入/发送=左下原点Y向上；内部绘制=Y向下，此处换算 */
+  for(const n of NODES){
+    if(n.key==='raw') n.x=fx;             /* 取料站位 X 跟随转盘中心 */
+    if(n.key==='qr')  n.y=fy;             /* 扫码站位 Y 跟随二维码板(内部Y) */
+  }
+  STATION.raw.x = fx;
+  STATION.qr.y  = fy;
+  TURNTABLE.x   = fx;                     /* 转盘画到实际位置 */
+  QR_BAND.y0    = fy-100;                 /* 二维码识别带随板移动(高200) */
+  QR_BAND.y1    = fy+100;
+  DISC_HOLES.forEach((h,i)=>{             /* 物料位随转盘 */
+    const a=DISC_ANGLES[i]*Math.PI/180;
+    h.x = TURNTABLE.x + 100*Math.cos(a);
+    h.y = TURNTABLE.y + 100*Math.sin(a);
+  });
+}
+
+/* ================= 全局状态 ================= */
+const state = {
+  nogo: new Uint8Array(24*24),  // 禁行格 100mm（24×24），兼作障碍标记
+  gridIdx: 3,               // 网格档 0..3 → 12/16/20/24 列
+  gridColsPreset: [12,16,20,24],
+  routeStart: 1,            // 启停区 1/2
+  routes: {b1:null, b2:null},   // {cells:[], handoff, info}
+  currentBatch: 0,          // 演示/结果显示对象 1/2
+  mode: 'pan',
+  anim: {on:false, t:0, last:0},
+  params: { radius:50, speed:400 },
+  paramDirty: {radius:false, speed:false},   // 用户手动调过的参数才存档
+  rxBoards: {1:null, 2:null},   // STM32 回传累计 {seq:[按序 指令/坐标], frames, lastTime, done}
+  txFrames: {1:0, 2:0},         // 每批已发送帧数（回传完成判定）
+  debugStartSent: {1:false, 2:false},
+  txEndHeading: {},             // 每批发送后的结束朝向（0上1右2下3左，下一批承接）
+  field: {rawX:1200, qrY:1200}, // 现场标定：原料区中心X / 二维码板中心Y（1100~1300随机，默认1200=正中）
+  showGrid:false, showAxis:true, showDim:true,
+  nogoPending: -1,          // 待确认删除的禁行格（防误触）
+  nogoPendingTick: 0,
+};
+
+/* ================= DOM ================= */
+const $ = id => document.getElementById(id);
+const canvas = $('map'), ctx = canvas.getContext('2d');
+const wrap = $('canvasWrap');
+
+/* ================= 视图变换 ================= */
+const WORLD = {x0:-180, y0:-180, x1:2660, y1:2720};
+const view = {scale:0.3, ox:WORLD.x0, oy:WORLD.y0};
+const X = wx => (wx-view.ox)*view.scale;
+const Y = wy => (wy-view.oy)*view.scale;
+const L = wl => wl*view.scale;
+const S2WX = px => view.ox + px/view.scale;
+const S2WY = py => view.oy + py/view.scale;
+function fitView(){
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  if(cw<50||ch<50){ requestAnimationFrame(fitView); return; }   // 后台标签页尺寸为0时延迟重试
+  const sx = cw/(WORLD.x1-WORLD.x0), sy = ch/(WORLD.y1-WORLD.y0);
+  view.scale = Math.min(sx,sy);
+  view.ox = WORLD.x0 + ((WORLD.x1-WORLD.x0) - cw/view.scale)/2;
+  view.oy = WORLD.y0 + ((WORLD.y1-WORLD.y0) - ch/view.scale)/2;
+}
+
+/* ================= 绘制辅助 ================= */
+function setDash(mmPattern){ ctx.setLineDash(mmPattern.map(v=>Math.max(1,L(v)))); }
+function tag(wx,wy,text,opt={}){
+  const size = opt.size||12, rot = opt.rotate||0;
+  const fg = opt.fg||'#111', bg = opt.bg!==undefined?opt.bg:'rgba(255,255,255,.9)';
+  ctx.save();
+  ctx.translate(X(wx),Y(wy)); ctx.rotate(rot);
+  ctx.font = `bold ${size}px "Microsoft YaHei",sans-serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  const w = ctx.measureText(text).width;
+  if(bg){ ctx.fillStyle=bg; ctx.fillRect(-w/2-4,-size/2-2,w+8,size+4); }
+  ctx.fillStyle=fg; ctx.fillText(text,0,0);
+  ctx.restore();
+}
+function dimLine(x1,y1,x2,y2,text){
+  const dx=x2-x1, dy=y2-y1, len=Math.hypot(dx,dy);
+  if(len<1) return;
+  const ux=dx/len, uy=dy/len, px=-uy, py=ux;
+  ctx.strokeStyle='#3b5bdb'; ctx.fillStyle='#3b5bdb'; ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(X(x1),Y(y1)); ctx.lineTo(X(x2),Y(y2));
+  ctx.moveTo(X(x1),Y(y1)); ctx.lineTo(X(x1)-ux*5+px*2.5, Y(y1)-uy*5+py*2.5);
+  ctx.moveTo(X(x1),Y(y1)); ctx.lineTo(X(x1)-ux*5-px*2.5, Y(y1)-uy*5-py*2.5);
+  ctx.moveTo(X(x2),Y(y2)); ctx.lineTo(X(x2)+ux*5+px*2.5, Y(y2)+uy*5+py*2.5);
+  ctx.moveTo(X(x2),Y(y2)); ctx.lineTo(X(x2)+ux*5-px*2.5, Y(y2)+uy*5-py*2.5);
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(X((x1+x2)/2),Y((y1+y2)/2)); ctx.rotate(Math.atan2(dy,dx));
+  ctx.font='10px "Microsoft YaHei",sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  const w=ctx.measureText(text).width;
+  ctx.fillStyle='rgba(238,241,245,.85)'; ctx.fillRect(-w/2-2,-6,w+4,12);
+  ctx.fillStyle='#3b5bdb'; ctx.fillText(text,0,0);
+  ctx.restore();
+}
+
+/* ================= 占用模型（碰撞用） ================= */
+// 静态禁行矩形 + 禁行格（含涂格标记的障碍），每次规划前重建
+let occRects = [];
+function buildOccupy(){
+  occRects = [...YELLOWS, QR_BAND, STORAGE_RECT, ROUGH_RECT];
+  for(let i=0;i<576;i++){
+    if(!state.nogo[i]) continue;
+    occRects.push({x0:(i%24)*100, y0:(i/24|0)*100, x1:(i%24)*100+100, y1:(i/24|0)*100+100});
+  }
+}
+
+/* ================= 规划核心（复刻 map_editor.c 940–1390 行） ================= */
+const PATH_STEP = 50;
+const PATH_COLS = 48, PATH_ROWS = 48, GRID_CELLS = 48*48;
+const OPEN = 0x10, PATH_NONE_C = 0xFFFF, PREV_START = 4;
+const DIR_DELTA = [-48, 48, -1, 1];   // 0=上 1=下 2=左 3=右（线性索引差）
+const links = new Uint8Array(GRID_CELLS);
+
+function nodeXY(cell){ return {x:(cell%PATH_COLS+1)*PATH_STEP, y:((cell/PATH_COLS|0)+1)*PATH_STEP}; }
+function nodeAt(x,y){
+  if(x<PATH_STEP||y<PATH_STEP||x>=FIELD||y>=FIELD||x%PATH_STEP||y%PATH_STEP) return -1;
+  return (y/PATH_STEP-1)*PATH_COLS + x/PATH_STEP-1;
+}
+// 整段直线的车体包络检查 → 统一用 losClear（横平竖直是任意角度的特例）
+function buildGraph(){
+  links.fill(0);
+  for(let i=0;i<GRID_CELLS;i++){
+    const p=nodeXY(i);
+    if(losClear(p.x,p.y,p.x,p.y)) links[i]=OPEN;
+  }
+  for(let i=0;i<GRID_CELLS;i++){
+    if(!(links[i]&OPEN)) continue;
+    if(i%PATH_COLS+1<PATH_COLS && (links[i+1]&OPEN)){
+      const a=nodeXY(i), b=nodeXY(i+1);
+      if(losClear(a.x,a.y,b.x,b.y)){ links[i]|=8; links[i+1]|=4; }
+    }
+    if(i+PATH_COLS<GRID_CELLS && (links[i+PATH_COLS]&OPEN)){
+      const a=nodeXY(i), b=nodeXY(i+PATH_COLS);
+      if(losClear(a.x,a.y,b.x,b.y)){ links[i]|=2; links[i+PATH_COLS]|=1; }
+    }
+  }
+}
+function cellPassable(i){ return i>=0 && i<GRID_CELLS && (links[i]&OPEN)!==0; }
+function neighbor(cell,dir){
+  if(cell<0||dir>3||!(links[cell]&(1<<dir))) return -1;
+  return cell+DIR_DELTA[dir];
+}
+/* ---------- 任意角度直线可见性(毫米,带车体包络) ---------- */
+function distPtSeg(px,py, ax,ay, bx,by){
+  const dx=bx-ax, dy=by-ay, L2=dx*dx+dy*dy;
+  let t=L2? ((px-ax)*dx+(py-ay)*dy)/L2 : 0;
+  t=Math.max(0,Math.min(1,t));
+  const qx=ax+t*dx, qy=ay+t*dy;
+  return Math.hypot(px-qx,py-qy);
+}
+function cross(ax,ay,bx,by,px,py){ return (bx-ax)*(py-ay)-(by-ay)*(px-ax); }
+function distSegSeg(ax,ay,bx,by, cx,cy,dx,dy){
+  const d1=cross(cx,cy,dx,dy,ax,ay), d2=cross(cx,cy,dx,dy,bx,by);
+  const d3=cross(ax,ay,bx,by,cx,cy), d4=cross(ax,ay,bx,by,dx,dy);
+  if(((d1>0&&d2<0)||(d1<0&&d2>0)) && ((d3>0&&d4<0)||(d3<0&&d4>0))) return 0;
+  return Math.min(
+    distPtSeg(ax,ay,cx,cy,dx,dy), distPtSeg(bx,by,cx,cy,dx,dy),
+    distPtSeg(cx,cy,ax,ay,bx,by), distPtSeg(dx,dy,ax,ay,bx,by));
+}
+// 线段(x0,y0)-(x1,y1) 与占用模型的车体包络检查(允许任意角度)
+function losClear(x0,y0,x1,y1){
+  const R=state.params.radius;
+  if(Math.min(x0,x1)<R||Math.min(y0,y1)<R||Math.max(x0,x1)>FIELD-R||Math.max(y0,y1)>FIELD-R) return false;
+  const dx=x1-x0, dy=y1-y0, len=Math.hypot(dx,dy);
+  // 转盘:圆心到线段距离
+  let dTurbo;
+  if(len<1){ dTurbo=Math.hypot(TURNTABLE.x-x0,TURNTABLE.y-y0); }
+  else{
+    let t=((TURNTABLE.x-x0)*dx+(TURNTABLE.y-y0)*dy)/(len*len);
+    t=Math.max(0,Math.min(1,t));
+    dTurbo=Math.hypot(TURNTABLE.x-(x0+t*dx), TURNTABLE.y-(y0+t*dy));
+  }
+  if(dTurbo<TURNTABLE.r+R) return false;
+  // 禁行矩形:线段与 4 边的距离;端点在矩形内直接判撞
+  for(const r of occRects){
+    if(x0>=r.x0&&x0<=r.x1&&y0>=r.y0&&y0<=r.y1) return false;
+    if(x1>=r.x0&&x1<=r.x1&&y1>=r.y0&&y1<=r.y1) return false;
+    const d=Math.min(
+      distSegSeg(x0,y0,x1,y1, r.x0,r.y0,r.x1,r.y0),
+      distSegSeg(x0,y0,x1,y1, r.x1,r.y0,r.x1,r.y1),
+      distSegSeg(x0,y0,x1,y1, r.x1,r.y1,r.x0,r.y1),
+      distSegSeg(x0,y0,x1,y1, r.x0,r.y1,r.x0,r.y0));
+    if(d<R) return false;
+  }
+  return true;
+}
+
+/* ================= 标准点位图（车端点位表，发送值全部取自这里） =================
+   车端只认这些固定点位，同名点每次发送相同坐标；
+   路线 = 点位图上的最短路（Dijkstra），边=横平竖直通道（losClear 检查禁行格）。
+   中心相关通道带 150mm 惩罚：无障碍时自动走外圈（右上角/左上角/左下角），
+   外圈被障碍/禁行格封死时自动落到中心点通道（中心点不可删）。 */
+const NODES = [
+  {key:'start1',    name:'启停区1',      x:2200, y:200},
+  {key:'diagRU',    name:'右上角45度',   x:2000, y:400},
+  {key:'cornerRU',  name:'右上角',       x:2000, y:500},
+  {key:'qr',        name:'扫码区',       x:2000, y:1200},
+  {key:'diagRD',    name:'右下角45度',   x:2000, y:2000},
+  {key:'cornerRD',  name:'右下角',       x:2000, y:1900},
+  {key:'start2',    name:'启停区2',      x:2200, y:2200},
+  {key:'center',    name:'中心点',       x:1200, y:1200},
+  {key:'raw',       name:'原料区',       x:1200, y:500},
+  {key:'rough',     name:'粗加工区',     x:1200, y:2000},
+  {key:'cornerLU',  name:'左上角',       x:400,  y:500},
+  {key:'cornerLD',  name:'左下角',       x:400,  y:2000},
+  {key:'storage',   name:'暂存区',       x:400,  y:1200},
+];
+const NODE_IX = {}; NODES.forEach((n,i)=>NODE_IX[n.key]=i);
+/* 固定通道边（13 个标准点位；pen=中心通道惩罚300：尽量走外圈，中心只在明显更近或外圈被封时用）
+   斜线清单（用户确认，完整规则见 HANDOVER.md"★ 规则总表"）：
+   ①出发段 启停区→45°点（单向，只在第一批出发段走，之后不得再经过）；
+   ②回程末段斜插 右上角→启停区1 / 右下角→启停区2（单向，仅回程方向）；
+   ③底部 左下角→右下角（y 2000→1900，3.6°近水平——用户指定：启停区2回程固定走底部，恒定保留勿再删除）；
+   ④现场标定偏离中线时的微小斜线（原料区↔粗加工区约2°等）——不设辅助拐点，按站点坐标直达，
+     STM32 端自行按坐标行驶（用户 2026-10-02 明确"这算是例外"）。
+   除以上外其余一律直角；点位恒 13 个，不得增删 */
+const EDGES = [
+  {a:'start1',   b:'diagRU', oneWay:1},  // 启停区1→右上角45度:45° 斜走约 400mm,单向(只出不进)
+  {a:'cornerRU', b:'start1', oneWay:1},  // 右上角→启停区1:斜插回停区(仅回程方向,出发必须走45°点)
+  {a:'diagRU',   b:'cornerRU'},          // 竖 100
+  {a:'cornerRU', b:'qr'},                // 竖 700
+  {a:'cornerRU', b:'raw'},               // 横 800 (y=500)
+  {a:'qr',       b:'center',  pen:300},  // 中心横道(标定偏离时微斜, 例外见下④)
+  {a:'center',   b:'raw',     pen:300},  // 中心纵道北段(标定偏离时微斜, 例外见下④)
+  {a:'raw',      b:'rough'},             // 中心纵道, 原料→粗(任务必需中线; 标定偏离时约2°微斜, 例外见下④)
+  {a:'center',   b:'rough',    pen:300}, // 竖 800
+  {a:'center',   b:'storage', pen:300}, // 横 800
+  {a:'rough',    b:'cornerLD'},          // 横 800 (y=2000)
+  {a:'cornerLD', b:'cornerRD'},          // 底部边 1603 (y 2000→1900):用户指定固定走法,启停区2回程(规则总表第3/4条)
+  {a:'cornerLD', b:'storage'},           // 竖 800 (x=400)
+  {a:'storage',  b:'cornerLU'},          // 竖 700 (x=400)
+  {a:'cornerLU', b:'raw'},               // 横 800 (y=500)
+  {a:'cornerLU', b:'diagRU'},            // 横 1600 (顶部,暂→启停1 外圈)
+  {a:'start2',   b:'diagRD', oneWay:1},  // 启停区2→右下角45度:45° 斜走约 400mm,单向(只出不进)
+  {a:'cornerRD', b:'start2', oneWay:1},  // 右下角→启停区2:斜插回停区(仅回程方向)
+  {a:'diagRD',   b:'cornerRD'},          // 竖 100
+  {a:'cornerRD', b:'qr'},                // 竖 700
+  {a:'start1',   b:'start2'},            // 竖 2000 (启停区1↔2 直连)
+  {a:'cornerLD', b:'diagRD'},            // 横 1600 (底部 y=2000 外圈)
+];
+
+/* 图上 Dijkstra（方向感知）：返回 {nodes:[节点下标...], len} 或 null(通道被封)
+   excludeKeys: 需从图中剔除的点位 key（单个或数组），用于按段禁用 45° 点
+   代价 = 距离 + 0.5mm×转弯数：总长相同的路径自动选转弯更少的
+   （如 启停区1 回程顶部被封时，走 暂存区→扫码区→右上角 比经 中心点→原料区 少转一次弯） */
+const TURN_EPS = 0.5;
+function edgeDirId(A,B){ const dx=B.x-A.x, dy=B.y-A.y; return Math.abs(dy)>=Math.abs(dx)?(dy>=0?0:1):(dx>=0?3:2); } // 0上1下2左3右
+function graphRoute(fromKey,toKey,excludeKeys){
+  buildOccupy();
+  const N=NODES.length;
+  const adj=Array.from({length:N},()=>[]);
+  EDGES.forEach(E=>{
+    const ai=NODE_IX[E.a], bi=NODE_IX[E.b];
+    const A=NODES[ai], B=NODES[bi];
+    if(!losClear(A.x,A.y,B.x,B.y)) return;              // 通道被禁行格/障碍封死
+    const w=Math.hypot(B.x-A.x, B.y-A.y)+(E.pen||0);
+    adj[ai].push({v:bi, w, d:edgeDirId(A,B)});
+    if(!E.oneWay) adj[bi].push({v:ai, w, d:edgeDirId(B,A)});   // oneWay:45°边只允许 启停区→45°点
+  });
+  const S=N*4;                                          // 状态=节点×4到达方向(0上1下2左3右)
+  const dist2=new Array(S).fill(Infinity), prev=new Int32Array(S).fill(-1), done=new Array(S).fill(false);
+  const s=NODE_IX[fromKey], g=NODE_IX[toKey];
+  const exArr = excludeKeys==null ? [] : (Array.isArray(excludeKeys)?excludeKeys:[excludeKeys]);
+  const skips = exArr.map(k=>NODE_IX[k]).filter(ix=>ix!==undefined);
+  for(let d=0;d<4;d++) dist2[s*4+d]=0;                  // 起点不计转弯
+  for(;;){
+    let u=-1, best=Infinity;
+    for(let i=0;i<S;i++) if(!skips.includes(i>>2)&&!done[i]&&dist2[i]<best){ best=dist2[i]; u=i; }
+    if(u<0||(u>>2)===g) break;
+    done[u]=true;
+    for(const {v,w,d} of adj[u>>2]){
+      if(skips.includes(v)) continue;
+      const ns=v*4+d;
+      if(done[ns]) continue;
+      const cand=dist2[u]+w+(d!==(u&3)?TURN_EPS:0);
+      if(cand<dist2[ns]-1e-9){ dist2[ns]=cand; prev[ns]=u; }
+    }
+  }
+  let bestSt=-1, bestC=Infinity;
+  for(let d=0;d<4;d++) if(dist2[g*4+d]<bestC){ bestC=dist2[g*4+d]; bestSt=g*4+d; }
+  if(bestSt<0) return null;
+  const path=[]; let cur=bestSt;
+  while(cur>=0){ const n=cur>>2; if(!path.length||path[0]!==n) path.unshift(n); cur=prev[cur]; }
+  let len=0;
+  for(let i=1;i<path.length;i++) len+=Math.hypot(NODES[path[i]].x-NODES[path[i-1]].x, NODES[path[i]].y-NODES[path[i-1]].y);
+  return {nodes:path, len};
+}
+function inArea(cell,area){
+  if(area===0) return true;
+  const p=nodeXY(cell);
+  if(p.x>=OUTER_MAX||p.y<=OUTER_MIN) return true;              // 右/上外圈
+  return area===2 && (p.x<=OUTER_MIN||p.y>=OUTER_MAX);         // 加左/下外圈
+}
+const bfsDist = new Int32Array(GRID_CELLS);
+const bfsTo   = new Int32Array(GRID_CELLS);
+const bfsQueue = new Int32Array(GRID_CELLS);
+function bfsDistance(source,dist,area){
+  dist.fill(-1);
+  if(!cellPassable(source)) return 0;
+  if(!inArea(source,area)) return 0;
+  dist[source]=0;
+  let head=0,tail=0; bfsQueue[tail++]=source;
+  while(head<tail){
+    const cur=bfsQueue[head++];
+    for(let dir=0;dir<4;dir++){
+      const nb=neighbor(cur,dir);
+      if(nb>=0 && dist[nb]<0 && cellPassable(nb) && inArea(nb,area)){ dist[nb]=dist[cur]+1; bfsQueue[tail++]=nb; }
+    }
+  }
+  return tail;
+}
+// 预算内精确选最少转弯路径，同转弯数取距离短的（分层 DP）
+const pathTurns = new Int32Array(GRID_CELLS*4*10);
+const pathPrev  = new Uint8Array(GRID_CELLS*4*10);
+function pathSearch(from,to,area,extraSteps){
+  if(!cellPassable(from)||!cellPassable(to)) return null;
+  if(!inArea(from,area)||!inArea(to,area)) return null;
+  if(from===to) return {cells:[from]};
+  if(extraSteps>8) return null;
+  if(!bfsDistance(to,bfsTo,area)) return null;
+  const count=bfsDistance(from,bfsDist,area);   // bfsQueue 保留按起点距离递增的顺序
+  const shortest=bfsDist[to];
+  if(!count||shortest<0) return null;
+  const limit=shortest+extraSteps;
+  const levels=(extraSteps>>1)+1;
+  const STATES=GRID_CELLS*4;
+  const N=STATES*levels;
+  pathTurns.fill(PATH_NONE_C,0,N);
+  pathPrev.fill(0xFF,0,N);
+  for(let dir=0;dir<4;dir++){
+    const nb=neighbor(from,dir);
+    if(nb<0||bfsDist[nb]!==1||bfsTo[nb]<0||1+bfsTo[nb]>limit) continue;
+    const st=nb*4+dir;               // level 0
+    pathTurns[st]=0; pathPrev[st]=PREV_START;
+  }
+  for(let level=0;level<levels;level++){
+    for(let i=0;i<count;i++){
+      const cur=bfsQueue[i];
+      const walk=bfsDist[cur]+2*level;
+      if(bfsTo[cur]<0||walk+bfsTo[cur]>limit) continue;
+      for(let dir=0;dir<4;dir++){
+        const st=level*STATES+cur*4+dir;
+        if(pathTurns[st]===PATH_NONE_C) continue;
+        for(let nd=0;nd<4;nd++){
+          const nb=neighbor(cur,nd);
+          if(nb<0||bfsDist[nb]<0||bfsTo[nb]<0||walk+1+bfsTo[nb]>limit) continue;
+          const nLevel=level+(bfsDist[nb]<bfsDist[cur]);
+          if(nLevel>=levels) continue;
+          const nst=nLevel*STATES+nb*4+nd;
+          const cand=pathTurns[st]+(dir!==nd);
+          if(cand<pathTurns[nst]){ pathTurns[nst]=cand; pathPrev[nst]=dir; }
+        }
+      }
+    }
+  }
+  let best=PATH_NONE_C, bestSt=-1;
+  for(let level=0;level<levels;level++){       // 层小者优先：同转弯自然更短
+    for(let dir=0;dir<4;dir++){
+      const st=level*STATES+to*4+dir;
+      if(pathTurns[st]<best){ best=pathTurns[st]; bestSt=st; }
+    }
+  }
+  if(bestSt<0) return null;
+  const rev=[]; let st=bestSt;
+  for(;;){
+    const level=(st/STATES)|0, cur=((st%STATES)/4)|0, dir=st%4;
+    rev.push(cur);
+    const pd=pathPrev[st];
+    if(pd===PREV_START) break;
+    if(pd>=4) return null;
+    const nb=neighbor(cur,dir^1);
+    if(nb<0) return null;
+    let lv=level;
+    if(bfsDist[nb]>bfsDist[cur]){ if(lv===0) return null; lv--; }
+    st=lv*STATES+nb*4+pd;
+    if(rev.length>GRID_CELLS+16) return null;
+  }
+  rev.push(from);
+  rev.reverse();
+  return {cells:rev};
+}
+function segmentTurns(cells){
+  let turns=0;
+  for(let i=2;i<cells.length;i++){
+    const s1=cells[i]-cells[i-1], s0=cells[i-1]-cells[i-2];
+    if(s1!==s0) turns++;
+  }
+  return turns;
+}
+const pathSearchAll = (from,to)=>pathSearch(from,to,0,extraSteps());
+const extraSteps = ()=>Math.round(state.params.extra/PATH_STEP);
+// 普通任务段：外圈偏好（同转弯数且预算内才用外圈）
+function outerPreferredPath(from,to){
+  const normal=pathSearchAll(from,to);
+  if(!normal) return null;
+  if(from===to) return normal;
+  const normalTurns=segmentTurns(normal.cells);
+  const limitNodes=bfsDist[to]+1+extraSteps();   // 按严格最短距离，不叠加预算
+  const base=pathSearch(from,to,2,0);
+  if(base && base.cells.length<=limitNodes){
+    const remaining=limitNodes-base.cells.length;
+    const cand=pathSearch(from,to,2,remaining);
+    if(cand && segmentTurns(cand.cells)<=normalTurns) return cand;
+  }
+  return normal;
+}
+// 二维码→取料：右上外圈与少转弯共用一个预算
+function qrToRawPath(from,to){
+  const base=pathSearch(from,to,0,0);
+  if(!base) return null;
+  const limitNodes=base.cells.length+extraSteps();
+  const outer0=pathSearch(from,to,1,0);
+  if(outer0 && outer0.cells.length<=limitNodes){
+    const remaining=limitNodes-outer0.cells.length;
+    return pathSearch(from,to,1,remaining);
+  }
+  return pathSearchAll(from,to);
+}
+function rawMaterialApproach(){
+  const cell=nodeAt(TURNTABLE.x,RAW_APPROACH_Y);
+  return cellPassable(cell)?cell:-1;
+}
+
+/* ================= 批次规划（标准点位图寻路，发送值全部为车端点位表坐标） ================= */
+/* 点 m 是否在线段 a→b 上(共线且介于两端点之间) —— 用于剔除直线途经点 */
+function onLineSeg(a,b,m){
+  const cross=(b.x-a.x)*(m.y-a.y)-(b.y-a.y)*(m.x-a.x);
+  if(Math.abs(cross)>0.001) return false;
+  const dot=(m.x-a.x)*(b.x-a.x)+(m.y-a.y)*(b.y-a.y);
+  const len2=(b.x-a.x)*(b.x-a.x)+(b.y-a.y)*(b.y-a.y);
+  return dot>0.001 && dot<len2-0.001;
+}
+function describeRoute(route,segBounds){
+  const stops=route.stops;
+  const mids=route.marks.filter(m=>!m.stop).map(m=>m.name);
+  let out=`站点顺序：${stops.join(' → ')}\n`;
+  out+=`总长 ${(route.total/1000).toFixed(2)} m ｜ 关键点 ${route.marks.length} 个（全部为车端标准点位）\n`;
+  out+=`途经拐点 ${mids.length} 个：\n${mids.join('  ')||'（无）'}\n`;
+  if(segBounds){
+    out+='各段：'+segBounds.map((s,i)=>
+      `${stops[i]}→${stops[i+1]} ${(s.len/1000).toFixed(2)}m${s.dir?('向'+s.dir):''}${s.diag?'（斜线）':''}${s.via?`（经 ${s.via}）`:''}`
+    ).join('；');
+  }
+  return out;
+}
+function planBatch(batch){
+  buildOccupy();
+  const startName='启停区'+state.routeStart;
+  const startKey='start'+state.routeStart;
+  let seq, names;
+  if(batch===1){
+    seq=[startKey,'qr','raw','rough','storage'];
+    names=[startName,'扫码区','原料区','粗加工区','暂存区'];
+  }else{
+    if(!state.routes.b1){ showRoute(batch,'NO PATH（第一批未规划或未成功，暂存区站位未知）',null); return; }
+    // 第二批末段回启停区:经 右上角/右下角 斜插回停区(不经过45°点)
+    seq=['storage','raw','rough','storage',startKey];
+    names=['暂存区','原料区','粗加工区','暂存区',startName];
+  }
+  const marks=[], segBounds=[];
+  for(let i=0;i<seq.length-1;i++){
+    // 45度点硬规则:仅第一批出发段允许经过本侧45°点,其余所有段(含第二批全程)一律剔除
+    const ex = (batch===1 && i===0)
+      ? [state.routeStart===1 ? 'diagRD' : 'diagRU']   // 出发段只禁另一侧45°点
+      : ['diagRU','diagRD'];
+    const g=graphRoute(seq[i],seq[i+1],ex);
+    if(!g){
+      state.routes[batch===1?'b1':'b2']=null;   // 清掉旧路线,避免误导
+      showRoute(batch,`NO PATH（第 ${i+1} 段 ${names[i]}→${names[i+1]}：通道被禁行格封死）`,null);
+      draw(); return;
+    }
+    const A=NODES[NODE_IX[seq[i]]], B=NODES[NODE_IX[seq[i+1]]];
+    const diag = (A.x!==B.x && A.y!==B.y);      // 起终点不同行不同列 = 斜线段
+    const dx=B.x-A.x, dy=B.y-A.y;
+    const dir = Math.abs(dy)>=Math.abs(dx) ? (dy>=0?'下':'上') : (dx>=0?'右':'左');
+    segBounds.push({len:g.len, via:g.nodes.slice(1,-1).map(ix=>NODES[ix].name), diag, dir});
+    // 段内关键点=站点+实际拐点;同一直线上的非任务途经点剔除(如 左上角→右上角 直线上的原料区)
+    const segMarks=g.nodes.map((ix,k)=>({
+      x:NODES[ix].x, y:NODES[ix].y, name:NODES[ix].name,
+      stop:(k===0)?names[i]:(k===g.nodes.length-1?names[i+1]:null),
+    }));
+    const segSimp=[segMarks[0]];
+    for(let k=1;k<segMarks.length-1;k++){
+      const a=segSimp[segSimp.length-1], m=segMarks[k], b=segMarks[k+1];
+      if(!m.stop && m.name.indexOf('45度')<0 && onLineSeg(a,b,m)) continue;
+      segSimp.push(m);
+    }
+    if(segMarks.length>1) segSimp.push(segMarks[segMarks.length-1]);
+    segBounds[segBounds.length-1].via=segSimp.slice(1,-1).map(m=>m.name);
+    for(let k=0;k<segSimp.length;k++){
+      if(i>0 && k===0) continue;                      // 接点=上一段终点(同名站点),不重复
+      marks.push(segSimp[k]);
+    }
+  }
+  const route={pts:marks, marks, handoff:marks[marks.length-1], stops:names,
+               hasDiag: marks.some(m=>m.name==='右上角45度'||m.name==='右下角45度')};
+  routeCumulative(route);
+  state.routes[batch===1?'b1':'b2']=route;
+  state.currentBatch=batch;
+  showRoute(batch,describeRoute(route,segBounds),route);
+  draw(); saveLocal();
+}
+function showRoute(batch,text,route){
+  const tag=batch===1?'【第一批 · 黄】':'【第二批 · 绿】';
+  $('routeInfo').textContent=tag+'\n'+(route?'✔ 规划成功\n':'✖ ')+text;
+}
+
+function routeCumulative(route){
+  const cum=[0];
+  for(let i=1;i<route.marks.length;i++){
+    const a=route.marks[i-1], b=route.marks[i];
+    cum.push(cum[i-1]+Math.hypot(b.x-a.x,b.y-a.y));
+  }
+  route.cum=cum; route.total=cum[cum.length-1];
+}
+
+/* ================= 路线动画 ================= */
+function posAt(route,d){
+  const marks=route.marks, cum=route.cum;
+  for(let i=1;i<marks.length;i++){
+    if(d<=cum[i]){
+      const t=(d-cum[i-1])/(cum[i]-cum[i-1]||1);
+      const a=marks[i-1],b=marks[i];
+      return {x:a.x+(b.x-a.x)*t, y:a.y+(b.y-a.y)*t, ang:Math.atan2(b.y-a.y,b.x-a.x)};
+    }
+  }
+  const a=marks[marks.length-2],b=marks[marks.length-1];
+  return {x:b.x,y:b.y,ang:Math.atan2(b.y-a.y,b.x-a.x)};
+}
+function animTick(ts){
+  if(!state.anim.on) return;
+  const dt=(ts-state.anim.last)/1000; state.anim.last=ts;
+  state.anim.t += dt*state.params.speed;
+  const rt=state.routes[state.currentBatch===2?'b2':'b1'];
+  if(!rt){ state.anim.on=false; }
+  else{
+    if(state.anim.t>=rt.total){ state.anim.t=rt.total; state.anim.on=false; $('btnAnim').textContent='▶ 路线演示'; }
+    draw();
+    if(state.anim.on) requestAnimationFrame(animTick);
+  }
+}
+
+/* ================= 路线说明板（空白处绘制） =================
+   站点用任务名；中间拐点直接显示车端点位表中文名（右上角/左下角/中心点…），
+   不再显示数字坐标；发给 STM32 的帧仍是标准点位坐标。 */
+/* ===== 相对动作指令链：车头初始向下，指令=前进/后退/顺时针转90度/逆时针转90度 ===== */
+const HEAD_IX={'上':0,'右':1,'下':2,'左':3};   // 顺时针顺序编码（上→右→下→左）
+function cmdChain(marks, startHeading){
+  const DN={'上':0,'右':1,'下':2,'左':3};
+  const runs=dirRuns(marks);
+  let heading=(typeof startHeading==='number')?startHeading:DN[startHeading];
+  const runsOut=[], parts=[];
+  runs.forEach((run,ri)=>{
+    const md=DN[run.dir], rel=(md-heading+4)%4;
+    let code, turn=null, move;
+    if(rel===0){code=1;move='前进';}
+    else if(rel===2){code=2;move='后退';}
+    else if(rel===1){code=3;turn='顺时针转90度';}
+    else {code=4;turn='逆时针转90度';}
+    if(turn)heading=md;                          // 转弯后车头朝向=移动方向；前进/后退不改变朝向
+    move=turn?'前进':move;
+    runsOut.push({run, code, cmdName:turn||move, move, turn});
+    if(turn)parts.push({t:turn, cmd:'turn'});
+    parts.push({t:move, cmd:'move'});
+    for(let i=run.from;i<=run.to;i++){
+      if(ri>0&&i===run.from)continue;            // 转折点已在上段末尾
+      const m=marks[i]; parts.push({t:m.stop||m.name, stop:!!m.stop, turn:!m.stop});
+    }
+  });
+  return {runs:runsOut, parts, endHeading:heading};
+}
+function layoutSummaryLines(parts, maxTextW){
+  const lines=[]; let line={w:0, items:[]};
+  for(const p of parts){
+    const itemW=ctx.measureText(p.t).width;
+    const sepW=line.items.length? ctx.measureText(' -> ').width : 0;
+    if(line.items.length && line.w+sepW+itemW>maxTextW){ lines.push(line); line={w:0, items:[]}; }
+    if(line.items.length){ line.items.push({t:' -> ', plain:true}); line.w+=sepW; }
+    line.items.push(p); line.w+=itemW;
+  }
+  if(line.items.length) lines.push(line);
+  return lines;
+}
+function roundRectPath(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+function drawRouteSummaryBoard(cw,ch){
+  const blocks=[]; let bdHeading='下';            // 车头初始向下，航向跨批连续
+  if(state.routes.b1){ const c=cmdChain(state.routes.b1.marks,bdHeading); bdHeading=c.endHeading;
+    blocks.push({title:'【第一批·黄】', parts:c.parts, tc:'#7a5c00', bar:'#e8b400', hi:state.currentBatch===1}); }
+  if(state.routes.b2){ const c=cmdChain(state.routes.b2.marks,bdHeading); bdHeading=c.endHeading;
+    blocks.push({title:'【第二批·绿】', parts:c.parts, tc:'#0d5c2a', bar:'#1ca848', hi:state.currentBatch===2}); }
+  if(!blocks.length) return;
+  const font='11.5px Consolas,"Courier New",monospace';
+  ctx.font=font;
+  const lineH=17, padX=10, padY=8, titleH=18;
+  const maxW=Math.min(640, cw-150);
+  const textW=maxW-padX*2;
+  const laid=blocks.map(b=>{
+    const lines=layoutSummaryLines(b.parts,textW);
+    return {...b, lines, h:padY+titleH+lines.length*lineH+padY};
+  });
+  const totalH=laid.reduce((a,b)=>a+b.h,0)+(laid.length-1)*6;
+  const x0=12, y0=ch-12-totalH;
+  ctx.save();
+  ctx.fillStyle='rgba(255,255,255,.94)';
+  ctx.strokeStyle='#c8cdd6'; ctx.lineWidth=1;
+  roundRectPath(x0,y0,maxW,totalH,8); ctx.fill(); ctx.stroke();
+  let y=y0;
+  for(const b of laid){
+    if(b.hi){ ctx.strokeStyle=b.bar; ctx.lineWidth=1.5; roundRectPath(x0+3,y+3,maxW-6,b.h-6,6); ctx.stroke(); }
+    ctx.fillStyle=b.bar;
+    ctx.fillRect(x0+padX,y+padY+2,4,titleH-6);
+    ctx.fillStyle=b.tc; ctx.font='bold 12px "Microsoft YaHei",sans-serif';
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.fillText(b.title, x0+padX+10, y+padY+titleH/2-1);
+    let ly=y+padY+titleH;
+    ctx.font=font;
+    for(const line of b.lines){
+      let lx=x0+padX;
+      for(const it of line.items){
+        ctx.fillStyle= it.plain? '#98a0ac' : (it.cmd? '#2f6fed' : (it.turn? '#b03030' : '#222'));
+        ctx.fillText(it.t, lx, ly+lineH/2);
+        lx+=ctx.measureText(it.t).width;
+      }
+      ly+=lineH;
+    }
+    y+=b.h+6;
+  }
+  ctx.restore();
+}
+
+/* ================= STM32 回传板（右上空白区，常显，逐帧原样回传 01/02/03/04） ================= */
+function drawRouteRxBoard(cw,ch){
+  const blocks=[];
+  [1,2].forEach(b=>{
+    const d=state.rxBoards[b];
+    const want=state.txFrames[b];
+    let parts, title;
+    if(!d || d.frames===0){
+      parts=[{t: want? '已发送 '+want+' 帧 —— 等待车端逐帧回传' : '暂未收到数据 —— 发送后此处显示车端回传', plain:true}];
+      title='STM32回传 第'+b+'批';
+    } else {
+      const done = want && d.frames>=want;
+      title='STM32回传 第'+b+'批  '+d.frames+'帧'+(done? ' ✓回传完成('+want+'/'+want+')':'');
+      parts=[];
+      for(const e of d.seq){
+        if(e.k==='d') parts.push({t:e.v, cmd:true});
+        else parts.push({t:'('+e.p[0]+','+e.p[1]+')'});
+      }
+      parts.push({t:' ['+d.lastTime.toTimeString().slice(0,8)+']', plain:true});
+    }
+    blocks.push({title, parts, bar:b===1?'#e8b400':'#1ca848', tc:d?'#333':'#98a0ac', hi:state.currentBatch===b});
+  });
+  if(!blocks.length) return;
+  const font='11.5px Consolas,"Courier New",monospace';
+  ctx.font=font;
+  const lineH=17, padX=10, padY=8, titleH=18;
+  const maxW=Math.min(620, cw-160);
+  const textW=maxW-padX*2;
+  const laid=blocks.map(b=>{
+    const lines=[]; let line={w:0, items:[]};
+    b.parts.forEach(p=>{
+      const itemW=ctx.measureText(p.t).width;
+      const sepW=line.items.length? ctx.measureText('  ').width : 0;
+      if(line.items.length && line.w+sepW+itemW>textW){ lines.push(line); line={w:0, items:[]}; }
+      if(line.items.length){ line.items.push({t:'  ', plain:true}); line.w+=sepW; }
+      line.items.push(p); line.w+=itemW;
+    });
+    if(line.items.length) lines.push(line);
+    return {...b, lines, h:padY+titleH+lines.length*lineH+padY};
+  });
+  const totalH=laid.reduce((a,b)=>a+b.h,0)+(laid.length-1)*6;
+  const x0=cw-maxW-12, y0=12;
+  ctx.save();
+  ctx.fillStyle='rgba(255,255,255,.94)';
+  ctx.strokeStyle='#c8cdd6'; ctx.lineWidth=1;
+  roundRectPath(x0,y0,maxW,totalH,8); ctx.fill(); ctx.stroke();
+  let y=y0;
+  for(const b of laid){
+    if(b.hi){ ctx.strokeStyle=b.bar; ctx.lineWidth=1.5; roundRectPath(x0+3,y+3,maxW-6,b.h-6,6); ctx.stroke(); }
+    ctx.fillStyle=b.bar; ctx.fillRect(x0+padX,y+padY+2,4,titleH-6);
+    ctx.fillStyle=b.tc; ctx.font='bold 12px "Microsoft YaHei",sans-serif';
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.fillText(b.title, x0+padX+10, y+padY+titleH/2-1);
+    let ly=y+padY+titleH;
+    ctx.font=font;
+    for(const line of b.lines){
+      let lx=x0+padX;
+      for(const it of line.items){
+        ctx.fillStyle= it.plain? '#98a0ac' : (it.cmd? '#2f6fed' : '#333');
+        ctx.fillText(it.t, lx, ly+lineH/2);
+        lx+=ctx.measureText(it.t).width;
+      }
+      ly+=lineH;
+    }
+    y+=b.h+6;
+  }
+  ctx.restore();
+}
+
+/* ================= 主绘制 ================= */
+function drawRoutePath(route,color,current){
+  const marks=route.marks;
+  ctx.save();
+  ctx.globalAlpha = current ? 1 : 0.5;
+  ctx.strokeStyle=color; ctx.lineWidth=Math.max(current?3.5:2, L(current?18:10));
+  ctx.lineJoin='round'; ctx.lineCap='round';
+  ctx.beginPath();
+  marks.forEach((m,i)=>{
+    i?ctx.lineTo(X(m.x),Y(m.y)):ctx.moveTo(X(m.x),Y(m.y));
+  });
+  ctx.stroke();
+  // 关键点：站点实心大圆，拐点白底色环
+  for(const m of marks){
+    const r=Math.max(m.stop?3.5:2.5, L(m.stop?30:18));
+    ctx.beginPath(); ctx.arc(X(m.x),Y(m.y),r,0,Math.PI*2);
+    ctx.fillStyle= m.stop? color : '#fff'; ctx.fill();
+    ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.stroke();
+  }
+  // 相邻关键点之间（即每个直线段）一个方向箭头
+  for(let i=1;i<marks.length;i++){
+    const a=marks[i-1], b=marks[i];
+    const ang=Math.atan2(b.y-a.y,b.x-a.x);
+    const mx=(X(a.x)+X(b.x))/2, my=(Y(a.y)+Y(b.y))/2;
+    const s=Math.max(8,L(46));
+    ctx.fillStyle=color;
+    ctx.beginPath();
+    ctx.moveTo(mx+s*Math.cos(ang), my+s*Math.sin(ang));
+    ctx.lineTo(mx-s*0.6*Math.cos(ang)-s*0.5*Math.sin(ang), my-s*0.6*Math.sin(ang)+s*0.5*Math.cos(ang));
+    ctx.lineTo(mx-s*0.6*Math.cos(ang)+s*0.5*Math.sin(ang), my-s*0.6*Math.sin(ang)-s*0.5*Math.cos(ang));
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+function draw(){
+  const dpr = window.devicePixelRatio||1;
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  if(canvas.width!==cw*dpr||canvas.height!==ch*dpr){ canvas.width=cw*dpr; canvas.height=ch*dpr; }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,cw,ch);
+
+  /* 场外底色 */
+  ctx.fillStyle='#e8ebf1'; ctx.fillRect(0,0,cw,ch);
+  /* 场地（灰色） */
+  ctx.fillStyle='#d9d9d9'; ctx.fillRect(X(0),Y(0),L(FIELD),L(FIELD));
+  /* 十字车道（略深） */
+  ctx.fillStyle='#cfcfcf';
+  ctx.fillRect(X(1000),Y(0),L(400),L(FIELD));
+  ctx.fillRect(X(0),Y(1000),L(FIELD),L(400));
+
+  /* 禁行格（100mm） */
+  ctx.fillStyle='rgba(220,40,40,.55)';
+  for(let i=0;i<576;i++){
+    if(!state.nogo[i]) continue;
+    ctx.fillRect(X((i%24)*100),Y((i/24|0)*100),L(100),L(100));
+  }
+
+  /* 淡黄禁行区 */
+  for(const z of YELLOWS){
+    ctx.fillStyle='#f4f0c4';
+    ctx.fillRect(X(z.x0),Y(z.y0),L(z.x1-z.x0),L(z.y1-z.y0));
+    ctx.strokeStyle='#dcd4a0'; ctx.lineWidth=1;
+    ctx.strokeRect(X(z.x0),Y(z.y0),L(z.x1-z.x0),L(z.y1-z.y0));
+  }
+
+  /* 启停区（蓝） */
+  for(const z of START_ZONES){
+    ctx.fillStyle='#1230d2';
+    ctx.fillRect(X(z.x0),Y(z.y0),L(z.x1-z.x0),L(z.y1-z.y0));
+  }
+
+  /* 暂存区 / 粗加工区平台（白底黑框+圆环+编号） */
+  for(const r of [STORAGE_RECT,ROUGH_RECT]){
+    ctx.fillStyle='#ffffff';
+    ctx.fillRect(X(r.x0),Y(r.y0),L(r.x1-r.x0),L(r.y1-r.y0));
+    ctx.strokeStyle='#333'; ctx.lineWidth=Math.max(1,L(2));
+    ctx.strokeRect(X(r.x0),Y(r.y0),L(r.x1-r.x0),L(r.y1-r.y0));
+  }
+  const drawRing = r=>{
+    ctx.strokeStyle='#111'; ctx.lineWidth=Math.max(1.4,L(5));
+    ctx.beginPath(); ctx.arc(X(r.x),Y(r.y),L(30),0,Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(X(r.x),Y(r.y),L(22),0,Math.PI*2); ctx.stroke();
+    const fs=Math.min(15,Math.max(9,L(46)));
+    ctx.fillStyle='#111'; ctx.font=`bold ${fs}px sans-serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(r.n, X(r.x), Y(r.y));
+  };
+  STORAGE_RINGS.forEach(drawRing);
+  ROUGH_RINGS.forEach(drawRing);
+
+  /* 原料区转盘（占位圈 + 圆盘 + 3 物料位） */
+  ctx.strokeStyle='rgba(120,120,120,.7)'; ctx.lineWidth=1; setDash([10,6]);
+  ctx.beginPath(); ctx.arc(X(TURNTABLE.x),Y(TURNTABLE.y),L(TURNTABLE.r),0,Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='#f2f2f2';
+  ctx.beginPath(); ctx.arc(X(TURNTABLE.x),Y(TURNTABLE.y),L(150),0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#333'; ctx.lineWidth=Math.max(1,L(3)); ctx.stroke();
+  ctx.strokeStyle='#111'; ctx.lineWidth=Math.max(1,L(4));
+  for(const h of DISC_HOLES){ ctx.beginPath(); ctx.arc(X(h.x),Y(h.y),L(28),0,Math.PI*2); ctx.stroke(); }
+
+  /* 二维码识别带 */
+  ctx.fillStyle='rgba(17,17,17,.85)';
+  ctx.fillRect(X(QR_BAND.x0),Y(QR_BAND.y0),L(QR_BAND.x1-QR_BAND.x0),L(QR_BAND.y1-QR_BAND.y0));
+
+  /* 中心点划线 */
+  ctx.strokeStyle='#3a5fe0'; ctx.lineWidth=1; setDash([24,7,4,7]);
+  ctx.beginPath();
+  ctx.moveTo(X(1200),Y(0)); ctx.lineTo(X(1200),Y(FIELD));
+  ctx.moveTo(X(0),Y(1200)); ctx.lineTo(X(FIELD),Y(1200));
+  ctx.stroke(); ctx.setLineDash([]);
+
+  /* 外框 */
+  ctx.strokeStyle='#111'; ctx.lineWidth=Math.max(1.5,L(5));
+  ctx.strokeRect(X(0),Y(0),L(FIELD),L(FIELD));
+
+  /* 区域标签（STM32 zone_labels 锚点） */
+  tag(2050,150,'启停区1');
+  tag(2050,2250,'启停区2');
+  tag(state.field.rawX,335,'原料区');
+  tag(210,1160,'暂存区');
+  tag(1200,2175,'粗加工区');
+  tag(2255,2400-state.field.qrY-40,'扫码区');   /* 内部Y = 2400 - 左下原点Y */
+
+  /* 固定站位标记 */
+  const drawStation=(p,col)=>{
+    ctx.fillStyle=col; ctx.strokeStyle='#fff'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(X(p.x),Y(p.y),Math.max(4,L(26)),0,Math.PI*2); ctx.fill(); ctx.stroke();
+  };
+  drawStation(STATION.start1,'#0b8a3e'); drawStation(STATION.start2,'#0b8a3e');
+  drawStation(STATION.qr,'#8a5ad0'); drawStation(STATION.raw,'#c98a00');
+  drawStation(STATION.rough,'#c98a00'); drawStation(STATION.storage,'#c98a00');
+
+  /* 工程标注 */
+  if(state.showDim){
+    dimLine(0,2520,FIELD,2520,'2400');
+    dimLine(2520,0,2520,FIELD,'2400');
+    dimLine(1100,-90,1300,-90,'1100~1300(随机)');
+    dimLine(200,0,200,100,'100');
+    dimLine(30,910,30,1490,'580');
+    dimLine(490,550,490,1000,'450');
+    dimLine(1000,975,1400,975,'400');
+    dimLine(985,1000,985,1400,'400');
+    dimLine(910,2500,1490,2500,'580');
+    ctx.fillStyle='#8a93a3'; ctx.font='12px "Microsoft YaHei",sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('初赛场地 2400mm × 2400mm（左下角原点 · Y 轴向上）', X(1200), Y(2640));
+  }
+
+  /* 坐标轴刻度：四边每 100mm 一格、500mm 标数字（mm 坐标，左下角原点，Y 轴向上）
+     刻度值 = 左下角原点坐标系：底/顶边=X 值（向右增大），左/右边=Y 值（向上增大，取 FIELD-v） */
+  if(state.showAxis){
+    ctx.strokeStyle='rgba(70,90,120,.75)'; ctx.fillStyle='#4a5d7a'; ctx.lineWidth=1;
+    ctx.font='10px Consolas,monospace';
+    for(let v=0;v<=FIELD;v+=100){
+      const major=(v%500===0);
+      const tl=major?9:5;                       // 刻度线长（屏幕px）
+      const label=FIELD-v;                      // Y 轴标注值(左下原点)
+      ctx.beginPath();                          // 上边
+      ctx.moveTo(X(v),Y(0)); ctx.lineTo(X(v),Y(0)+tl); ctx.stroke();
+      ctx.beginPath();                          // 下边
+      ctx.moveTo(X(v),Y(FIELD)); ctx.lineTo(X(v),Y(FIELD)-tl); ctx.stroke();
+      ctx.beginPath();                          // 左边
+      ctx.moveTo(X(0),Y(v)); ctx.lineTo(X(0)+tl,Y(v)); ctx.stroke();
+      ctx.beginPath();                          // 右边
+      ctx.moveTo(X(FIELD),Y(v)); ctx.lineTo(X(FIELD)-tl,Y(v)); ctx.stroke();
+      if(major && v>0 && v<FIELD){
+        ctx.textAlign='center'; ctx.textBaseline='top';
+        ctx.fillText(String(v), X(v), Y(0)+tl+1);                 // 顶(X 值)
+        ctx.textAlign='center'; ctx.textBaseline='bottom';
+        ctx.fillText(String(v), X(v), Y(FIELD)-tl-1);             // 底(X 值，X 不翻转)
+        ctx.textAlign='left'; ctx.textBaseline='middle';
+        ctx.fillText(String(label), X(0)+tl+2, Y(v));             // 左(Y 值, 左下原点)
+        ctx.textAlign='right'; ctx.textBaseline='middle';
+        ctx.fillText(String(label), X(FIELD)-tl-2, Y(v));         // 右(Y 值, 左下原点)
+      }
+    }
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    // 轴名与方向箭头：原点=左下角，X 沿底边向右，Y 沿左边向上
+    ctx.strokeStyle='#4a5d7a'; ctx.fillStyle='#4a5d7a'; ctx.lineWidth=1.5;
+    ctx.beginPath();                                          // X 轴(沿底边)
+    ctx.moveTo(X(0),Y(FIELD)); ctx.lineTo(X(2560),Y(FIELD)); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(X(2560),Y(FIELD)); ctx.lineTo(X(2560)-8,Y(FIELD)-4); ctx.lineTo(X(2560)-8,Y(FIELD)+4);
+    ctx.closePath(); ctx.fill();
+    ctx.font='bold 12px Consolas,monospace';
+    ctx.textAlign='center'; ctx.textBaseline='top';
+    ctx.fillText('X / mm', X(2400), Y(FIELD)+8);
+    ctx.beginPath();                                          // Y 轴(沿左边向上)
+    ctx.moveTo(X(0),Y(FIELD)); ctx.lineTo(X(0),Y(-120)); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(X(0),Y(-120)); ctx.lineTo(X(0)-4,Y(-120)+8); ctx.lineTo(X(0)+4,Y(-120)+8);
+    ctx.closePath(); ctx.fill();
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.fillText('Y / mm', X(0)+8, Y(-100));
+    ctx.lineWidth=1;
+  }
+
+  /* 比例尺（画布右下，长度随缩放代表 500mm） */
+  (function(){
+    const len=L(500);
+    const bx=cw-len-110, by=ch-22;
+    ctx.strokeStyle='#333'; ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.moveTo(bx,by); ctx.lineTo(bx+len,by);
+    ctx.moveTo(bx,by-6); ctx.lineTo(bx,by+6);
+    ctx.moveTo(bx+len/2,by-4); ctx.lineTo(bx+len/2,by+4);
+    ctx.moveTo(bx+len,by-6); ctx.lineTo(bx+len,by+6);
+    ctx.stroke();
+    ctx.fillStyle='#333'; ctx.font='10px sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='bottom';
+    ctx.fillText('500 mm', bx+len/2, by-8);
+  })();
+
+  /* 显示网格（禁行模式自动显示，或手动开） */
+  const cols=state.gridColsPreset[state.gridIdx];
+  if(state.showGrid||state.mode==='nogo'){
+    ctx.strokeStyle='rgba(80,80,80,.25)'; ctx.lineWidth=1;
+    ctx.beginPath();
+    const step=FIELD/cols;
+    for(let v=step;v<FIELD;v+=step){
+      ctx.moveTo(X(v),Y(0)); ctx.lineTo(X(v),Y(FIELD));
+      ctx.moveTo(X(0),Y(v)); ctx.lineTo(X(FIELD),Y(v));
+    }
+    ctx.stroke();
+  }
+  /* 禁行待确认删除格闪烁提示 */
+  if(state.nogoPending>=0){
+    const i=state.nogoPending;
+    ctx.strokeStyle='#ff2020'; ctx.lineWidth=2;
+    ctx.strokeRect(X((i%24)*100),Y((i/24|0)*100),L(100),L(100));
+  }
+
+  /* 批次路线（黄/绿同屏，当前批次高亮） */
+  if(state.routes.b1) drawRoutePath(state.routes.b1,'#e8b400', state.currentBatch===1);
+  if(state.routes.b2) drawRoutePath(state.routes.b2,'#1ca848', state.currentBatch===2);
+
+  /* 演示机器人 */
+  const animRoute=state.routes[state.currentBatch===2?'b2':state.currentBatch===1?'b1':'b1'];
+  if(animRoute && (state.anim.on || state.anim.t>0)){
+    if(animRoute.cum===undefined) routeCumulative(animRoute);
+    const pos=posAt(animRoute,Math.min(state.anim.t,animRoute.total));
+    if(pos){
+      const r=Math.max(6,L(55));
+      ctx.fillStyle='rgba(47,111,237,.9)';
+      ctx.beginPath(); ctx.arc(X(pos.x),Y(pos.y),r,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+      ctx.fillStyle='#fff';
+      ctx.save();
+      ctx.translate(X(pos.x),Y(pos.y)); ctx.rotate(pos.ang);
+      ctx.beginPath(); ctx.moveTo(r*0.9,0); ctx.lineTo(r*0.25,-r*0.45); ctx.lineTo(r*0.25,r*0.45);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  /* 空白处路线说明板（站点顺序 + 转弯节点） */
+  drawRouteSummaryBoard(cw, ch);
+
+  /* 右上：STM32 回传坐标板（0x02 帧） */
+  drawRouteRxBoard(cw, ch);
+}
+
+/* ================= 交互 ================= */
+const MODE_HINT={
+  pan:'模式：平移/选择 —— 空白处拖动平移，滚轮缩放',
+  nogo:'模式：禁行涂格 —— 点击格子标记禁行/障碍；同一格再点一次确认删除（Esc 退出）',
+};
+function setMode(m){
+  state.mode=m;
+  document.querySelectorAll('.mode-btn[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===m));
+  canvas.className = m==='pan'?'':('mode-'+m);
+  $('modeHint').textContent=MODE_HINT[m];
+  if(m!=='nogo') state.nogoPending=-1;
+  draw();
+}
+document.querySelectorAll('.mode-btn[data-mode]').forEach(b=>{
+  b.addEventListener('click',()=>setMode(state.mode===b.dataset.mode?'pan':b.dataset.mode));
+});
+
+function posTo100(x,y){
+  const cx=Math.floor(x/100), cy=Math.floor(y/100);
+  if(cx<0||cy<0||cx>23||cy>23) return -1;
+  return cy*24+cx;
+}
+
+let drag=null;
+canvas.addEventListener('pointerdown',e=>{
+  canvas.setPointerCapture(e.pointerId);
+  const rect=canvas.getBoundingClientRect();
+  const px=e.clientX-rect.left, py=e.clientY-rect.top;
+  const wx=S2WX(px), wy=S2WY(py);
+  const inField = wx>=0&&wx<=FIELD&&wy>=0&&wy<=FIELD;
+
+  if(state.mode==='nogo'&&inField){
+    const idx=posTo100(wx,wy);
+    if(idx>=0){
+      if(state.nogoPending===idx){        // 同格再按：确认删除
+        state.nogo[idx]=0; state.nogoPending=-1; refreshNogoCnt(); replan();
+      }else if(state.nogo[idx]){          // 已有标记 → 进入待确认
+        state.nogoPending=idx; state.nogoPendingTick=Date.now();
+      }else{                              // 涂格
+        state.nogo[idx]=1; state.nogoPending=-1; refreshNogoCnt(); replan();
+      }
+      draw();
+    }
+    return;
+  }
+  drag={type:'pan',sx:px,sy:py,ox:view.ox,oy:view.oy};
+  canvas.classList.add('panning');
+});
+canvas.addEventListener('pointermove',e=>{
+  const rect=canvas.getBoundingClientRect();
+  const px=e.clientX-rect.left, py=e.clientY-rect.top;
+  const wx=S2WX(px), wy=S2WY(py);
+  $('coordHint').textContent = `X:${Math.round(wx)}  Y:${Math.round(2400-wy)} mm`;   // 左下角原点系显示
+  if(!drag) return;
+  if(drag.type==='pan'){
+    view.ox=drag.ox-(px-drag.sx)/view.scale;
+    view.oy=drag.oy-(py-drag.sy)/view.scale;
+    draw(); return;
+  }
+});
+canvas.addEventListener('pointerup',()=>{
+  canvas.classList.remove('panning');
+  drag=null;
+});
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+canvas.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const rect=canvas.getBoundingClientRect();
+  const px=e.clientX-rect.left, py=e.clientY-rect.top;
+  const wx=S2WX(px), wy=S2WY(py);
+  const k=e.deltaY<0?1.15:1/1.15;
+  const ns=Math.max(0.06,Math.min(3,view.scale*k));
+  view.ox=wx-px/ns; view.oy=wy-py/ns; view.scale=ns;
+  draw();
+},{passive:false});
+window.addEventListener('keydown',e=>{
+  if(e.key==='Escape') setMode('pan');
+});
+// 待确认删除 1.6s 超时
+setInterval(()=>{
+  if(state.nogoPending>=0 && Date.now()-state.nogoPendingTick>1600){
+    state.nogoPending=-1; draw();
+  }
+},300);
+
+/* ================= 面板 ================= */
+function refreshNogoCnt(){
+  let n=0; for(let i=0;i<576;i++) n+=state.nogo[i];
+  $('nogoCnt').textContent=n+' 格';
+}
+function replan(){
+  // 任一占用变化后自动重算已规划的批次，保持路线与禁行同步
+  if(state.routes.b1) planBatch(1);
+  if(state.routes.b2) planBatch(2);
+  refreshNogoCnt();
+}
+$('selStart1').addEventListener('click',()=>{
+  state.routeStart=1; $('selStart1').classList.add('on'); $('selStart2').classList.remove('on');
+  if(state.routes.b1) planBatch(1);
+  if(state.routes.b2) planBatch(2);
+  saveLocal();
+});
+$('selStart2').addEventListener('click',()=>{
+  state.routeStart=2; $('selStart2').classList.add('on'); $('selStart1').classList.remove('on');
+  if(state.routes.b1) planBatch(1);
+  if(state.routes.b2) planBatch(2);
+  saveLocal();
+});
+$('btnBatch1').addEventListener('click',()=>planBatch(1));
+$('btnBatch2').addEventListener('click',()=>planBatch(2));
+$('btnClearRoute').addEventListener('click',()=>{
+  state.routes.b1=state.routes.b2=null; state.currentBatch=0; state.anim.t=0;
+  $('routeInfo').textContent='尚未规划。第一批：启停区→扫码区→原料区→粗加工区→暂存区\n第二批：暂存区→原料区→粗加工区→暂存区→回启停区（经右上角/右下角斜插，不经过45°点）';
+  draw();
+});
+$('btnNogoMode').addEventListener('click',()=>setMode(state.mode==='nogo'?'pan':'nogo'));
+$('btnNogoClear').addEventListener('click',()=>{ state.nogo.fill(0); refreshNogoCnt(); replan(); draw(); });
+/* ===== 现场标定输入：联动点位/地图/路线/存档 ===== */
+function fieldApply(rx,qy){
+  if(rx!==null) state.field.rawX=Math.max(1100,Math.min(1300,rx));
+  if(qy!==null) state.field.qrY=Math.max(1100,Math.min(1300,qy));
+  applyField();
+  replan();
+  draw();
+  saveLocal();
+}
+$('fieldRawX').addEventListener('input',e=>{ const v=+e.target.value; if(!isNaN(v)) fieldApply(v,null); });
+$('fieldQrY').addEventListener('input',e=>{ const v=+e.target.value; if(!isNaN(v)) fieldApply(null,v); });
+$('btnGridCycle').addEventListener('click',()=>{
+  state.gridIdx=(state.gridIdx+1)%4;
+  $('btnGridCycle').textContent='网格 '+state.gridColsPreset[state.gridIdx]+' 列';
+  draw();
+});
+$('btnFit').addEventListener('click',()=>{ fitView(); draw(); });
+$('chkGrid').addEventListener('change',e=>{ state.showGrid=e.target.checked; draw(); });
+$('chkAxis').addEventListener('change',e=>{ state.showAxis=e.target.checked; draw(); });
+$('chkDim').addEventListener('change',e=>{ state.showDim=e.target.checked; draw(); });
+function bindRange(id,key,fmt){
+  const el=$(id), out=$(id+'V');
+  el.addEventListener('input',()=>{
+    state.params[key]=+el.value; out.textContent=fmt(+el.value);
+    state.paramDirty[key]=true;    // 手动调过才存档
+    replan();
+  });
+  el.value=state.params[key]; out.textContent=fmt(state.params[key]);
+}
+bindRange('pRadius','radius',v=>v);
+bindRange('pSpeed','speed',v=>v);
+$('btnAnim').addEventListener('click',()=>{
+  const rt=state.routes[state.currentBatch===2?'b2':'b1'];
+  if(!rt) return;
+  if(state.anim.on){ state.anim.on=false; $('btnAnim').textContent='▶ 继续演示'; }
+  else{
+    if(state.anim.t>=rt.total) state.anim.t=0;
+    state.anim.on=true; state.anim.last=performance.now();
+    $('btnAnim').textContent='⏸ 暂停';
+    requestAnimationFrame(animTick);
+  }
+});
+$('btnAnimReset').addEventListener('click',()=>{ state.anim.t=0; state.anim.on=false; $('btnAnim').textContent='▶ 路线演示'; draw(); });
+
+/* ================= 坐标帧发送（→ 蓝牙/ZigBee → STM32F407） =================
+ * 帧协议（二进制，小端）：
+ *   AA 55 | CMD | 批次(1/2) | 点数N | X1L X1H Y1L Y1H ... | SUM | 0D 0A
+ *   CMD = 0x01 直角路线段帧（现有下位机已适配）
+ *   CMD = 0x03 斜45度路线段帧（段内含斜走，麦轮斜向平移）——下位机待适配
+ *   CMD = 0x04 动作指令帧：AA 55 | 04 | 批次 | 指令码 | SUM | 0D 0A（7 字节）
+ *          指令码 1=前进 2=后退 3=顺时针转90度 4=逆时针转90度（相对当前车头朝向，车头初始向下）
+ *   CMD = 0x02 坐标回传帧（车端 → 网页）
+ * 发送序列：指令帧(段1动作) → 段1坐标帧 → 指令帧(段2动作) → 段2坐标帧 → …（每方向段一条指令帧）
+ * 每段坐标帧首点=上一段末点(车端去重拼接)。
+ * SUM = CMD+批次+[点数]+数据字节 的累加和低 8 位。
+ */
+const CMD_CODE = {'前进':1, '后退':2, '顺时针转90度':3, '逆时针转90度':4};
+function segDirs(marks){
+  const dirs=[];
+  for(let i=1;i<marks.length;i++){
+    const dx=marks[i].x-marks[i-1].x, dy=marks[i].y-marks[i-1].y;
+    dirs.push(Math.abs(dy)>=Math.abs(dx) ? (dy>=0?'下':'上') : (dx>=0?'右':'左'));
+  }
+  return dirs;
+}
+function dirRuns(marks){
+  const dirs=segDirs(marks), runs=[];
+  let s=0;
+  for(let i=0;i<dirs.length;i++)
+    if(i===dirs.length-1 || dirs[i+1]!==dirs[i]){ runs.push({dir:dirs[i], from:s, to:i+1}); s=i+1; }
+  return runs;
+}
+function buildCmdFrame(batch, code){
+  const c=(typeof code==='number')?code:CMD_CODE[code];   // 兼容指令码/指令名两种入参
+  const b=[0xAA,0x55, 0x04, batch&0xFF, c];
+  let sum=0x04+(batch&0xFF)+c;
+  b.push(sum&0xFF, 0x0D, 0x0A);
+  return new Uint8Array(b);
+}
+function buildDebugRunFrame(batch){
+  const b=[0xAA,0x55,0x13,batch&0xFF];
+  b.push((0x13+(batch&0xFF))&0xFF,0x0D,0x0A);
+  return new Uint8Array(b);
+}
+function buildSegFrame(batch, pts, cmd){
+  const b=[0xAA,0x55, cmd, batch&0xFF, pts.length&0xFF];
+  let sum=cmd+(batch&0xFF)+pts.length;
+  for(const m of pts){
+    const x=m.x&0xFFFF, y=(2400-m.y)&0xFFFF;   /* 发送坐标系=左下角原点Y向上：内部绘制Y向下，发送前翻转 */
+    b.push(x&0xFF,(x>>8)&0xFF, y&0xFF,(y>>8)&0xFF);
+    sum+=(x&0xFF)+((x>>8)&0xFF)+(y&0xFF)+((y>>8)&0xFF);
+  }
+  b.push(sum&0xFF, 0x0D, 0x0A);
+  return new Uint8Array(b);
+}
+async function uartWrite(frame){
+  if(!serial.port||!serial.port.writable) throw new Error('串口未连接');
+  serial.writer=serial.port.writable.getWriter();
+  await serial.writer.write(frame);
+  try{serial.writer.releaseLock();}catch(e){}
+}
+async function sendRouteFrame(batch){
+  const route=state.routes[batch===1?'b1':'b2'];
+  if(!route){ logLine('sys',`[系统] 第 ${batch} 批路线尚未规划，无法发送。`); return; }
+  if(!serial.port||!serial.port.writable){ logLine('sys','[系统] 请先连接串口（蓝牙/ZigBee）。'); return; }
+  // 车头初始向下；批2 承接批1 结束朝向（航向跨批连续；批1 回传完成删任务后仍记录其结束朝向）
+  let startH;
+  if(batch===1) startH='下';
+  else if(state.txEndHeading[1]!==undefined) startH=state.txEndHeading[1];
+  else if(state.routes.b1) startH=cmdChain(state.routes.b1.marks,'下').endHeading;
+  else startH='下';
+  const chain = cmdChain(route.marks, startH);
+  state.txEndHeading[batch] = chain.endHeading;                    // 记录结束朝向（下一批承接）
+  state.txFrames[batch] = chain.runs.length * 2;                   // 已发送帧数（每段=指令帧+段坐标帧，回传完成判定）
+  state.rxBoards[batch] = {seq:[], frames:0, lastTime:null, done:false};   // 清空该批回传累计
+  state.debugStartSent[batch] = false;
+  updateDebugStartButton(batch);
+  let sent=0;
+  try{
+    for(const item of chain.runs){
+      const df=buildCmdFrame(batch, item.code);
+      await uartWrite(df);
+      logLine('tx',`▷ 第${batch}批动作指令【${item.cmdName}】(CMD 04): ${bytesToHex(df)}`);
+      const pts=route.marks.slice(item.run.from, item.run.to+1);
+      const cmd = pts.some(m=>m.name==='右上角45度'||m.name==='右下角45度') ? 0x03 : 0x01;
+      const sf=buildSegFrame(batch, pts, cmd);
+      await uartWrite(sf);
+      logLine('tx',`▷ 第${batch}批${item.run.dir}行段帧（CMD 0x${cmd.toString(16).toUpperCase()}，${sf.length}字节，${pts.length}点${cmd===0x03?'，含45°斜走':''}）: ${bytesToHex(sf)}`);
+      sent+=pts.length;
+    }
+    logLine('sys',`[系统] 第 ${batch} 批发送完成：${chain.runs.length} 个动作段 / ${sent} 个关键点（等待车端回传 ${chain.runs.length} 帧）。`);
+  }catch(err){ logLine('sys',`[系统] 发送失败：${err.message}`); }
+}
+function updateDebugStartButton(batch){
+  const b=$('btnDebugStart1');
+  if(!b || batch!==1) return;
+  const rb=state.rxBoards[1];
+  b.disabled=!(rb && rb.done && !state.debugStartSent[1]);
+}
+async function sendDebugStart(batch){
+  if(batch!==1){ logLine('sys','[系统] 当前仅支持批次1调试启动。'); return; }
+  const rb=state.rxBoards[1];
+  if(!rb || !rb.done){ logLine('sys','[系统] 请先发送第一批路线并等待STM32回传完成。'); return; }
+  try{
+    const frame=buildDebugRunFrame(1);
+    await uartWrite(frame);
+    state.debugStartSent[1]=true;
+    updateDebugStartButton(1);
+    logLine('tx',`▷ 调试一键启动（批次1）: ${bytesToHex(frame)}`);
+  }catch(err){ logLine('sys',`[系统] 调试启动发送失败：${err.message}`); }
+}
+$('btnSendB1').addEventListener('click',()=>sendRouteFrame(1));
+$('btnSendB2').addEventListener('click',()=>sendRouteFrame(2));
+$('btnDebugStart1').addEventListener('click',()=>sendDebugStart(1));
+$('btnSendBoth').addEventListener('click',async()=>{
+  await sendRouteFrame(1);
+  setTimeout(()=>sendRouteFrame(2), 300);   // 两批间隔 300ms，给单片机留处理时间
+});
+
+/* ================= STM32 回传帧解析（车端逐帧原样回传：01/02/03 点帧 + 04 动作帧） =================
+   跨分包字节流状态机：蓝牙/ZigBee 可能把一帧拆成多次到达，这里持续逐字节喂入。
+   点帧：   AA 55 | 01/02/03 | BATCH | N | 坐标... | SUM | 0D 0A → 坐标追加进对应批次
+   动作帧： AA 55 | 04 | BATCH | 码(1前进/2后退/3顺/4逆) | SUM | 0D 0A → 动作词记入序列
+   收满发送帧数 → 回传板标注"回传完成"并删除该批路线任务 */
+const rxFsm = {st:0, cmd:0, batch:0, cnt:0, expect:0, idx:0, buf:new Uint8Array(4*64), sum:0};
+function rxFsmFeed(ch){
+  switch(rxFsm.st){
+    case 0:
+      if(ch===0xAA) rxFsm.st=1;
+      break;
+    case 1:
+      rxFsm.st = (ch===0x55)?2:0;
+      break;
+    case 2:
+      if((ch>=0x01&&ch<=0x04)||ch===0x13){ rxFsm.cmd=ch; rxFsm.sum=ch; rxFsm.st=3; }   // 01/03点帧、04动作、13调试启动ACK
+      else if(ch===0xAA){ rxFsm.st=1; }                    // 连续帧头
+      else rxFsm.st=0;
+      break;
+    case 3:
+      if(ch>=1&&ch<=2){ rxFsm.batch=ch; rxFsm.sum+=ch;
+        if(rxFsm.cmd===0x04){ rxFsm.cnt=1; rxFsm.expect=1; rxFsm.idx=0; rxFsm.st=5; }   // 动作帧：载荷=1字节动作码
+        else if(rxFsm.cmd===0x13){ rxFsm.st=6; }  // 调试启动ACK：批次后直接校验和
+        else rxFsm.st=4; }
+      else rxFsm.st = (ch===0xAA)?1:0;
+      break;
+    case 4:
+      if(ch>=1&&ch<=64){ rxFsm.cnt=ch; rxFsm.expect=4*ch; rxFsm.sum+=ch; rxFsm.idx=0; rxFsm.st=5; }
+      else rxFsm.st=0;
+      break;
+    case 5:
+      rxFsm.buf[rxFsm.idx++]=ch; rxFsm.sum+=ch;
+      if(rxFsm.idx>=rxFsm.expect) rxFsm.st=6;
+      break;
+    case 6:
+      rxFsm.st = ((rxFsm.sum&0xFF)===ch)?7:0;
+      break;
+    case 7:
+      rxFsm.st = (ch===0x0D)?8:0;
+      break;
+    case 8:
+      rxFsm.st=0;
+      if(ch===0x0A){
+        if(rxFsm.cmd===0x13){
+          logLine('rx',`📥 STM32已确认调试一键启动（批次${rxFsm.batch}），车辆仍由下位机闭环控制。`);
+        } else if(rxFsm.cmd===0x04){
+          rxEchoAccept(4, rxFsm.batch, null, rxFsm.buf[0]);
+        } else {
+          const pts=[];
+          for(let i=0;i<rxFsm.cnt;i++){
+            const o=4*i;
+            pts.push([rxFsm.buf[o]|(rxFsm.buf[o+1]<<8), rxFsm.buf[o+2]|(rxFsm.buf[o+3]<<8)]);
+          }
+          rxEchoAccept(rxFsm.cmd, rxFsm.batch, pts, 0);
+        }
+        draw();
+      }
+      break;
+  }
+}
+/* 回传帧接受：追加进对应批次回传数据；收满发送帧数 → 标注完成并删除该批路线任务 */
+function rxEchoAccept(cmd, batch, pts, act){
+  const rb = state.rxBoards[batch];
+  if(!rb){ logLine('rx',`📥 第 ${batch} 批回传忽略（该批尚未发送，无法对照帧数）`); return; }
+  rb.frames++; rb.lastTime=new Date();
+  if(pts){
+    for(const p of pts) rb.seq.push({k:'p', p});
+    logLine('rx',`📥 第 ${batch} 批回传${cmd===2?'确认':(cmd===3?'45°段':'直角段')} ${pts.length} 点（累计 ${rb.frames} 帧）`);
+  } else {
+    const nm={1:'前进',2:'后退',3:'顺时针转90度',4:'逆时针转90度'}[act]||('未知动作'+act);
+    rb.seq.push({k:'d', v:nm});
+    logLine('rx',`📥 第 ${batch} 批回传动作【${nm}】（累计 ${rb.frames} 帧）`);
+  }
+  const want=state.txFrames[batch];
+  if(want && rb.frames>=want && !rb.done){
+    rb.done=true;
+    logLine('sys',`[系统] 第 ${batch} 批回传完成（${rb.frames}/${want} 帧）——删除该批路线任务`);
+    state.routes['b'+batch]=null;
+    updateDebugStartButton(batch);
+  }
+}
+
+/* ================= 串口（Web Serial / ZigBee） ================= */
+let serial={port:null,reader:null,writer:null,keepReading:false};
+const logBox=$('log');
+function logLine(cls,text){
+  const div=document.createElement('div');
+  div.className=cls;
+  const t=new Date();
+  const ts=`${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}:${String(t.getSeconds()).padStart(2,'0')}.${String(t.getMilliseconds()).padStart(3,'0')}`;
+  div.textContent=`[${ts}] ${text}`;
+  logBox.appendChild(div);
+  while(logBox.children.length>400) logBox.removeChild(logBox.firstChild);
+  if($('autoScroll').checked) logBox.scrollTop=logBox.scrollHeight;
+}
+function bytesToHex(buf){ return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' '); }
+function hexToBytes(str){
+  const clean=str.replace(/0x/gi,'').replace(/[^0-9a-fA-F]/g,'');
+  const out=new Uint8Array(Math.floor(clean.length/2));
+  for(let i=0;i<out.length;i++) out[i]=parseInt(clean.substr(i*2,2),16);
+  return out;
+}
+function setSerialStat(text,ok){
+  $('serialStat').textContent=text;
+  $('serialStat').style.color = ok?'#18a058':'';
+  $('footSerial').textContent = '串口：'+text;
+}
+async function serialConnect(){
+  if(!navigator.serial){ logLine('sys','[系统] 当前浏览器不支持 Web Serial，请使用 Chrome / Edge 打开本页。'); return; }
+  try{
+    const port=await navigator.serial.requestPort();
+    const baud=+$('baud').value;
+    await port.open({baudRate:baud, dataBits:8, stopBits:1, parity:'none', flowControl:'none'});
+    serial.port=port; serial.keepReading=true;
+    const info=port.getInfo();
+    const idStr=(info.usbVendorId?` USB ${info.usbVendorId.toString(16).padStart(4,'0')}:${(info.usbProductId||0).toString(16).padStart(4,'0')}`:'');
+    setSerialStat(`已连接 @ ${baud}bps${idStr}`,true);
+    logLine('sys',`[系统] 串口已打开，波特率 ${baud}。`);
+    readLoop(port);
+  }catch(err){
+    if(err.name==='NotFoundError') logLine('sys','[系统] 未选择端口。');
+    else logLine('sys',`[系统] 连接失败：${err.message}`);
+  }
+}
+async function readLoop(port){
+  const dec=new TextDecoder();
+  let lineBuf='';
+  while(serial.keepReading && port.readable){
+    serial.reader=port.readable.getReader();
+    try{
+      for(;;){
+        const {value,done}=await serial.reader.read();
+        if(done) break;
+        for(const b of value) rxFsmFeed(b);   // 逐字节喂回传帧状态机(跨分包累积)
+        if($('recvHex').checked) logLine('rx','◁ '+bytesToHex(value));
+        else{
+          const text=dec.decode(value,{stream:true});
+          logLine('rx','◁ '+text.replace(/\r/g,'\\r').replace(/\n/g,'\\n'));
+          lineBuf+=text;
+          let idx;
+          while((idx=lineBuf.indexOf('\n'))>=0){
+            const line=lineBuf.slice(0,idx).replace(/\r$/,'');
+            lineBuf=lineBuf.slice(idx+1);
+            if(window.__serialLineHandlers) window.__serialLineHandlers.forEach(f=>{try{f(line)}catch(e){}});
+          }
+        }
+      }
+    }catch(err){
+      logLine('sys',`[系统] 读取中断：${err.message}`);
+      break;
+    }finally{
+      try{serial.reader.releaseLock();}catch(e){}
+    }
+  }
+  setSerialStat('未连接');
+  logLine('sys','[系统] 串口已断开。');
+}
+async function serialDisconnect(){
+  serial.keepReading=false;
+  try{ if(serial.reader) await serial.reader.cancel(); }catch(e){}
+  try{ if(serial.writer){serial.writer.releaseLock();} }catch(e){}
+  try{ if(serial.port) await serial.port.close(); }catch(e){}
+  serial={port:null,reader:null,writer:null,keepReading:false};
+  setSerialStat('未连接');
+}
+$('btnSerial').addEventListener('click',serialConnect);
+$('btnSerialOff').addEventListener('click',serialDisconnect);
+$('btnClearLog').addEventListener('click',()=>{ logBox.innerHTML=''; });
+$('btnSend').addEventListener('click',async()=>{
+  if(!serial.port||!serial.port.writable){ logLine('sys','[系统] 请先连接串口。'); return; }
+  const t=$('sendText').value;
+  if(!t) return;
+  let bytes;
+  if($('sendHex').checked) bytes=hexToBytes(t);
+  else bytes=new TextEncoder().encode(t+($('sendCRLF').checked?'\r\n':''));
+  try{
+    serial.writer=serial.port.writable.getWriter();
+    await serial.writer.write(bytes);
+    try{serial.writer.releaseLock();}catch(e){}
+    logLine('tx','▷ '+($('sendHex').checked?bytesToHex(bytes):t));
+  }catch(err){ logLine('sys',`[系统] 发送失败：${err.message}`); }
+});
+$('sendText').addEventListener('keydown',e=>{ if(e.key==='Enter') $('btnSend').click(); });
+navigator.serial?.addEventListener?.('disconnect',e=>{
+  if(e.target===serial.port){ logLine('sys','[系统] 设备已拔出。'); serial={port:null,reader:null,writer:null,keepReading:false}; setSerialStat('未连接'); }
+});
+
+/* ================= 导入导出 / 本地保存 ================= */
+function saveLocal(){
+  try{
+    const params={};
+    for(const k in state.paramDirty) if(state.paramDirty[k]) params[k]=state.params[k];
+    localStorage.setItem('banyun-map-v4',JSON.stringify({
+      nogo:Array.from(state.nogo),
+      gridIdx:state.gridIdx,
+      routeStart:state.routeStart,
+      field:state.field,
+      params, paramDirty:state.paramDirty,
+    }));
+  }catch(e){}
+}
+function applyConfig(cfg,legacy){
+  if(cfg.nogo && cfg.nogo.length===576) state.nogo=Uint8Array.from(cfg.nogo);
+  if(typeof cfg.gridIdx==='number') state.gridIdx=cfg.gridIdx;
+  if(cfg.routeStart===2) state.routeStart=2;
+  if(cfg.field && cfg.field.rawX>=1100 && cfg.field.rawX<=1300 && cfg.field.qrY>=1100 && cfg.field.qrY<=1300){
+    state.field={rawX:cfg.field.rawX, qrY:cfg.field.qrY};
+    $('fieldRawX').value=cfg.field.rawX; $('fieldQrY').value=cfg.field.qrY;
+  }
+  applyField();
+  // 旧版存档不迁移参数（避免旧默认覆盖新默认）；新版只恢复用户手动调过的参数
+  if(!legacy && cfg.params && cfg.paramDirty){
+    for(const k in cfg.paramDirty) if(cfg.paramDirty[k] && cfg.params[k]!==undefined) state.params[k]=cfg.params[k];
+  }
+  $('pRadius').value=state.params.radius; $('pRadiusV').textContent=state.params.radius;
+  $('pSpeed').value=state.params.speed; $('pSpeedV').textContent=state.params.speed;
+  $('btnGridCycle').textContent='网格 '+state.gridColsPreset[state.gridIdx]+' 列';
+  if(state.routeStart===2){ $('selStart2').classList.add('on'); $('selStart1').classList.remove('on'); }
+  refreshNogoCnt(); replan(); draw();
+}
+$('btnExport').addEventListener('click',()=>{
+  const params={};
+  for(const k in state.paramDirty) if(state.paramDirty[k]) params[k]=state.params[k];
+  const blob=new Blob([JSON.stringify({
+    nogo:Array.from(state.nogo),
+    gridIdx:state.gridIdx, routeStart:state.routeStart, params,
+  },null,2)],{type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='banyun-map-config.json';
+  a.click(); URL.revokeObjectURL(a.href);
+});
+$('btnImport').addEventListener('click',()=>$('fileImport').click());
+$('fileImport').addEventListener('change',e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{ try{ applyConfig(JSON.parse(rd.result)); }catch(err){ alert('JSON 解析失败'); } };
+  rd.readAsText(f);
+  e.target.value='';
+});
+
+/* ================= 初始化 ================= */
+/* ================= 初始化 ================= */
+try{
+  // v4 为当前存档；若无则从 v3 迁移禁行格/网格/启停区（不迁移旧参数，用新默认）
+  let saved=localStorage.getItem('banyun-map-v4'), legacy=false;
+  if(!saved){ saved=localStorage.getItem('banyun-map-v3'); legacy=true; }
+  if(saved) applyConfig(JSON.parse(saved), legacy);
+}catch(e){}
+new ResizeObserver(()=>{ fitView(); draw(); }).observe(wrap);
+setMode('pan');
+refreshNogoCnt();
+fitView(); draw();
+applyField();                 /* 现场标定联动(默认或存档值) */
+planBatch(1); planBatch(2);   // 打开即给出当前标定下的两批参考路线
+
+/* 调试 / 二次开发接口（串口协议确定后可在此挂接） */
+window.MapApp={
+  state, planBatch, draw, fitView,
+  __serialLineHandlers:[],
+};
+window.__serialLineHandlers=window.MapApp.__serialLineHandlers;
+</script>
+</body>
+</html>

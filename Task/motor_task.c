@@ -8,6 +8,7 @@
 #include "odom_task.h"
 #include "lunqu_imu.h"
 #include "uart8.h"
+#include "Buzzer.h"
 
 /**
   * 四路 Emm_V5 步进闭环电机控制任务（CAN2，500Kbps）
@@ -462,6 +463,11 @@ static TickType_t   pos_progress_tick = 0;
 static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基准)*/
 static uint8_t      line_axis = 0;     /*直线段反馈轴: 0=里程计1(vy) 1=里程计2(vx)*/
 static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
+static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
+static uint8_t      debug_route_step = 0;   /*1=到右上角45度, 2=到扫码区*/
+static uint8_t      debug_pause_active = 0;
+static uint8_t      debug_pause_next = 0;   /*2=鸣叫后启动直线, 0=鸣叫后结束*/
+static TickType_t   debug_pause_until = 0;
 static void task_step_done(void);
 
 typedef enum { POS_RUNNING, POS_REACHED, POS_FAILED } PosRunState;
@@ -500,6 +506,11 @@ static PosRunState pos_run_check(int32_t current, uint8_t online)
 static void pos_run_abort(void)
 {
     array_mode = 0;
+    debug_route_active = 0;
+    debug_route_step = 0;
+    if (debug_pause_active) Buzzer_Off();
+    debug_pause_active = 0;
+    debug_pause_next = 0;
     leg1_next_valid = 0;
     phase = PHASE_IDLE;
     Motor_Stop();
@@ -520,6 +531,45 @@ static void diag_run_start(uint8_t direction, int32_t distance, float heading)
     YawPID.ErrorIntMax = YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
     YawPID.OutMax = YAW_OUT_MAX_RPM;  YawPID.OutMin = -YAW_OUT_MAX_RPM;
     phase = PHASE_DIAG;
+}
+
+static void debug_point_pause_start(uint8_t next_step)
+{
+    Motor_Stop();
+    Buzzer_On();
+    debug_pause_active = 1;
+    debug_pause_next = next_step;
+    debug_pause_until = xTaskGetTickCount() + pdMS_TO_TICKS(500);
+}
+
+static void debug_line_start(void)
+{
+    OdomData_t o;
+    int32_t current;
+
+    odometry_get(&o);
+    line_axis = ODOM_POS_AXIS;
+    current = o.enc_pos[line_axis];
+    pos_target = current + 520000;                  /*右上角45度→扫码区: 相对累加*/
+    pos_run_start(current);
+    yaw_hold = yaw_abs360_to_signed(0.0f);          /*目标LCD yaw=0°*/
+    PID_Init(&PosPID);
+    PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
+    PosPID.ErrorIntMax = POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
+    PosPID.OutMax = POS_OUT_MAX_RPM;  PosPID.OutMin = -POS_OUT_MAX_RPM;
+    PID_Init(&YawPID);
+    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+    YawPID.ErrorIntMax = YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+    YawPID.OutMax = YAW_OUT_MAX_RPM;  YawPID.OutMin = -YAW_OUT_MAX_RPM;
+    phase = PHASE_LINE;
+}
+
+static void debug_route_start(void)
+{
+    debug_route_active = 1;
+    debug_route_step = 1;
+    diag_run_start(1, 100000, yaw_abs360_to_signed(0.0f)); /*启停区1→右上角45度*/
+    Motor_Enable(true);
 }
 
 /* ---- 启动一个步骤: 按类型设置对应阶段参数并切换 phase ---- */
@@ -659,11 +709,7 @@ void MotorTask(void *pvParameters)
         {
             switch (c.type)
             {
-            case CMD_ACTION:                       /*04动作帧: 单步执行任务数组当前步骤
-                                                     (CODE仅作步进触发, 动作内容由表决定)*/
-                if (!PHASE_CAN_START(phase)) break;    /*运动中忽略(先06)*/
-                array_mode = 0;
-                task_step_start(&task_z1[step_idx]);   /*执行当前步骤, 完成自动step_idx++*/
+            case CMD_ACTION:                       /*04路线动作只作上传记录/回传，不直接发车；由13帧启动*/
                 break;
 
             case CMD_PULSE:
@@ -795,6 +841,15 @@ void MotorTask(void *pvParameters)
                 task_step_start(&task_z1[step_idx]);
                 break;
 
+            case CMD_DEBUG_RUN:                    /*0x13: 路线已上传后的调试一键启动*/
+                cmd_tx_ack(&c);
+                if (c.param != 1 || !PHASE_CAN_START(phase) || !route_debug_take(1))
+                    break;                         /*未完整上传/非批次1: 只确认收帧, 保持停车*/
+                array_mode = 0;
+                leg1_next_valid = 0;
+                debug_route_start();
+                break;
+
             case CMD_CHAIN:                        /*一键任务链: dir=1右前/4左前
                                                      param=45°段末, param2=直线目标;
                                                      后续自动: 衔接直线->缓行->扫码停车*/
@@ -809,6 +864,11 @@ void MotorTask(void *pvParameters)
 
             case CMD_POS_ABORT:
                 array_mode = 0;
+                debug_route_active = 0;
+                debug_route_step = 0;
+                if (debug_pause_active) Buzzer_Off();
+                debug_pause_active = 0;
+                debug_pause_next = 0;
                 phase = PHASE_IDLE;
                 leg1_next_valid = 0;
                 turn_w_last = 0;
@@ -819,6 +879,31 @@ void MotorTask(void *pvParameters)
             default:
                 break;
             }
+        }
+
+        if (debug_pause_active)
+        {
+            Motor_Stop();
+            if ((int32_t)(xTaskGetTickCount() - debug_pause_until) >= 0)
+            {
+                Buzzer_Off();
+                debug_pause_active = 0;
+                if (debug_pause_next == 2)
+                {
+                    debug_pause_next = 0;
+                    debug_route_step = 2;
+                    debug_line_start();
+                }
+                else
+                {
+                    debug_pause_next = 0;
+                    debug_route_active = 0;
+                    debug_route_step = 0;
+                    phase = PHASE_DONE;
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
         }
 
         /*---- 45°斜走段(匀速+航向保持; 本段纵向行程到位 -> 停车或衔接直线) ----
@@ -862,11 +947,20 @@ void MotorTask(void *pvParameters)
                 }
                 else
                 {
-                    task_step_done();                  /*段末: 推进步骤(一键自动下一步)*/
+                    if (debug_route_active && debug_route_step == 1)
+                    {
+                        debug_point_pause_start(2);
+                    }
+                    else
+                    {
+                        task_step_done();              /*段末: 推进步骤(一键自动下一步)*/
+                    }
                 }
             }
             else if ((xTaskGetTickCount() - posrun_start) > pdMS_TO_TICKS(POS_RUN_TIMEOUT_MS))
             {
+                debug_route_active = 0;
+                debug_route_step = 0;
                 phase = PHASE_IDLE;                              /*超时保护*/
                 leg1_next_valid = 0;
                 Motor_Stop();
@@ -998,7 +1092,14 @@ void MotorTask(void *pvParameters)
 
             if (state == POS_REACHED)
             {
-                task_step_done();                      /*到位: 推进步骤(停车在done内)*/
+                if (debug_route_active && debug_route_step == 2)
+                {
+                    debug_point_pause_start(0);        /*扫码区: 鸣叫后结束*/
+                }
+                else
+                {
+                    task_step_done();                  /*到位: 推进步骤(停车在done内)*/
+                }
             }
             else if (state == POS_FAILED)
             {

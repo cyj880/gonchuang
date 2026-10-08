@@ -83,6 +83,8 @@
 /* ---- 一键任务数组帧(车端按内置任务步骤表从当前步骤连跑至尾) ----
    12 帧: AA 55 12 12 0D 0A (4字节, 无载荷) ---- */
 #define CMD_RUNALL       0x12    /* 上位机 -> 车端：一键执行任务步骤数组 */
+#define CMD_DEBUG_RUN    0x13    /* 上位机 -> 车端：启动已上传的调试路线 */
+/* 13帧: AA 55 | 13 | BATCH | SUM | 0D 0A；当前仅BATCH=1执行启停区1→扫码区 */
 
 
 /* ---- 动作指令帧(上位机 -> 车端, 7字节): AA 55 | 04 | BATCH | CODE | SUM | 0D 0A ----
@@ -114,6 +116,7 @@ typedef struct
 uint8_t cmd_get(ZbeeCmd *c);                     /* 取走一条新命令，1=有 */
 void cmd_last(ZbeeCmd *c, uint8_t *cnt);         /* LCD 只读最后命令 */
 void cmd_tx_ack(const ZbeeCmd *c);               /* 按原命令字+载荷回应答帧(任务上下文) */
+uint8_t route_debug_take(uint8_t batch);          /* 原子检查并消费本批启动资格 */
 
 typedef struct
 {
