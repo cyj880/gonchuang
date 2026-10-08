@@ -285,11 +285,12 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
    整定: 先 Kp(0.0005起, 太慢加大/振荡减小), 再 Ki(消除稳态误差), Kd 默认关闭
    (里程计约35ms刷新一次位置, 微分对量化噪声敏感)。 */
 #define POS_TOL_COUNTS      5000     /* 到位容差(编码值): 目标±5000, 进入即停车 */
-#define POS_QR_SLOW_COUNTS  100000   /* 二维码缓行区(编码值, ≈152mm): 距目标小于此值
-                                            -> 低速行驶+开启二维码判停, 扫到码即停车 */
-#define POS_QR_SLOW_RPM     6        /* 缓行速度(RPM), 低速下里程计滞后<1mm */
+#define POS_QR_SLOW_COUNTS  60000    /* 接近目标约91mm时限制为缓行速度 */
+#define POS_QR_SLOW_RPM     10       /* 缓行速度(RPM), 减弱接近目标的速度衰减 */
 
 #define POS_OUT_MAX_RPM     100      /* 位置PID输出限幅(RPM) */
+#define POS_START_RPM       30       /* 起步速度上限(RPM) */
+#define POS_START_RAMP_MS   300u     /* 起步上限平滑增加至POS_OUT_MAX_RPM */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
 #define POS_PROGRESS_MS     1000u   /* 持续未向目标靠近时停车(反馈不变/方向错误) */
 #define POS_PROGRESS_COUNTS 1000.0f /* 每次确认进度需至少靠近约1.5mm */
@@ -311,7 +312,7 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define TURN_OUT_SIGN       (-1.0f)  /*原地转向输出方向: 实车"左转发成右转270°"已实测, 翻转。
                                         与YAW_OUT_SIGN同值(两者闭环的都是IMU增方向)*/
 
-#define POS_LEG1_RPM        30       /* 45°斜走段: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
+#define POS_LEG1_RPM        40       /* 45°斜走段: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
 
 /* ---- 场地与点位(编码值) ----
    注意: 两启停区出发时X轮计数方向镜像 —— 同一"场地右上角",
@@ -471,20 +472,43 @@ static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
 static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
 static uint8_t      debug_route_step = 0;   /*1=到右上角45度, 2=到扫码区*/
 static uint8_t      debug_route_branch = 0; /*0=未知停止, 1=回右上角, 2=去中心点复合*/
+static volatile uint8_t no_next_alarm = 0;  /*MotorTask写，LCD_Task读*/
 static uint8_t      debug_pause_active = 0;
 static uint8_t      debug_pause_next = 0;   /*2=扫码, 3=分支直线, 0=结束*/
 static TickType_t   debug_pause_until = 0;
 static void task_step_done(void);
 static void turn_run_start(float start_yaw, float delta, uint8_t accumulate);
 
+uint8_t Motor_NoNext(void)
+{
+    return no_next_alarm;
+}
+
 typedef enum { POS_RUNNING, POS_REACHED, POS_FAILED } PosRunState;
 
 /* 绝对帧直接使用累计目标；相对帧只在启动时加一次当前值。 */
 static void pos_run_start(int32_t current)
 {
+    no_next_alarm = 0;
     pos_initial_error = (float)pos_target - (float)current;
     pos_best_error = fabsf(pos_initial_error);
     pos_progress_tick = posrun_start = xTaskGetTickCount();
+}
+
+static float pos_speed_limit(float output, float error_abs)
+{
+    TickType_t elapsed = xTaskGetTickCount() - posrun_start;
+    TickType_t ramp_ticks = pdMS_TO_TICKS(POS_START_RAMP_MS);
+    float limit = POS_OUT_MAX_RPM;
+
+    if (elapsed < ramp_ticks)
+        limit = POS_START_RPM + (POS_OUT_MAX_RPM - POS_START_RPM) *
+                (float)elapsed / (float)ramp_ticks;
+    if (error_abs <= POS_QR_SLOW_COUNTS && limit > POS_QR_SLOW_RPM)
+        limit = POS_QR_SLOW_RPM;
+    if (output > limit) return limit;
+    if (output < -limit) return -limit;
+    return output;
 }
 
 static PosRunState pos_run_check(int32_t current, uint8_t online)
@@ -529,6 +553,7 @@ static void diag_run_start(uint8_t direction, int32_t distance, float heading)
 {
     OdomData_t o;
     odometry_get(&o);
+    no_next_alarm = 0;
     diag_start = o.enc_pos[ODOM_POS_AXIS];
     leg_dir = direction;
     leg1_end = distance;
@@ -548,6 +573,12 @@ static void debug_point_pause_start(uint8_t next_step, uint32_t duration_ms)
     debug_pause_active = 1;
     debug_pause_next = next_step;
     debug_pause_until = xTaskGetTickCount() + pdMS_TO_TICKS(duration_ms);
+}
+
+static void debug_no_next_start(void)
+{
+    no_next_alarm = 1;
+    debug_point_pause_start(0, 5000);
 }
 
 static void debug_line_start(int32_t value, uint8_t relative, float heading)
@@ -590,6 +621,7 @@ static void debug_route_start(uint8_t branch)
 /* 所有原地转向复用同一初始化，防止累计角/限斜率沿用上一次状态。 */
 static void turn_run_start(float start_yaw, float delta, uint8_t accumulate)
 {
+    no_next_alarm = 0;
     yaw_start = turn_yaw_last = start_yaw;
     turn_target = delta;
     turn_accumulate = accumulate;
@@ -742,6 +774,7 @@ void MotorTask(void *pvParameters)
 
             case CMD_PULSE:
                 if (!PHASE_CAN_START(phase)) break;        /*任务运行中: 忽略脉冲命令*/
+                no_next_alarm = 0;
                 cmd_tx_ack(&c);
                 Motor_Enable(true);                        /* 确保四轮使能(FOC抱死) */
                 vTaskDelay(pdMS_TO_TICKS(1000));           /* 接收后 1s 启动 */
@@ -754,6 +787,7 @@ void MotorTask(void *pvParameters)
 
             case CMD_POS_GO:
                 cmd_tx_ack(&c);
+                if (debug_pause_active) break;
                 if (PHASE_CAN_START(phase)) array_mode = 0;
                 if (c.sub == 2 || c.sub == 3)          /*原地转向闭环: 2=左转 3=右转, param=角度deg*/
                 {
@@ -897,6 +931,7 @@ void MotorTask(void *pvParameters)
 
             case CMD_POS_ABORT:
                 array_mode = 0;
+                no_next_alarm = 0;
                 debug_route_active = 0;
                 debug_route_step = 0;
                 debug_route_branch = 0;
@@ -917,7 +952,6 @@ void MotorTask(void *pvParameters)
 
         if (debug_pause_active)
         {
-            Motor_Stop();
             if ((int32_t)(xTaskGetTickCount() - debug_pause_until) >= 0)
             {
                 Buzzer_Off();
@@ -1128,12 +1162,7 @@ void MotorTask(void *pvParameters)
                 YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
                 PID_Update(&YawPID);
 
-                vy = (int)PosPID.Out;
-                if (aerr <= (float)POS_QR_SLOW_COUNTS)     /*接近点位: 限缓行速度*/
-                {
-                    if (vy > POS_QR_SLOW_RPM)  vy =  POS_QR_SLOW_RPM;
-                    if (vy < -POS_QR_SLOW_RPM) vy = -POS_QR_SLOW_RPM;
-                }
+                vy = (int)pos_speed_limit(PosPID.Out, aerr);
                 Motor_Move(0, vy, (int)(YawPID.Out * YAW_OUT_SIGN));
             }
         }
@@ -1157,7 +1186,9 @@ void MotorTask(void *pvParameters)
                 if (debug_route_active && debug_route_step == 2)
                 {
                     if (debug_route_branch == 0)
-                        debug_point_pause_start(0, 3000);      /*未知后续路段: 停车报警3秒*/
+                    {
+                        debug_no_next_start();
+                    }
                     else
                         debug_point_pause_start(3, 500);       /*已知分支: 到扫码区短暂停留*/
                 }
@@ -1171,12 +1202,12 @@ void MotorTask(void *pvParameters)
                     }
                     else
                     {
-                        debug_point_pause_start(0, 500);       /*右上角: 已知目标完成*/
+                        debug_no_next_start();                /*右上角后尚无可执行下一段*/
                     }
                 }
                 else if (debug_route_active && debug_route_step == 5)
                 {
-                    debug_point_pause_start(0, 500);           /*中心点: 已知目标完成*/
+                    debug_no_next_start();                    /*中心点后尚无可执行下一段*/
                 }
                 else
                 {
@@ -1207,11 +1238,7 @@ void MotorTask(void *pvParameters)
                     PID_Update(&PosXPID);
                     out = PosXPID.Out;
                 }
-                if (aerr <= (float)POS_QR_SLOW_COUNTS) /*接近目标: 限缓行速度*/
-                {
-                    if (out >  POS_QR_SLOW_RPM) out =  POS_QR_SLOW_RPM;
-                    if (out < -POS_QR_SLOW_RPM) out = -POS_QR_SLOW_RPM;
-                }
+                out = pos_speed_limit(out, aerr);
                 if (line_axis == 0)
                     Motor_Move(0, (int)out, (int)(YawPID.Out * YAW_OUT_SIGN));
                 else

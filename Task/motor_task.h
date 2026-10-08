@@ -78,5 +78,6 @@ void Motor_Enable(bool state);
 
 /* FreeRTOS 任务入口 */
 void MotorTask(void *pvParameters);
+uint8_t Motor_NoNext(void);             /*未知下一段时返回1，供LCD显示no next*/
 
 #endif
