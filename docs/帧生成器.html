@@ -101,6 +101,10 @@ function i32le(n) {           // int32 -> 4字节小端(hex字符串数组)
   n = n | 0;
   return [(n & 255), ((n >>> 8) & 255), ((n >>> 16) & 255), ((n >>> 24) & 255)];
 }
+function i16le(n) {
+  n = n | 0;
+  return [n & 255, (n >> 8) & 255];
+}
 function buildFrame(cmd, payload) {
   const bytes = [0xAA, 0x55, cmd, ...payload];
   let sum = cmd;
@@ -136,7 +140,17 @@ function render() {
       posInput('diag_end', '45°段末位置', 1500000) +
       posInput('line_tgt', '直线段目标', 650000) +
       `<div class="hint">一条帧跑完整链: 45°斜走到段末 → 直线行驶 → 距目标15cm转缓行+扫码 → 扫到码停车(等上位机下一动作帧)</div>`;
-  } else if (['line','fr45','fl45','slow'].includes(cur)) {
+  } else if (cur === 'line') {
+    h = posInput('p1', '直线位置', 650000) +
+        `<div class="row"><label>位置模式</label><select id="posMode">
+          <option value="abs">绝对目标值</option><option value="rel">在当前位置上累加</option>
+        </select></div>
+        <div class="row"><label>偏航角模式</label><select id="yawMode" onchange="toggleYaw()">
+          <option value="hold">保持当前角度</option><option value="target">指定目标角度</option>
+        </select></div>
+        <div class="row" id="yawRow" style="display:none"><label>目标偏航角(-180~180°)</label><input type="number" id="yawTarget" value="0"></div>
+        <div class="hint">高级直线闭环：位置可按绝对编码值到达，也可从当前编码值累加；航向可保持起始方向或锁定指定角度。</div>`;
+  } else if (['fr45','fl45','slow'].includes(cur)) {
     const lbl = { line:'直线目标', fr45:'45°段末位置', fl45:'45°段末位置', slow:'缓行目标' }[cur];
     const def = { line:650000, fr45:150000, fl45:150000, slow:650000 }[cur];
     h = posInput('p1', lbl, def) +
@@ -185,6 +199,10 @@ function setZone(z) {
   el('p1').value = (z===1) ? 200000 : (1450000 - 200000);
   el('p1_mm').value = ((z===1?200000:1250000)/COUNTS_PER_MM).toFixed(0);
   el('p1_c').textContent = '≈ ' + ((z===1?200000:1250000)/COUNTS_PER_MM).toFixed(0) + ' mm';
+}
+function toggleYaw() {
+  const row = el('yawRow');
+  if (row) row.style.display = el('yawMode').value === 'target' ? 'flex' : 'none';
 }
 function bindConv(id) {
   const inp = el(id), mm = el(id+'_mm'), cv = el(id+'_c');
@@ -236,7 +254,18 @@ el('gen').onclick = () => {
       if (isNaN(a) || a < 1 || a > 179) throw '角度须在 1~179';
       payload = [cur==='tl90'?2:3, ...i32le(a)];
       desc = `原地${cur==='tl90'?'左':'右'}转 ${a}°`;
-    } else {  // line/fr45/fl45/slow/home: 05帧, 参数=位置
+    } else if (cur === 'line') {
+      cmd = 0x08;
+      const v = num('p1');
+      if (isNaN(v)) throw '请填写位置值';
+      const posRel = el('posMode').value === 'rel';
+      const yawSet = el('yawMode').value === 'target';
+      let yaw = yawSet ? num('yawTarget') : 0;
+      if (yawSet && (isNaN(yaw) || yaw < -180 || yaw > 180)) throw '目标偏航角须在 -180~180°';
+      const flags = (posRel ? 1 : 0) | (yawSet ? 2 : 0);
+      payload = [0, flags, ...i32le(v), ...i16le(yaw)];
+      desc = `高级直线: ${posRel ? '当前位置累加' : '绝对目标'} ${v}, ${yawSet ? `目标yaw ${yaw}°` : '保持当前yaw'}`;
+    } else {  // fr45/fl45/slow/home: 05帧, 参数=位置
       cmd = 0x05;
       const m = MODES.find(x => x.id === cur);
       const v = num('p1');

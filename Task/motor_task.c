@@ -387,17 +387,19 @@ static const TaskStep task_z1[] = {
    若经 OdomTask(35ms RS485轮询节奏)透传, 高速段每盲区多转2~3°, 会来回振荡!
    以触发时刻航向为原点计算相对角, 角差全程归一, 无±180°环绕跳变。 */
 #define TURN_TOL_DEG        2.0f     /* 到位容差(deg), 进入即停车(留滞后余量) */
-#define TURN_CREEP_DEG      20.0f    /* 爬行带(deg): 带内固定低速逼近 */
-#define TURN_CREEP_RPM      4        /* 爬行转速(RPM) */
-#define TURN_OUT_MAX_RPM    30       /* 转向PID输出限幅(RPM), 过大易超调 */
+#define TURN_CREEP_DEG      15.0f    /* 爬行带(deg): 带内固定低速逼近 */
+#define TURN_CREEP_RPM      12       /* 爬行转速(RPM), 高于电机低速死区 */
+#define TURN_OUT_MAX_RPM    70       /* 转向PID输出限幅(RPM) */
+#define TURN_MIN_RPM        12       /* PID输出最低有效转速(RPM) */
+#define TURN_SETTLE_TICKS   8        /* 到位后连续确认次数(10ms/次) */
 #define TURN_TIMEOUT_MS     15000u   /* 转向最长运行时间, 超时自动停车(陀螺仪无效兜底) */
-#define TURN_PID_KP         0.4f     /* 误差(deg) -> RPM: 车体转动惯量大+ZDT速度跟随
+#define TURN_PID_KP         0.75f    /* 误差(deg) -> RPM: 远段快速，接近目标自动减速
                                              有滞后, 增益须保守(参照直线环稳定比例) */
-#define TURN_PID_KI         0.1f     /* 先关积分防振荡; 到位有固定偏差再小量加入 */
-#define TURN_PID_KD         25.0f    /* 微分先行阻尼(10ms拍内角差仅~0.25°/拍, Kd须大):
+#define TURN_PID_KI         0.0f     /* 关闭积分，避免停下后的反复补偿 */
+#define TURN_PID_KD         10.0f    /* 微分先行阻尼，抑制接近目标时的惯性超调
                                              满速25°/s时提供~5RPM反向阻尼, 压住冲过 */
 #define TURN_ERR_INT_MAX    45.0f    /* 积分限幅(deg) */
-#define TURN_SLEW_RPM       3        /* 软件限斜率: 每拍(10ms)速度变化上限(RPM)。
+#define TURN_SLEW_RPM       8        /* 软件限斜率: 每拍(10ms)速度变化上限(RPM)。
                                         命令阶跃会激励ZDT内部斜率跟随导致惯性甩尾超调
                                         (开源工程同款电机靠此招稳住90°转弯), 必加 */
 
@@ -415,6 +417,11 @@ static float turn_angdiff(float a, float b)
     while (d > 180.0f)   d -= 360.0f;
     while (d <= -180.0f) d += 360.0f;
     return d;
+}
+
+static float yaw_target_near(float target, float actual)
+{
+    return actual + turn_angdiff(target, actual);
 }
 
 /**
@@ -437,6 +444,7 @@ static uint8_t      leg_dir = 1;       /*斜走轮组: 1右前 2左前 3右后 4
 static float        yaw_start = 0.0f;  /*转向段起始航向*/
 static float        turn_target = 0.0f;/*转向段目标相对角*/
 static int          turn_w_last = 0;   /*转向限斜率基准*/
+static uint8_t      turn_settle_ticks = 0; /*到位停车稳定确认计数*/
 static TickType_t   posrun_start = 0;  /*本步骤起始时刻*/
 static float        yaw_hold = 0.0f;   /*本步航向保持目标: 每步启动时刻的车头朝向(相对零点±180)*/
 static int32_t      seg_base[2] = {0, 0};   /*段计数基准: 每90°转弯结束后重置为当前计数,
@@ -515,6 +523,7 @@ static void task_step_start(const TaskStep *st)
         TurnPID.Kp = TURN_PID_KP;  TurnPID.Ki = TURN_PID_KI;  TurnPID.Kd = TURN_PID_KD;
         TurnPID.ErrorIntMax =  TURN_ERR_INT_MAX;  TurnPID.ErrorIntMin = -TURN_ERR_INT_MAX;
         TurnPID.OutMax =  TURN_OUT_MAX_RPM;  TurnPID.OutMin = -TURN_OUT_MAX_RPM;
+        turn_settle_ticks = 0;
         phase = PHASE_TURN;
         break;
 
@@ -619,6 +628,7 @@ void MotorTask(void *pvParameters)
                     TurnPID.ErrorIntMax =  TURN_ERR_INT_MAX;  TurnPID.ErrorIntMin = -TURN_ERR_INT_MAX;
                     TurnPID.OutMax =  TURN_OUT_MAX_RPM;  TurnPID.OutMin = -TURN_OUT_MAX_RPM;
                     turn_w_last = 0;                   /*限斜率基准归零*/
+                    turn_settle_ticks = 0;
                     Motor_Enable(true);
                     phase = PHASE_TURN;
                 }
@@ -663,6 +673,35 @@ void MotorTask(void *pvParameters)
                     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
                     YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
                     YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+                    Motor_Enable(true);
+                    phase = PHASE_LINE;
+                }
+                break;
+
+            case CMD_POS_ADV:                         /*08高级直线: 绝对/相对pos + 目标yaw*/
+                cmd_tx_ack(&c);
+                if (!PHASE_CAN_START(phase) || c.sub != 0) break;
+                {
+                    OdomData_t o;
+                    int32_t current;
+                    odometry_get(&o);
+                    current = o.enc_pos[0];
+                    line_axis = 0;                    /*高级帧当前固定使用纵向反馈轴*/
+                    if (c.flags & 0x01)
+                        pos_target = current + (int32_t)c.param; /*相对当前位置累加*/
+                    else
+                        pos_target = (int32_t)c.param;            /*绝对编码目标*/
+                    yaw_hold = (c.flags & 0x02) ?
+                               turn_angdiff((float)c.yaw_target, 0.0f) : IMU_GetYaw();
+                    posrun_start = xTaskGetTickCount();
+                    PID_Init(&PosPID);
+                    PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
+                    PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
+                    PosPID.OutMax =  POS_OUT_MAX_RPM;  PosPID.OutMin = -POS_OUT_MAX_RPM;
+                    PID_Init(&YawPID);
+                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+                    YawPID.OutMax = YAW_OUT_MAX_RPM;  YawPID.OutMin = -YAW_OUT_MAX_RPM;
                     Motor_Enable(true);
                     phase = PHASE_LINE;
                 }
@@ -713,8 +752,8 @@ void MotorTask(void *pvParameters)
             OdomData_t o;
             odometry_get(&o);
 
-            YawPID.Target = yaw_hold;
             YawPID.Actual = IMU_GetYaw();                     /*直读最新yaw(不经35ms透传)*/
+            YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
             PID_Update(&YawPID);
 
             if (leg_dir == 1)                       /*右前45°: LF+RR出力*/
@@ -767,17 +806,24 @@ void MotorTask(void *pvParameters)
 
             if (aerr <= (float)TURN_TOL_DEG)
             {
-                OdomData_t o;
-                odometry_get(&o);
-                seg_base[0] = o.enc_pos[0];            /*转弯结束: 里程计重新计数(段基准归零)*/
-                seg_base[1] = o.enc_pos[1];
                 turn_w_last = 0;
-                task_step_done();                      /*到位: 推进步骤(停车在done内)*/
+                if (turn_settle_ticks == 0)
+                    Motor_Stop();                     /*只发一次急停，避免重复占用CAN*/
+                if (++turn_settle_ticks >= TURN_SETTLE_TICKS)
+                {
+                    OdomData_t o;
+                    odometry_get(&o);
+                    seg_base[0] = o.enc_pos[0];        /*转弯结束: 里程计重新计数*/
+                    seg_base[1] = o.enc_pos[1];
+                    turn_settle_ticks = 0;
+                    task_step_done();                  /*稳定到位: 推进步骤*/
+                }
             }
             else if (aerr <= (float)TURN_CREEP_DEG)
             {
-                /*低速爬行段: 固定小转速逼近, 积分冻结(35ms滞后会产生来回振荡)*/
-                int8_t creep_dir = (err > 0) ? 1 : -1;
+                /*低速爬行段: 方向必须与PID段使用同一个输出符号*/
+                int creep_dir = ((err > 0) ? 1 : -1) * (int)TURN_OUT_SIGN;
+                turn_settle_ticks = 0;
                 TurnPID.Target = turn_target;
                 TurnPID.Actual = turn_target - err;    /*rel_now的连续展开: 环绕跳变被err归一吸收*/
                 PID_Update(&TurnPID);
@@ -802,12 +848,15 @@ void MotorTask(void *pvParameters)
                 else
                 {
                     int w_raw;
+                    turn_settle_ticks = 0;
                     TurnPID.Target = turn_target;
                     TurnPID.Actual = turn_target - err;
                     PID_Update(&TurnPID);
                     /*软件限斜率(移植自开源工程): 每拍速度最多变化TURN_SLEW_RPM,
                       命令永不阶跃, 不激励ZDT内部斜率跟随, 消除惯性甩尾超调*/
                     w_raw = (int)(TurnPID.Out * TURN_OUT_SIGN);
+                    if (w_raw > 0 && w_raw < TURN_MIN_RPM) w_raw = TURN_MIN_RPM;
+                    if (w_raw < 0 && w_raw > -TURN_MIN_RPM) w_raw = -TURN_MIN_RPM;
                     if (w_raw > turn_w_last + TURN_SLEW_RPM)      w_raw = turn_w_last + TURN_SLEW_RPM;
                     else if (w_raw < turn_w_last - TURN_SLEW_RPM) w_raw = turn_w_last - TURN_SLEW_RPM;
                     turn_w_last = w_raw;
@@ -845,8 +894,8 @@ void MotorTask(void *pvParameters)
                 PosPID.Actual = (float)o.enc_pos[ODOM_POS_AXIS];
                 PID_Update(&PosPID);
 
-                YawPID.Target = yaw_hold;
                 YawPID.Actual = IMU_GetYaw();
+                YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
                 PID_Update(&YawPID);
 
                 vy = (int)PosPID.Out;
@@ -884,8 +933,8 @@ void MotorTask(void *pvParameters)
             }
             else
             {
-                YawPID.Target = yaw_hold;
                 YawPID.Actual = IMU_GetYaw();          /*直读最新yaw*/
+                YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
                 PID_Update(&YawPID);
 
                 if (line_axis == 0)
@@ -934,8 +983,8 @@ void MotorTask(void *pvParameters)
             else
             {
                 int8_t slow_dir = (err > 0) ? 1 : -1;
-                YawPID.Target = yaw_hold;
                 YawPID.Actual = IMU_GetYaw();          /*缓行段仍保持航向*/
+                YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
                 PID_Update(&YawPID);
 
                 if (slow_axis == 0)

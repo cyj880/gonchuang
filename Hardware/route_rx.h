@@ -73,6 +73,11 @@
        SUM = 07+01+60+E3+16+00+10+EB+09 = 65
        发送: AA 55 07 01 60 E3 16 00 10 EB 09 00 65 0D 0A               */
 #define CMD_CHAIN        0x07    /* 上位机 -> 车端：一键任务链(45°+直线+缓行扫码) */
+#define CMD_POS_ADV      0x08    /* 上位机 -> 车端：高级直线闭环(位置模式+目标yaw) */
+/* 08帧: AA 55 | 08 | SUB | FLAGS | P0 P1 P2 P3 | Y0 Y1 | SUM | 0D 0A
+   FLAGS bit0=1:位置为相对当前值的增量, 0:绝对目标值
+          bit1=1:使用Y字段作为绝对目标yaw(deg), 0:保持收到命令时的yaw
+   Y为有符号int16, 单位度, 范围-180~180; 当前仅SUB=0直线段。 */
 /* ---- 一键任务数组帧(车端按内置任务步骤表从当前步骤连跑至尾) ----
    12 帧: AA 55 12 12 0D 0A (4字节, 无载荷) ---- */
 #define CMD_RUNALL       0x12    /* 上位机 -> 车端：一键执行任务步骤数组 */
@@ -94,9 +99,11 @@ typedef struct
 {
     volatile uint8_t  type;     /* 命令字: CMD_PULSE / CMD_POS_GO / CMD_POS_ABORT */
     volatile uint8_t  dir;      /* 03帧: 方向码 */
-    volatile uint8_t  sub;      /* 05帧: 0=开始闭环 1=中止 */
+    volatile uint8_t  sub;      /* 05/08帧: 子命令 */
+    volatile uint8_t  flags;    /* 08帧: bit0相对位置, bit1指定yaw */
     volatile uint32_t param;    /* 03帧: 脉冲数; 05帧: 目标位置; 07帧: 45°段末位置 */
     volatile uint32_t param2;   /* 07帧: 直线段目标位置(编码值) */
+    volatile int16_t  yaw_target; /* 08帧: 目标yaw(deg) */
     volatile uint8_t  ready;    /* 1 = 有未取走的新命令 */
     volatile uint8_t  cnt;      /* 累计收到的有效命令数(饱和255) */
 } ZbeeCmd;

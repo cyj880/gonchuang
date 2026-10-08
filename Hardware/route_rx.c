@@ -10,6 +10,7 @@
    动作帧：  AA 55 | 04 | BATCH | CODE | SUM | 0D 0A   （CODE: 1前进/2后退/3顺时针转90度/4逆时针转90度）
    脉冲帧： AA 55 | 10 | DIR | PL0 PL1 PL2 PL3 | SUM | 0D 0A   （调试：定距运动, 原03改号）
    定位帧： AA 55 | 05 | SUB | T0 T1 T2 T3 | SUM | 0D 0A   （pos闭环/45°段/原地转向）
+   高级直线:AA 55 | 08 | SUB | FLAGS | POS(4B) | YAW(2B) | SUM | 0D 0A
    链式帧： AA 55 | 07 | DIR | D0 D1 D2 D3 | L0 L1 L2 L3 | SUM | 0D 0A （一键任务链）
           SUB=0 直线定位(T=目标pos编码值) / SUB=1 右前45°段(T=段末pos) / SUB=4 左前45°段(同)
           SUB=5 缓行扫码(T=缓行目标pos) / SUB=6 二维码校准(T=0)
@@ -31,6 +32,7 @@
 #define CMD_PULSE     0x10     /* 脉冲定距运动(调试, 原0x03改号让位网页协议) */
 #define CMD_POS_GO    0x05
 #define CMD_POS_ABORT 0x06
+#define CMD_POS_ADV   0x08
 #define FRAME_TAIL1   0x0D
 #define FRAME_TAIL2   0x0A
 
@@ -53,9 +55,11 @@ typedef struct
 {
     volatile uint8_t  type;         /* CMD_PULSE / CMD_POS_GO / CMD_POS_ABORT */
     volatile uint8_t  dir;          /* 03帧: 方向码 */
-    volatile uint8_t  sub;          /* 05帧: 0=开始 1=中止 */
+    volatile uint8_t  sub;          /* 05/08帧: 子命令 */
+    volatile uint8_t  flags;        /* 08帧: bit0相对位置, bit1指定yaw */
     volatile uint32_t param;        /* 03帧: 脉冲数; 05帧: 目标位置; 07帧: 45°段末 */
     volatile uint32_t param2;       /* 07帧: 直线段目标位置 */
+    volatile int16_t  yaw_target;   /* 08帧: 目标yaw(deg) */
     volatile uint8_t  ready;        /* 1 = 有未取走的新命令 */
     volatile uint8_t  cnt;          /* 累计收到的有效命令数(饱和255) */
 } ZbeeCmdSlot;
@@ -127,6 +131,7 @@ void route_rx_byte(uint8_t ch)
         else if (ch == CMD_ACTION)                 rx_state = RX_BATCH;   /*批号后跟1字节动作码*/
         else if (ch == CMD_PULSE)  { rx_p_idx = 0; rx_p_len = 5; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_GO) { rx_p_idx = 0; rx_p_len = 5; rx_state = RX_P_DATA; }
+        else if (ch == CMD_POS_ADV) { rx_p_idx = 0; rx_p_len = 8; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_ABORT || ch == CMD_RUNALL) rx_state = RX_SUM;   /*无载荷, 累加和=命令字本身*/
         else if (ch == CMD_CHAIN)  { rx_p_idx = 0; rx_p_len = 9; rx_state = RX_P_DATA; }
         else                       rx_state = RX_H1;
@@ -167,6 +172,7 @@ void route_rx_byte(uint8_t ch)
             uint8_t bmax = 0;
             if (rx_cmd == CMD_PULSE)       bmax = PULSE_DIR_CW;   /*方向码 0~9*/
             else if (rx_cmd == CMD_POS_GO) bmax = 7;              /*子命令 0=直线 1=右前45° 2=左转 3=右转 4=左前45° 5=缓行扫码 6=二维码校准 7=回右上角*/
+            else if (rx_cmd == CMD_POS_ADV) bmax = 0;              /*高级直线帧暂只支持SUB=0*/
             else if (rx_cmd == CMD_CHAIN)  bmax = 4;              /*方向: 仅1=右前 4=左前合法(见下)*/
             else { rx_state = RX_H1; break; }
             if (rx_cmd == CMD_CHAIN && ch != 1 && ch != 4) { rx_state = RX_H1; break; }
@@ -176,6 +182,11 @@ void route_rx_byte(uint8_t ch)
         else
         {
             rx_p_bytes[rx_p_idx - 1] = ch;
+            if (rx_cmd == CMD_POS_ADV && rx_p_idx == 1 && ch > 3)
+            {
+                rx_state = RX_H1;           /*08帧只允许bit0/bit1*/
+                break;
+            }
         }
         rx_sum_calc += ch;
         if (++rx_p_idx >= rx_p_len) rx_state = RX_SUM;
@@ -184,9 +195,9 @@ void route_rx_byte(uint8_t ch)
     case RX_SUM:
         if ((uint8_t)rx_sum_calc == ch)
         {
-            if (rx_cmd == CMD_PULSE || rx_cmd == CMD_POS_GO || rx_cmd == CMD_CHAIN)
+            if (rx_cmd == CMD_PULSE || rx_cmd == CMD_POS_GO || rx_cmd == CMD_POS_ADV || rx_cmd == CMD_CHAIN)
             {
-                /* 03/05帧：帧尾通过后再提交（见 RX_T2），此处只留状态 */
+                /* 位置命令在帧尾通过后再提交（见 RX_T2） */
                 rx_state = RX_T1;
             }
             else if (rx_cmd == CMD_ROUTE || rx_cmd == CMD_ROUTE45)
@@ -244,6 +255,27 @@ void route_rx_byte(uint8_t ch)
                                ((uint32_t)rx_p_bytes[1] << 8) |
                                ((uint32_t)rx_p_bytes[2] << 16) |
                                ((uint32_t)rx_p_bytes[3] << 24);
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready  = 1;
+            }
+            else if (rx_cmd == CMD_POS_ADV)
+            {
+                int16_t yaw;
+                g_cmd.type   = CMD_POS_ADV;
+                g_cmd.sub    = rx_p_dir;
+                g_cmd.flags  = rx_p_bytes[0];
+                g_cmd.param  = (uint32_t)rx_p_bytes[1] |
+                               ((uint32_t)rx_p_bytes[2] << 8) |
+                               ((uint32_t)rx_p_bytes[3] << 16) |
+                               ((uint32_t)rx_p_bytes[4] << 24);
+                yaw = (int16_t)((uint16_t)rx_p_bytes[5] |
+                                ((uint16_t)rx_p_bytes[6] << 8));
+                if (yaw < -180 || yaw > 180)
+                {
+                    rx_state = RX_H1;
+                    break;
+                }
+                g_cmd.yaw_target = yaw;
                 if (g_cmd.cnt < 255) g_cmd.cnt++;
                 g_cmd.ready  = 1;
             }
@@ -413,7 +445,9 @@ uint8_t cmd_get(ZbeeCmd *c)
     c->type  = g_cmd.type;
     c->dir   = g_cmd.dir;
     c->sub   = g_cmd.sub;
+    c->flags = g_cmd.flags;
     c->param = g_cmd.param;
+    c->yaw_target = g_cmd.yaw_target;
     taskEXIT_CRITICAL();
     return 1;
 }
@@ -424,7 +458,9 @@ void cmd_last(ZbeeCmd *c, uint8_t *cnt)
     c->type  = g_cmd.type;
     c->dir   = g_cmd.dir;
     c->sub   = g_cmd.sub;
+    c->flags = g_cmd.flags;
     c->param = g_cmd.param;
+    c->yaw_target = g_cmd.yaw_target;
     *cnt     = g_cmd.cnt;
     taskEXIT_CRITICAL();
 }
@@ -448,6 +484,17 @@ void cmd_tx_ack(const ZbeeCmd *c)
         pl[3] = (uint8_t)((p >> 16) & 0xFF);
         pl[4] = (uint8_t)((p >> 24) & 0xFF);
         plen = 5;
+        break;
+    case CMD_POS_ADV:
+        pl[0] = c->sub;
+        pl[1] = c->flags;
+        pl[2] = (uint8_t)(p & 0xFF);
+        pl[3] = (uint8_t)((p >> 8) & 0xFF);
+        pl[4] = (uint8_t)((p >> 16) & 0xFF);
+        pl[5] = (uint8_t)((p >> 24) & 0xFF);
+        pl[6] = (uint8_t)(c->yaw_target & 0xFF);
+        pl[7] = (uint8_t)(((uint16_t)c->yaw_target >> 8) & 0xFF);
+        plen = 8;
         break;
     case CMD_CHAIN:
         pl[0] = c->dir;                                     /*1=右前45° 4=左前45°*/
