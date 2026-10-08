@@ -195,7 +195,8 @@ void route_rx_byte(uint8_t ch)
     case RX_SUM:
         if ((uint8_t)rx_sum_calc == ch)
         {
-            if (rx_cmd == CMD_PULSE || rx_cmd == CMD_POS_GO || rx_cmd == CMD_POS_ADV || rx_cmd == CMD_CHAIN)
+            if (rx_cmd == CMD_PULSE || rx_cmd == CMD_POS_GO || rx_cmd == CMD_POS_ADV ||
+                rx_cmd == CMD_CHAIN || rx_cmd == CMD_POS_ABORT || rx_cmd == CMD_RUNALL)
             {
                 /* 位置命令在帧尾通过后再提交（见 RX_T2） */
                 rx_state = RX_T1;
@@ -260,7 +261,13 @@ void route_rx_byte(uint8_t ch)
             }
             else if (rx_cmd == CMD_POS_ADV)
             {
-                int16_t yaw;
+                int16_t yaw = (int16_t)((uint16_t)rx_p_bytes[5] |
+                                        ((uint16_t)rx_p_bytes[6] << 8));
+                if (yaw < 0 || yaw > 360)
+                {
+                    rx_state = RX_H1;
+                    break;
+                }
                 g_cmd.type   = CMD_POS_ADV;
                 g_cmd.sub    = rx_p_dir;
                 g_cmd.flags  = rx_p_bytes[0];
@@ -268,13 +275,6 @@ void route_rx_byte(uint8_t ch)
                                ((uint32_t)rx_p_bytes[2] << 8) |
                                ((uint32_t)rx_p_bytes[3] << 16) |
                                ((uint32_t)rx_p_bytes[4] << 24);
-                yaw = (int16_t)((uint16_t)rx_p_bytes[5] |
-                                ((uint16_t)rx_p_bytes[6] << 8));
-                if (yaw < 0 || yaw > 360)
-                {
-                    rx_state = RX_H1;
-                    break;
-                }
                 g_cmd.yaw_target = yaw;
                 if (g_cmd.cnt < 255) g_cmd.cnt++;
                 g_cmd.ready  = 1;
@@ -447,6 +447,7 @@ uint8_t cmd_get(ZbeeCmd *c)
     c->sub   = g_cmd.sub;
     c->flags = g_cmd.flags;
     c->param = g_cmd.param;
+    c->param2 = g_cmd.param2;
     c->yaw_target = g_cmd.yaw_target;
     taskEXIT_CRITICAL();
     return 1;
@@ -460,6 +461,7 @@ void cmd_last(ZbeeCmd *c, uint8_t *cnt)
     c->sub   = g_cmd.sub;
     c->flags = g_cmd.flags;
     c->param = g_cmd.param;
+    c->param2 = g_cmd.param2;
     c->yaw_target = g_cmd.yaw_target;
     *cnt     = g_cmd.cnt;
     taskEXIT_CRITICAL();
@@ -509,7 +511,8 @@ void cmd_tx_ack(const ZbeeCmd *c)
         plen = 9;
         break;
     case CMD_POS_ABORT:
-        plen = 0;                    /*06中止帧无载荷*/
+    case CMD_RUNALL:
+        plen = 0;                    /*06中止/12连跑帧无载荷*/
         break;
     default:
         return;

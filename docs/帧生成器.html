@@ -74,7 +74,7 @@
 /* ---------------- 模式定义 ---------------- */
 const MODES = [
   { id:'chain',   name:'一键任务链(07)',  cmd:0x07 },
-  { id:'line',    name:'直线行驶(05/00)',  sub:0 },
+  { id:'line',    name:'直线行驶(08)',     cmd:0x08 },
   { id:'fr45',    name:'右前45°(05/01)',   sub:1 },
   { id:'fl45',    name:'左前45°(05/04)',   sub:4 },
   { id:'slow',    name:'缓行扫码(05/05)',  sub:5 },
@@ -149,7 +149,7 @@ function render() {
           <option value="hold">保持当前角度</option><option value="target">指定目标角度</option>
         </select></div>
         <div class="row" id="yawRow" style="display:none"><label>目标偏航角(0~360°)</label><input type="number" id="yawTarget" value="0" min="0" max="360"></div>
-        <div class="hint">高级直线闭环：位置可按绝对编码值到达，也可从当前编码值累加；航向可保持起始方向或锁定指定角度。</div>`;
+        <div class="hint">绝对模式：到达输入的累计 pos。累加模式：启动时的累计 pos + 输入增量，只计算一次；正数增加、负数减少，转弯不重置 pos。航向可保持起始方向或锁定指定角度。</div>`;
   } else if (['fr45','fl45','slow'].includes(cur)) {
     const lbl = { line:'直线目标', fr45:'45°段末位置', fl45:'45°段末位置', slow:'缓行目标' }[cur];
     const def = { line:650000, fr45:150000, fl45:150000, slow:650000 }[cur];

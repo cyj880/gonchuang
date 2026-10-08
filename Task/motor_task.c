@@ -290,6 +290,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 
 #define POS_OUT_MAX_RPM     100      /* 位置PID输出限幅(RPM) */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
+#define POS_PROGRESS_MS     1000u   /* 持续未向目标靠近时停车(反馈不变/方向错误) */
+#define POS_PROGRESS_COUNTS 1000.0f /* 每次确认进度需至少靠近约1.5mm */
 
 #define POS_PID_KP          0.0005f  /* 误差(编码值) -> RPM */
 #define POS_PID_KI          0.0003f
@@ -443,7 +445,7 @@ static uint8_t step_idx = 0;      /*当前步骤下标*/
 static uint8_t array_mode = 0;    /*0=单步(每帧一步) 1=一键连跑*/
 static void task_step_start(const TaskStep *st);
 static TaskPhase    phase = PHASE_IDLE;   /*任务阶段(执行器与主循环共用)*/
-static int32_t      pos_target = 0;    /*当前直线段目标*/
+static int32_t      pos_target = 0;    /*目标累计编码值，与LCD pos/PID反馈同坐标*/
 static int32_t      leg1_end = 0;      /*45°段段末位置*/
 static int32_t      leg1_next = 0;     /*07旧链衔接目标*/
 static uint8_t      leg1_next_valid = 0;
@@ -454,12 +456,54 @@ static int          turn_w_last = 0;   /*转向限斜率基准*/
 static uint8_t      turn_settle_ticks = 0; /*到位停车稳定确认计数*/
 static TickType_t   posrun_start = 0;  /*本步骤起始时刻*/
 static float        yaw_hold = 0.0f;   /*本步航向保持目标: 每步启动时刻的车头朝向(相对零点±180)*/
-static int32_t      seg_base[2] = {0, 0};   /*段计数基准: 每90°转弯结束后重置为当前计数,
-                                            段内目标值都是"相对本段零点"的绝对计数*/
+static float        pos_initial_error = 0.0f;
+static float        pos_best_error = 0.0f;
+static TickType_t   pos_progress_tick = 0;
 static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基准)*/
 static uint8_t      line_axis = 0;     /*直线段反馈轴: 0=里程计1(vy) 1=里程计2(vx)*/
 static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
 static void task_step_done(void);
+
+typedef enum { POS_RUNNING, POS_REACHED, POS_FAILED } PosRunState;
+
+/* 绝对帧直接使用累计目标；相对帧只在启动时加一次当前值。 */
+static void pos_run_start(int32_t current)
+{
+    pos_initial_error = (float)pos_target - (float)current;
+    pos_best_error = fabsf(pos_initial_error);
+    pos_progress_tick = posrun_start = xTaskGetTickCount();
+}
+
+static PosRunState pos_run_check(int32_t current, uint8_t online)
+{
+    TickType_t now = xTaskGetTickCount();
+    float err = (float)pos_target - (float)current;
+    float aerr = fabsf(err);
+
+    if (!online || (now - posrun_start) >= pdMS_TO_TICKS(POS_RUN_TIMEOUT_MS))
+        return POS_FAILED;
+    /* 低速到位或跨过目标即停，避免采样跳过容差带后反复追赶。 */
+    if (aerr <= POS_TOL_COUNTS ||
+        (pos_initial_error > 0.0f && err <= 0.0f) ||
+        (pos_initial_error < 0.0f && err >= 0.0f))
+        return POS_REACHED;
+    if (aerr <= pos_best_error - POS_PROGRESS_COUNTS)
+    {
+        pos_best_error = aerr;
+        pos_progress_tick = now;
+    }
+    else if ((now - pos_progress_tick) >= pdMS_TO_TICKS(POS_PROGRESS_MS))
+        return POS_FAILED;
+    return POS_RUNNING;
+}
+
+static void pos_run_abort(void)
+{
+    array_mode = 0;
+    leg1_next_valid = 0;
+    phase = PHASE_IDLE;
+    Motor_Stop();
+}
 
 /* ---- 启动一个步骤: 按类型设置对应阶段参数并切换 phase ---- */
 static void task_step_start(const TaskStep *st)
@@ -491,6 +535,7 @@ static void task_step_start(const TaskStep *st)
         odometry_get(&o0);
         line_axis  = st->axis;
         pos_target = ((line_axis == 0) ? o0.enc_pos[0] : o0.enc_pos[1]) + st->target;
+        pos_run_start(o0.enc_pos[line_axis]);
         yaw_hold    = IMU_GetYaw();        /*本步保持朝向=启动时刻车头*/
         PID_Init(&PosPID);
         PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
@@ -512,8 +557,9 @@ static void task_step_start(const TaskStep *st)
     {
         OdomData_t o0;
         odometry_get(&o0);
-        pos_target = ((slow_axis == 0) ? o0.enc_pos[0] : o0.enc_pos[1]) + st->target;
         slow_axis  = st->axis;
+        pos_target = o0.enc_pos[slow_axis] + st->target;
+        pos_run_start(o0.enc_pos[slow_axis]);
         yaw_hold    = IMU_GetYaw();        /*本步保持朝向=启动时刻车头*/
         PID_Init(&YawPID);
         YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
@@ -545,7 +591,11 @@ static void task_step_done(void)
 {
     Motor_Stop();
     step_idx++;
-    if (step_idx >= TASK_Z1_N) step_idx = 0;          /*数组走完回0, 下条链从头*/
+    if (step_idx >= TASK_Z1_N)
+    {
+        step_idx = 0;                               /*数组走完回0, 下条链从头*/
+        array_mode = 0;                             /*本次连跑结束，停车等下一帧*/
+    }
     if (array_mode)
         task_step_start(&task_z1[step_idx]);          /*一键: 无缝启动下一步*/
     else
@@ -621,6 +671,7 @@ void MotorTask(void *pvParameters)
 
             case CMD_POS_GO:
                 cmd_tx_ack(&c);
+                if (PHASE_CAN_START(phase)) array_mode = 0;
                 if (c.sub == 2 || c.sub == 3)          /*原地转向闭环: 2=左转 3=右转, param=角度deg*/
                 {
                     float d = (float)c.param;
@@ -653,9 +704,13 @@ void MotorTask(void *pvParameters)
                 }
                 else if (c.sub == 5)                   /*缓行扫码段(单独触发): param=缓行目标pos*/
                 {
+                    OdomData_t o;
                     if (!PHASE_CAN_START(phase)) break;
+                    odometry_get(&o);
+                    slow_axis = ODOM_POS_AXIS;
                     pos_target   = (int32_t)c.param;
-                    posrun_start = xTaskGetTickCount();
+                    pos_run_start(o.enc_pos[slow_axis]);
+                    yaw_hold = IMU_GetYaw();
                     PID_Init(&YawPID);                 /*缓行段yaw保持用*/
                     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
                     YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
@@ -670,8 +725,12 @@ void MotorTask(void *pvParameters)
                 }
                 else                                   /*直线PID段: param=目标位置*/
                 {
+                    OdomData_t o;
+                    odometry_get(&o);
+                    line_axis = ODOM_POS_AXIS;
                     pos_target   = (int32_t)c.param;
-                    posrun_start = xTaskGetTickCount();
+                    pos_run_start(o.enc_pos[line_axis]);
+                    yaw_hold = IMU_GetYaw();
                     PID_Init(&PosPID);                         /* 清运行状态 */
                     PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
                     PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
@@ -692,15 +751,16 @@ void MotorTask(void *pvParameters)
                     OdomData_t o;
                     int32_t current;
                     odometry_get(&o);
-                    current = o.enc_pos[0];
-                    line_axis = 0;                    /*高级帧当前固定使用纵向反馈轴*/
+                    array_mode = 0;
+                    line_axis = ODOM_POS_AXIS;
+                    current = o.enc_pos[line_axis];
                     if (c.flags & 0x01)
                         pos_target = current + (int32_t)c.param; /*相对当前位置累加*/
                     else
                         pos_target = (int32_t)c.param;            /*绝对编码目标*/
                     yaw_hold = (c.flags & 0x02) ?
                                yaw_abs360_to_signed((float)c.yaw_target) : IMU_GetYaw();
-                    posrun_start = xTaskGetTickCount();
+                    pos_run_start(current);
                     PID_Init(&PosPID);
                     PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
                     PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
@@ -726,6 +786,7 @@ void MotorTask(void *pvParameters)
                                                      后续自动: 衔接直线->缓行->扫码停车*/
                 cmd_tx_ack(&c);
                 if (!PHASE_CAN_START(phase)) break;    /*任务运行中: 忽略(先发06中止)*/
+                array_mode = 0;
                 leg_dir         = (c.dir == 4) ? 2 : 1;
                 leg1_end        = (int32_t)c.param;
                 leg1_next       = (int32_t)c.param2;
@@ -740,11 +801,12 @@ void MotorTask(void *pvParameters)
                 break;
 
             case CMD_POS_ABORT:
-                cmd_tx_ack(&c);
+                array_mode = 0;
                 phase = PHASE_IDLE;
                 leg1_next_valid = 0;
                 turn_w_last = 0;
                 Motor_Stop();                              /* 中止: 立即停车 */
+                cmd_tx_ack(&c);                             /*先停车再应答*/
                 break;
 
             default:
@@ -778,7 +840,9 @@ void MotorTask(void *pvParameters)
                 {
                     /*07旧链: 无缝衔接直线段(里程计累计不清, 目标绝对值直接生效)*/
                     pos_target   = leg1_next;
-                    posrun_start = xTaskGetTickCount();
+                    line_axis = ODOM_POS_AXIS;
+                    pos_run_start(o.enc_pos[line_axis]);
+                    leg1_next_valid = 0;
                     PID_Init(&PosPID);
                     PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
                     PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
@@ -818,10 +882,6 @@ void MotorTask(void *pvParameters)
                     Motor_Stop();                     /*只发一次急停，避免重复占用CAN*/
                 if (++turn_settle_ticks >= TURN_SETTLE_TICKS)
                 {
-                    OdomData_t o;
-                    odometry_get(&o);
-                    seg_base[0] = o.enc_pos[0];        /*转弯结束: 里程计重新计数*/
-                    seg_base[1] = o.enc_pos[1];
                     turn_settle_ticks = 0;
                     task_step_done();                  /*稳定到位: 推进步骤*/
                 }
@@ -883,16 +943,16 @@ void MotorTask(void *pvParameters)
             odometry_get(&o);
             float err = (float)pos_target - (float)o.enc_pos[ODOM_POS_AXIS];
             float aerr = fabsf(err);
+            PosRunState state = pos_run_check(o.enc_pos[ODOM_POS_AXIS], o.online[ODOM_POS_AXIS]);
 
-            if (aerr <= (float)POS_TOL_COUNTS)
+            if (state == POS_REACHED)
             {
                 phase = PHASE_DONE;                        /*已到右上角点位*/
                 Motor_Stop();
             }
-            else if ((xTaskGetTickCount() - posrun_start) > pdMS_TO_TICKS(POS_RUN_TIMEOUT_MS))
+            else if (state == POS_FAILED)
             {
-                phase = PHASE_IDLE;                        /*超时保护*/
-                Motor_Stop();
+                pos_run_abort();
             }
             else
             {
@@ -922,21 +982,20 @@ void MotorTask(void *pvParameters)
             OdomData_t o;
             int32_t cur;
             float err, aerr, out;
+            PosRunState state;
             odometry_get(&o);
             cur  = (line_axis == 0) ? o.enc_pos[0] : o.enc_pos[1];
-            int32_t seg = seg_base[line_axis];
-            err  = (float)pos_target - (float)(cur - seg);   /*段基准系: 转弯后从0重新计数*/
+            err  = (float)pos_target - (float)cur;           /*与PID使用同一累计坐标*/
             aerr = fabsf(err);
+            state = pos_run_check(cur, o.online[line_axis]);
 
-            if (aerr <= (float)POS_TOL_COUNTS)
+            if (state == POS_REACHED)
             {
                 task_step_done();                      /*到位: 推进步骤(停车在done内)*/
             }
-            else if ((xTaskGetTickCount() - posrun_start) > pdMS_TO_TICKS(POS_RUN_TIMEOUT_MS))
+            else if (state == POS_FAILED)
             {
-                array_mode = 0;
-                phase = PHASE_IDLE;                    /*超时保护: 目标不可达*/
-                Motor_Stop();
+                pos_run_abort();
             }
             else
             {
@@ -976,14 +1035,18 @@ void MotorTask(void *pvParameters)
         {
             OdomData_t o;
             int32_t cur;
-            float err, aerr;
+            float err;
+            PosRunState state;
             odometry_get(&o);
             cur  = (slow_axis == 0) ? o.enc_pos[0] : o.enc_pos[1];
-            int32_t seg = seg_base[slow_axis];
-            err  = (float)pos_target - (float)(cur - seg);   /*段基准系: 转弯后从0重新计数*/
-            aerr = fabsf(err);
+            err  = (float)pos_target - (float)cur;
+            state = pos_run_check(cur, o.online[slow_axis]);
 
-            if (UART8_CamHasTarget() || aerr <= (float)POS_TOL_COUNTS)
+            if (state == POS_FAILED)
+            {
+                pos_run_abort();
+            }
+            else if (UART8_CamHasTarget() || state == POS_REACHED)
             {
                 task_step_done();                      /*扫到码/到位: 推进步骤*/
             }
