@@ -148,7 +148,7 @@ function render() {
         <div class="row"><label>偏航角模式</label><select id="yawMode" onchange="toggleYaw()">
           <option value="hold">保持当前角度</option><option value="target">指定目标角度</option>
         </select></div>
-        <div class="row" id="yawRow" style="display:none"><label>目标偏航角(-180~180°)</label><input type="number" id="yawTarget" value="0"></div>
+        <div class="row" id="yawRow" style="display:none"><label>目标偏航角(0~360°)</label><input type="number" id="yawTarget" value="0" min="0" max="360"></div>
         <div class="hint">高级直线闭环：位置可按绝对编码值到达，也可从当前编码值累加；航向可保持起始方向或锁定指定角度。</div>`;
   } else if (['fr45','fl45','slow'].includes(cur)) {
     const lbl = { line:'直线目标', fr45:'45°段末位置', fl45:'45°段末位置', slow:'缓行目标' }[cur];
@@ -261,7 +261,7 @@ el('gen').onclick = () => {
       const posRel = el('posMode').value === 'rel';
       const yawSet = el('yawMode').value === 'target';
       let yaw = yawSet ? num('yawTarget') : 0;
-      if (yawSet && (isNaN(yaw) || yaw < -180 || yaw > 180)) throw '目标偏航角须在 -180~180°';
+      if (yawSet && (isNaN(yaw) || yaw < 0 || yaw > 360)) throw '目标偏航角须在 0~360°';
       const flags = (posRel ? 1 : 0) | (yawSet ? 2 : 0);
       payload = [0, flags, ...i32le(v), ...i16le(yaw)];
       desc = `高级直线: ${posRel ? '当前位置累加' : '绝对目标'} ${v}, ${yawSet ? `目标yaw ${yaw}°` : '保持当前yaw'}`;

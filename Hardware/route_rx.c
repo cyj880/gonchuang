@@ -59,7 +59,7 @@ typedef struct
     volatile uint8_t  flags;        /* 08帧: bit0相对位置, bit1指定yaw */
     volatile uint32_t param;        /* 03帧: 脉冲数; 05帧: 目标位置; 07帧: 45°段末 */
     volatile uint32_t param2;       /* 07帧: 直线段目标位置 */
-    volatile int16_t  yaw_target;   /* 08帧: 目标yaw(deg) */
+    volatile int16_t  yaw_target;   /* 08帧: LCD坐标目标yaw(0~360deg) */
     volatile uint8_t  ready;        /* 1 = 有未取走的新命令 */
     volatile uint8_t  cnt;          /* 累计收到的有效命令数(饱和255) */
 } ZbeeCmdSlot;
@@ -270,7 +270,7 @@ void route_rx_byte(uint8_t ch)
                                ((uint32_t)rx_p_bytes[4] << 24);
                 yaw = (int16_t)((uint16_t)rx_p_bytes[5] |
                                 ((uint16_t)rx_p_bytes[6] << 8));
-                if (yaw < -180 || yaw > 180)
+                if (yaw < 0 || yaw > 360)
                 {
                     rx_state = RX_H1;
                     break;

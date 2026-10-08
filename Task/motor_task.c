@@ -424,6 +424,13 @@ static float yaw_target_near(float target, float actual)
     return actual + turn_angdiff(target, actual);
 }
 
+static float yaw_abs360_to_signed(float yaw)
+{
+    yaw = fmodf(yaw, 360.0f);
+    if (yaw > 180.0f) yaw -= 360.0f;
+    return yaw;
+}
+
 /**
   * @brief  四轮电机任务
   * @note   MOTOR_TASK_AUTO_DEMO = 1 时循环跑自检动作；
@@ -692,7 +699,7 @@ void MotorTask(void *pvParameters)
                     else
                         pos_target = (int32_t)c.param;            /*绝对编码目标*/
                     yaw_hold = (c.flags & 0x02) ?
-                               turn_angdiff((float)c.yaw_target, 0.0f) : IMU_GetYaw();
+                               yaw_abs360_to_signed((float)c.yaw_target) : IMU_GetYaw();
                     posrun_start = xTaskGetTickCount();
                     PID_Init(&PosPID);
                     PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
