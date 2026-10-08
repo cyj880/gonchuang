@@ -935,7 +935,7 @@ void MotorTask(void *pvParameters)
                     if (debug_route_branch == 1)
                         debug_line_start(100000, 0, 0.0f);   /*扫码区→右上角*/
                     else
-                        debug_line_start(700000, 0, 0.0f);   /*扫码区→中心复合流程校准位置*/
+                        debug_line_start(720000, 0, 0.0f);   /*扫码区→中心复合流程校准位置*/
                 }
                 else
                 {
@@ -1048,7 +1048,7 @@ void MotorTask(void *pvParameters)
                     {
                         Motor_Stop();
                         debug_route_step = 5;
-                        debug_line_start(500000, 1, 90.0f);    /*中心复合流程: yaw90下相对前进*/
+                        debug_line_start(600000, 1, 90.0f);    /*中心复合流程: yaw90下相对前进*/
                     }
                     else
                     {
