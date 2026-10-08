@@ -172,7 +172,7 @@ void route_rx_byte(uint8_t ch)
             uint8_t bmax = 0;
             if (rx_cmd == CMD_PULSE)       bmax = PULSE_DIR_CW;   /*方向码 0~9*/
             else if (rx_cmd == CMD_POS_GO) bmax = 7;              /*子命令 0=直线 1=右前45° 2=左转 3=右转 4=左前45° 5=缓行扫码 6=二维码校准 7=回右上角*/
-            else if (rx_cmd == CMD_POS_ADV) bmax = 0;              /*高级直线帧暂只支持SUB=0*/
+            else if (rx_cmd == CMD_POS_ADV) bmax = 1;              /*0=直线, 1=右前45°*/
             else if (rx_cmd == CMD_CHAIN)  bmax = 4;              /*方向: 仅1=右前 4=左前合法(见下)*/
             else { rx_state = RX_H1; break; }
             if (rx_cmd == CMD_CHAIN && ch != 1 && ch != 4) { rx_state = RX_H1; break; }
@@ -263,7 +263,13 @@ void route_rx_byte(uint8_t ch)
             {
                 int16_t yaw = (int16_t)((uint16_t)rx_p_bytes[5] |
                                         ((uint16_t)rx_p_bytes[6] << 8));
-                if (yaw < 0 || yaw > 360)
+                uint32_t param = (uint32_t)rx_p_bytes[1] |
+                                 ((uint32_t)rx_p_bytes[2] << 8) |
+                                 ((uint32_t)rx_p_bytes[3] << 16) |
+                                 ((uint32_t)rx_p_bytes[4] << 24);
+                if (yaw < 0 || yaw > 360 ||
+                    (rx_p_dir == 1 && (!(rx_p_bytes[0] & 0x01) ||
+                                       param == 0 || param > 0x7FFFFFFFu)))
                 {
                     rx_state = RX_H1;
                     break;
@@ -271,10 +277,7 @@ void route_rx_byte(uint8_t ch)
                 g_cmd.type   = CMD_POS_ADV;
                 g_cmd.sub    = rx_p_dir;
                 g_cmd.flags  = rx_p_bytes[0];
-                g_cmd.param  = (uint32_t)rx_p_bytes[1] |
-                               ((uint32_t)rx_p_bytes[2] << 8) |
-                               ((uint32_t)rx_p_bytes[3] << 16) |
-                               ((uint32_t)rx_p_bytes[4] << 24);
+                g_cmd.param  = param;
                 g_cmd.yaw_target = yaw;
                 if (g_cmd.cnt < 255) g_cmd.cnt++;
                 g_cmd.ready  = 1;

@@ -75,7 +75,7 @@
 const MODES = [
   { id:'chain',   name:'一键任务链(07)',  cmd:0x07 },
   { id:'line',    name:'直线行驶(08)',     cmd:0x08 },
-  { id:'fr45',    name:'右前45°(05/01)',   sub:1 },
+  { id:'fr45',    name:'右前45°(08/01)',   sub:1 },
   { id:'fl45',    name:'左前45°(05/04)',   sub:4 },
   { id:'slow',    name:'缓行扫码(05/05)',  sub:5 },
   { id:'home',    name:'回右上角(05/07)',  sub:7 },
@@ -125,6 +125,12 @@ function posInput(id, label, def) {
     <span class="conv" id="${id}_c"></span>
   </div>`;
 }
+function yawInput() {
+  return `<div class="row"><label>偏航角模式</label><select id="yawMode" onchange="toggleYaw()">
+    <option value="hold">保持当前角度</option><option value="target">指定目标角度</option>
+  </select></div>
+  <div class="row" id="yawRow" style="display:none"><label>目标偏航角(0~360°)</label><input type="number" id="yawTarget" value="0" min="0" max="360" step="1"></div>`;
+}
 function render() {
   const m = MODES.find(x => x.id === cur);
   el('modes').innerHTML = MODES.map(x =>
@@ -144,20 +150,16 @@ function render() {
     h = posInput('p1', '直线位置', 650000) +
         `<div class="row"><label>位置模式</label><select id="posMode">
           <option value="abs">绝对目标值</option><option value="rel">在当前位置上累加</option>
-        </select></div>
-        <div class="row"><label>偏航角模式</label><select id="yawMode" onchange="toggleYaw()">
-          <option value="hold">保持当前角度</option><option value="target">指定目标角度</option>
-        </select></div>
-        <div class="row" id="yawRow" style="display:none"><label>目标偏航角(0~360°)</label><input type="number" id="yawTarget" value="0" min="0" max="360"></div>
-        <div class="hint">两种位置模式均可输入负数。绝对模式：到达输入的累计 pos；目标大于当前 pos 则前进，小于则后退，到位容差内停车。累加模式：启动时的累计 pos + 输入增量，只计算一次；正增量前进、负增量后退。转弯不重置 pos，倒车仍保持所选航向。</div>`;
-  } else if (['fr45','fl45','slow'].includes(cur)) {
-    const lbl = { line:'直线目标', fr45:'45°段末位置', fl45:'45°段末位置', slow:'缓行目标' }[cur];
-    const def = { line:650000, fr45:150000, fl45:150000, slow:650000 }[cur];
+        </select></div>` + yawInput() +
+        `<div class="hint">两种位置模式均可输入负数。绝对模式：到达输入的累计 pos；目标大于当前 pos 则前进，小于则后退，到位容差内停车。累加模式：启动时的累计 pos + 输入增量，只计算一次；正增量前进、负增量后退。转弯不重置 pos，倒车仍保持所选航向。</div>`;
+  } else if (cur === 'fr45') {
+    h = posInput('p1', '45°纵向行程', 150000) + yawInput() +
+        `<div class="hint">右前45°为相对车头的平移方向；偏航角为要保持的车头朝向。行程填写正整数，按本段纵向编码器变化量判停；可保持起始角度或锁定 LCD 坐标的指定角度。单独指令到位停车，再发送下一步指令。</div>`;
+  } else if (['fl45','slow'].includes(cur)) {
+    const lbl = { fl45:'45°段末位置', slow:'缓行目标' }[cur];
+    const def = { fl45:150000, slow:650000 }[cur];
     h = posInput('p1', lbl, def) +
-        `<div class="hint">${{line:'PID直行+航向保持; 距目标15cm自动转缓行扫码',
-                              fr45:'右前45°斜走(LF+RR), 段末自动衔接已排队的直线帧',
-                              fl45:'左前45°斜走(RF+LR), 段末自动衔接已排队的直线帧',
-                              slow:'6RPM缓行+扫到二维码即进校准段; 走到目标兜底停',
+        `<div class="hint">${{fl45:'左前45°斜走(RF+LR), 段末自动衔接已排队的直线帧',
                               slow:'6RPM缓行+扫到二维码即进校准段; 走到目标兜底停'}[cur]}</div>`;
   } else if (cur === 'home') {
     h = `<div class="row"><label>出发启停区</label>
@@ -254,19 +256,22 @@ el('gen').onclick = () => {
       if (isNaN(a) || a < 1 || a > 179) throw '角度须在 1~179';
       payload = [cur==='tl90'?2:3, ...i32le(a)];
       desc = `原地${cur==='tl90'?'左':'右'}转 ${a}°`;
-    } else if (cur === 'line') {
+    } else if (cur === 'line' || cur === 'fr45') {
       cmd = 0x08;
+      const diagonal = cur === 'fr45';
       const text = el('p1').value.trim();
       const v = Number(text);
       if (text === '' || !Number.isInteger(v) || v < -2147483648 || v > 2147483647)
         throw '位置须为 -2147483648~2147483647 的整数，可填写负数';
-      const posRel = el('posMode').value === 'rel';
+      if (diagonal && v <= 0) throw '右前45°行程须为 1~2147483647 的正整数';
+      const posRel = diagonal || el('posMode').value === 'rel';
       const yawSet = el('yawMode').value === 'target';
-      let yaw = yawSet ? num('yawTarget') : 0;
-      if (yawSet && (isNaN(yaw) || yaw < 0 || yaw > 360)) throw '目标偏航角须在 0~360°';
+      const yaw = yawSet ? Number(el('yawTarget').value) : 0;
+      if (yawSet && (el('yawTarget').value.trim() === '' || !Number.isInteger(yaw) || yaw < 0 || yaw > 360))
+        throw '目标偏航角须为 0~360° 的整数';
       const flags = (posRel ? 1 : 0) | (yawSet ? 2 : 0);
-      payload = [0, flags, ...i32le(v), ...i16le(yaw)];
-      desc = `高级直线: ${posRel ? '当前位置累加' : '绝对目标'} ${v}, ${yawSet ? `目标yaw ${yaw}°` : '保持当前yaw'}`;
+      payload = [diagonal ? 1 : 0, flags, ...i32le(v), ...i16le(yaw)];
+      desc = `${diagonal ? '右前45°: 本段纵向行程' : `高级直线: ${posRel ? '当前位置累加' : '绝对目标'}`} ${v}, ${yawSet ? `目标yaw ${yaw}°` : '保持当前yaw'}`;
     } else {  // fr45/fl45/slow/home: 05帧, 参数=位置
       cmd = 0x05;
       const m = MODES.find(x => x.id === cur);

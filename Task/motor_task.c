@@ -446,7 +446,7 @@ static uint8_t array_mode = 0;    /*0=单步(每帧一步) 1=一键连跑*/
 static void task_step_start(const TaskStep *st);
 static TaskPhase    phase = PHASE_IDLE;   /*任务阶段(执行器与主循环共用)*/
 static int32_t      pos_target = 0;    /*目标累计编码值，与LCD pos/PID反馈同坐标*/
-static int32_t      leg1_end = 0;      /*45°段段末位置*/
+static int32_t      leg1_end = 0;      /*45°段纵向编码器行程*/
 static int32_t      leg1_next = 0;     /*07旧链衔接目标*/
 static uint8_t      leg1_next_valid = 0;
 static uint8_t      leg_dir = 1;       /*斜走轮组: 1右前 2左前 3右后 4左后*/
@@ -505,6 +505,23 @@ static void pos_run_abort(void)
     Motor_Stop();
 }
 
+/* 各斜走入口统一捕获起点和航向，避免沿用上一段的状态。 */
+static void diag_run_start(uint8_t direction, int32_t distance, float heading)
+{
+    OdomData_t o;
+    odometry_get(&o);
+    diag_start = o.enc_pos[ODOM_POS_AXIS];
+    leg_dir = direction;
+    leg1_end = distance;
+    yaw_hold = heading;
+    posrun_start = xTaskGetTickCount();
+    PID_Init(&YawPID);
+    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+    YawPID.ErrorIntMax = YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+    YawPID.OutMax = YAW_OUT_MAX_RPM;  YawPID.OutMin = -YAW_OUT_MAX_RPM;
+    phase = PHASE_DIAG;
+}
+
 /* ---- 启动一个步骤: 按类型设置对应阶段参数并切换 phase ---- */
 static void task_step_start(const TaskStep *st)
 {
@@ -515,17 +532,9 @@ static void task_step_start(const TaskStep *st)
     {
     case STEPT_DIAG:                        /*45°斜走(带yaw保持, 段末判定走过|target|)*/
     {
-        OdomData_t o0;
-        odometry_get(&o0);
-        diag_start = o0.enc_pos[0];        /*相对步长基准(当前计数)*/
-        leg_dir = (st->dir == 5) ? 1 : (st->dir == 4) ? 2 : (st->dir == 7) ? 3 : 4;
-        leg1_end = st->target;
-        yaw_hold = IMU_GetYaw();           /*本步保持朝向=启动时刻车头(转弯后为新朝向)*/
-        PID_Init(&YawPID);
-        YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
-        YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
-        YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
-        phase = PHASE_DIAG;
+        uint8_t direction = (st->dir == 5) ? 1 : (st->dir == 4) ? 2 : (st->dir == 7) ? 3 : 4;
+        leg1_next_valid = 0;
+        diag_run_start(direction, st->target, IMU_GetYaw());
         break;
     }
 
@@ -692,15 +701,10 @@ void MotorTask(void *pvParameters)
                 }
                 else if (c.sub == 1 || c.sub == 4)     /*45°斜走段: 1=右前 4=左前, param=段末位置*/
                 {
-                    leg_dir      = (c.sub == 1) ? 1 : 2;
-                    leg1_end     = (int32_t)c.param;
-                    posrun_start = xTaskGetTickCount();
-                    PID_Init(&YawPID);                 /*清运行状态, 斜走段yaw保持用*/
-                    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
-                    YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
-                    YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
+                    if (!PHASE_CAN_START(phase)) break;
+                    leg1_next_valid = 0;
+                    diag_run_start((c.sub == 1) ? 1 : 2, (int32_t)c.param, IMU_GetYaw());
                     Motor_Enable(true);
-                    phase = PHASE_DIAG;
                 }
                 else if (c.sub == 5)                   /*缓行扫码段(单独触发): param=缓行目标pos*/
                 {
@@ -744,9 +748,19 @@ void MotorTask(void *pvParameters)
                 }
                 break;
 
-            case CMD_POS_ADV:                         /*08高级直线: 绝对/相对pos + 目标yaw*/
+            case CMD_POS_ADV:                         /*08高级运动: 直线/右前45° + 目标yaw*/
                 cmd_tx_ack(&c);
-                if (!PHASE_CAN_START(phase) || c.sub != 0) break;
+                if (!PHASE_CAN_START(phase)) break;
+                if (c.sub == 1)
+                {
+                    array_mode = 0;
+                    leg1_next_valid = 0;
+                    diag_run_start(1, (int32_t)c.param, (c.flags & 0x02) ?
+                                   yaw_abs360_to_signed((float)c.yaw_target) : IMU_GetYaw());
+                    Motor_Enable(true);
+                    break;
+                }
+                if (c.sub != 0) break;
                 {
                     OdomData_t o;
                     int32_t current;
@@ -787,17 +801,10 @@ void MotorTask(void *pvParameters)
                 cmd_tx_ack(&c);
                 if (!PHASE_CAN_START(phase)) break;    /*任务运行中: 忽略(先发06中止)*/
                 array_mode = 0;
-                leg_dir         = (c.dir == 4) ? 2 : 1;
-                leg1_end        = (int32_t)c.param;
+                diag_run_start((c.dir == 4) ? 2 : 1, (int32_t)c.param, IMU_GetYaw());
                 leg1_next       = (int32_t)c.param2;
                 leg1_next_valid = 1;
-                posrun_start    = xTaskGetTickCount();
-                PID_Init(&YawPID);                     /*清运行状态, 斜走段yaw保持用*/
-                YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
-                YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
-                YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
                 Motor_Enable(true);
-                phase = PHASE_DIAG;
                 break;
 
             case CMD_POS_ABORT:
@@ -814,7 +821,7 @@ void MotorTask(void *pvParameters)
             }
         }
 
-        /*---- 45°斜走段(匀速+航向保持; |里程计pos|≥段末位置 -> 无缝转直线PID段) ----
+        /*---- 45°斜走段(匀速+航向保持; 本段纵向行程到位 -> 停车或衔接直线) ----
            移动方向由 vx:vy=1:1 轮速比决定, 车头朝向由 yaw 闭环独立锁住 —— 麦轮两通道解耦 */
         if (phase == PHASE_DIAG)
         {
@@ -834,7 +841,7 @@ void MotorTask(void *pvParameters)
             else                                    /*左后45°: LF+RR反转*/
                 Motor_Move(POS_LEG1_RPM / 2, -POS_LEG1_RPM / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
 
-            if (fabsf((float)(o.enc_pos[ODOM_POS_AXIS] - diag_start)) >= fabsf((float)leg1_end))
+            if (fabsf((float)o.enc_pos[ODOM_POS_AXIS] - (float)diag_start) >= fabsf((float)leg1_end))
             {
                 if (!array_mode && leg1_next_valid)
                 {
