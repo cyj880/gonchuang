@@ -149,7 +149,7 @@ function render() {
           <option value="hold">保持当前角度</option><option value="target">指定目标角度</option>
         </select></div>
         <div class="row" id="yawRow" style="display:none"><label>目标偏航角(0~360°)</label><input type="number" id="yawTarget" value="0" min="0" max="360"></div>
-        <div class="hint">绝对模式：到达输入的累计 pos。累加模式：启动时的累计 pos + 输入增量，只计算一次；正数增加、负数减少，转弯不重置 pos。航向可保持起始方向或锁定指定角度。</div>`;
+        <div class="hint">两种位置模式均可输入负数。绝对模式：到达输入的累计 pos；目标大于当前 pos 则前进，小于则后退，到位容差内停车。累加模式：启动时的累计 pos + 输入增量，只计算一次；正增量前进、负增量后退。转弯不重置 pos，倒车仍保持所选航向。</div>`;
   } else if (['fr45','fl45','slow'].includes(cur)) {
     const lbl = { line:'直线目标', fr45:'45°段末位置', fl45:'45°段末位置', slow:'缓行目标' }[cur];
     const def = { line:650000, fr45:150000, fl45:150000, slow:650000 }[cur];
@@ -256,8 +256,10 @@ el('gen').onclick = () => {
       desc = `原地${cur==='tl90'?'左':'右'}转 ${a}°`;
     } else if (cur === 'line') {
       cmd = 0x08;
-      const v = num('p1');
-      if (isNaN(v)) throw '请填写位置值';
+      const text = el('p1').value.trim();
+      const v = Number(text);
+      if (text === '' || !Number.isInteger(v) || v < -2147483648 || v > 2147483647)
+        throw '位置须为 -2147483648~2147483647 的整数，可填写负数';
       const posRel = el('posMode').value === 'rel';
       const yawSet = el('yawMode').value === 'target';
       let yaw = yawSet ? num('yawTarget') : 0;
@@ -291,6 +293,9 @@ el('gen').onclick = () => {
     el('bytes').innerHTML = `<b>${desc}</b><br>` + expl;
     addHist(desc, toHex(lastBytes));
   } catch (e) {
+    lastBytes = null;
+    el('hexout').textContent = '—';
+    el('bytes').innerHTML = '';
     el('err').textContent = '错误: ' + e;
   }
 };

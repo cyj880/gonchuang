@@ -34,7 +34,10 @@ static void lcd_odom_cmd_line(void)
 
     cmd_last(&c, &ccnt);
     LCD_SetColor(LCD_YELLOW);
-    LCD_Printf(0, 64, LCD_6X8, "c%02X %-9lu #%-2u", c.type, c.param, ccnt);
+    if (c.type == CMD_POS_GO || c.type == CMD_POS_ADV || c.type == CMD_CHAIN)
+        LCD_Printf(0, 64, LCD_6X8, "c%02X %-9ld #%-2u", c.type, (long)(int32_t)c.param, ccnt);
+    else
+        LCD_Printf(0, 64, LCD_6X8, "c%02X %-9lu #%-2u", c.type, (unsigned long)c.param, ccnt);
 }
 
 /* CAM 行：MaixCam 的二维码中心横坐标 x + 偏差(x-320，正=码偏右)
