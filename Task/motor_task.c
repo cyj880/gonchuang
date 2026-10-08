@@ -470,11 +470,15 @@ static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基�
 static uint8_t      line_axis = 0;     /*直线段反馈轴: 0=里程计1(vy) 1=里程计2(vx)*/
 static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
 static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
-static uint8_t      debug_route_step = 0;   /*1=到右上角45度, 2=到扫码区*/
-static uint8_t      debug_route_branch = 0; /*0=未知停止, 1=回右上角, 2=去中心点复合*/
+static uint8_t      debug_route_step = 0;   /*1斜行/2扫码/3校准或回右上/4内部转向/5中心/6路线转向*/
+static uint16_t     debug_route_heading = 0; /*已完成动作的目标yaw，限定0/90/180/270*/
+static uint16_t     debug_goal_heading = 0;
+static RouteDebugLeg debug_route_leg;
+static uint8_t      debug_rule_index = 0;
+static uint8_t      debug_motion_index = 0;
 static volatile uint8_t no_next_alarm = 0;  /*MotorTask写，LCD_Task读*/
 static uint8_t      debug_pause_active = 0;
-static uint8_t      debug_pause_next = 0;   /*2=扫码, 3=分支直线, 0=结束*/
+static uint8_t      debug_pause_next = 0;   /*1=下一点对, 2=转向后执行点对, 0=结束*/
 static TickType_t   debug_pause_until = 0;
 static void task_step_done(void);
 static void turn_run_start(float start_yaw, float delta, uint8_t accumulate);
@@ -537,9 +541,9 @@ static PosRunState pos_run_check(int32_t current, uint8_t online)
 static void pos_run_abort(void)
 {
     array_mode = 0;
+    if (debug_route_active) route_debug_release(1);
     debug_route_active = 0;
     debug_route_step = 0;
-    debug_route_branch = 0;
     if (debug_pause_active) Buzzer_Off();
     debug_pause_active = 0;
     debug_pause_next = 0;
@@ -609,13 +613,165 @@ static void debug_turn_start(float target_yaw)
     turn_run_start(now_yaw, turn_angdiff(yaw_abs360_to_signed(target_yaw), now_yaw), 0);
 }
 
-static void debug_route_start(uint8_t branch)
+typedef enum
+{
+    RP_UNKNOWN, RP_START1, RP_START2, RP_DIAG_RU, RP_DIAG_RD, RP_QR, RP_RAW,
+    RP_ROUGH, RP_STORAGE, RP_RU, RP_RD, RP_LD, RP_LU, RP_CENTER
+} RoutePoint;
+
+typedef struct
+{
+    uint16_t x, y;
+    RoutePoint point;
+} RoutePointCoord;
+
+/*上位机发送坐标以左下角为原点，不使用绘图内部的向下Y坐标。*/
+static const RoutePointCoord debug_points[] = {
+    {2200,2200,RP_START1}, {2200,200,RP_START2},
+    {2000,2000,RP_DIAG_RU}, {2000,400,RP_DIAG_RD},
+    {2000,1200,RP_QR}, {1200,1900,RP_RAW}, {1200,400,RP_ROUGH},
+    {400,1200,RP_STORAGE}, {2000,1900,RP_RU}, {2000,500,RP_RD},
+    {400,400,RP_LD}, {400,1900,RP_LU}, {1200,1200,RP_CENTER}
+};
+
+typedef struct
+{
+    uint8_t sub;                               /*08帧子命令: 0直线/1右前斜行/2绝对转向*/
+    uint8_t relative;
+    int32_t value;
+} DebugMotion;
+
+typedef struct
+{
+    RoutePoint from, to;
+    uint8_t count;
+    DebugMotion motion[3];
+} DebugPointRule;
+
+/*仅在此表添加用户确认的点对；直行航向继承路线转向后的目标yaw。*/
+static const DebugPointRule debug_rules[] = {
+    {RP_START1,RP_DIAG_RU,1,{{1,1,100000}}},
+    {RP_DIAG_RU,RP_QR,1,{{0,1,520000}}},
+    {RP_QR,RP_RU,1,{{0,0,100000}}},
+    {RP_QR,RP_CENTER,3,{{0,0,720000},{2,0,90},{0,1,600000}}}
+};
+#define DEBUG_RULE_COUNT (sizeof(debug_rules) / sizeof(debug_rules[0]))
+
+static RoutePoint debug_point_at(uint16_t x, uint16_t y)
+{
+    uint8_t i;
+    if (x == 2000 && y >= 1100 && y <= 1300) return RP_QR;
+    if (y == 1900 && x >= 1100 && x <= 1300) return RP_RAW;
+    for (i = 0; i < sizeof(debug_points) / sizeof(debug_points[0]); i++)
+        if (debug_points[i].x == x && debug_points[i].y == y)
+            return debug_points[i].point;
+    return RP_UNKNOWN;
+}
+
+static uint8_t debug_leg_load(void)
+{
+    uint8_t i;
+    RoutePoint from, to;
+    if (!route_debug_next(1, &debug_route_leg)) return 0;
+    from = debug_point_at(debug_route_leg.from_x, debug_route_leg.from_y);
+    to = debug_point_at(debug_route_leg.to_x, debug_route_leg.to_y);
+    debug_rule_index = DEBUG_RULE_COUNT;
+    debug_motion_index = 0;
+    for (i = 0; i < DEBUG_RULE_COUNT; i++)
+        if (debug_rules[i].from == from && debug_rules[i].to == to)
+        {
+            debug_rule_index = i;
+            break;
+        }
+    debug_goal_heading = debug_route_heading;
+    if (debug_route_leg.action == CMD_ACT_CW)
+        debug_goal_heading = (debug_route_heading + 90) % 360;
+    else if (debug_route_leg.action == CMD_ACT_CCW)
+        debug_goal_heading = (debug_route_heading + 270) % 360;
+    return (uint8_t)(debug_rule_index < DEBUG_RULE_COUNT ||
+                     debug_route_leg.action == CMD_ACT_CW ||
+                     debug_route_leg.action == CMD_ACT_CCW);
+}
+
+static void debug_motion_start(void)
+{
+    const DebugMotion *motion;
+    if (debug_rule_index >= DEBUG_RULE_COUNT)
+    {
+        debug_no_next_start();
+        return;
+    }
+    motion = &debug_rules[debug_rule_index].motion[debug_motion_index];
+    if (motion->sub == 1)
+    {
+        debug_route_step = 1;
+        diag_run_start(1, motion->value, (float)debug_route_heading);
+    }
+    else if (motion->sub == 2)
+    {
+        debug_route_step = 4;
+        if (debug_route_leg.action != CMD_ACT_CW && debug_route_leg.action != CMD_ACT_CCW)
+            debug_goal_heading = (uint16_t)motion->value; /*未附带转向动作时沿用标定绝对90°*/
+        debug_turn_start((float)debug_goal_heading);
+    }
+    else
+    {
+        debug_route_step = (debug_rule_index == 1) ? 2 :
+                           (debug_motion_index == 2 ? 5 : 3);
+        debug_line_start(motion->value, motion->relative, (float)debug_route_heading);
+    }
+}
+
+static void debug_leg_start(void)
+{
+    /*中心点复合规则自带转向，先校准pos，随后消费本段04转向；不能重复转两次。*/
+    uint8_t has_internal_turn = (uint8_t)(debug_rule_index < DEBUG_RULE_COUNT &&
+                                debug_rules[debug_rule_index].count > 1 &&
+                                debug_rules[debug_rule_index].motion[1].sub == 2);
+    if (!has_internal_turn &&
+        (debug_route_leg.action == CMD_ACT_CW || debug_route_leg.action == CMD_ACT_CCW))
+    {
+        debug_route_step = 6;
+        debug_turn_start((float)debug_goal_heading);
+    }
+    else
+        debug_motion_start();
+}
+
+static void debug_motion_done(void)
+{
+    Motor_Stop();
+    if (phase == PHASE_TURN)
+    {
+        debug_route_heading = debug_goal_heading;
+        if (debug_route_step == 6)
+        {
+            if (debug_rule_index < DEBUG_RULE_COUNT)
+                debug_point_pause_start(2, 500);
+            else
+                debug_no_next_start();
+            return;
+        }
+    }
+    debug_motion_index++;
+    if (debug_motion_index < debug_rules[debug_rule_index].count)
+        debug_motion_start();                        /*复合点对内部动作，不提前记为到点*/
+    else if (debug_leg_load())
+        debug_point_pause_start(1, 500);
+    else
+        debug_no_next_start();
+}
+
+static void debug_route_start(void)
 {
     debug_route_active = 1;
-    debug_route_step = 1;
-    debug_route_branch = branch;
-    diag_run_start(1, 100000, yaw_abs360_to_signed(0.0f)); /*启停区1→右上角45度*/
+    debug_route_heading = 0;                         /*启停区1出发朝向对应LCD yaw=0*/
+    no_next_alarm = 0;
     Motor_Enable(true);
+    if (debug_leg_load())
+        debug_leg_start();
+    else
+        debug_no_next_start();
 }
 
 /* 所有原地转向复用同一初始化，防止累计角/限斜率沿用上一次状态。 */
@@ -914,7 +1070,7 @@ void MotorTask(void *pvParameters)
                     break;                         /*未完整上传/非批次1: 只确认收帧, 保持停车*/
                 array_mode = 0;
                 leg1_next_valid = 0;
-                debug_route_start(route_debug_branch(1));
+                debug_route_start();
                 break;
 
             case CMD_CHAIN:                        /*一键任务链: dir=1右前/4左前
@@ -932,9 +1088,9 @@ void MotorTask(void *pvParameters)
             case CMD_POS_ABORT:
                 array_mode = 0;
                 no_next_alarm = 0;
+                if (debug_route_active) route_debug_release(1);
                 debug_route_active = 0;
                 debug_route_step = 0;
-                debug_route_branch = 0;
                 if (debug_pause_active) Buzzer_Off();
                 debug_pause_active = 0;
                 debug_pause_next = 0;
@@ -956,27 +1112,22 @@ void MotorTask(void *pvParameters)
             {
                 Buzzer_Off();
                 debug_pause_active = 0;
-                if (debug_pause_next == 2)
+                if (debug_pause_next == 1)
                 {
                     debug_pause_next = 0;
-                    debug_route_step = 2;
-                    debug_line_start(520000, 1, 0.0f);       /*右上角45度→扫码区*/
+                    debug_leg_start();
                 }
-                else if (debug_pause_next == 3)
+                else if (debug_pause_next == 2)
                 {
                     debug_pause_next = 0;
-                    debug_route_step = 3;
-                    if (debug_route_branch == 1)
-                        debug_line_start(100000, 0, 0.0f);   /*扫码区→右上角*/
-                    else
-                        debug_line_start(720000, 0, 0.0f);   /*扫码区→中心复合流程校准位置*/
+                    debug_motion_start();
                 }
                 else
                 {
                     debug_pause_next = 0;
+                    route_debug_release(1);
                     debug_route_active = 0;
                     debug_route_step = 0;
-                    debug_route_branch = 0;
                     phase = PHASE_DONE;
                 }
             }
@@ -1025,9 +1176,9 @@ void MotorTask(void *pvParameters)
                 }
                 else
                 {
-                    if (debug_route_active && debug_route_step == 1)
+                    if (debug_route_active)
                     {
-                        debug_point_pause_start(2, 500);       /*右上角45度*/
+                        debug_motion_done();
                     }
                     else
                     {
@@ -1037,11 +1188,7 @@ void MotorTask(void *pvParameters)
             }
             else if ((xTaskGetTickCount() - posrun_start) > pdMS_TO_TICKS(POS_RUN_TIMEOUT_MS))
             {
-                debug_route_active = 0;
-                debug_route_step = 0;
-                phase = PHASE_IDLE;                              /*超时保护*/
-                leg1_next_valid = 0;
-                Motor_Stop();
+                pos_run_abort();
             }
         }
 
@@ -1078,11 +1225,9 @@ void MotorTask(void *pvParameters)
                 if (++turn_settle_ticks >= TURN_SETTLE_TICKS)
                 {
                     turn_settle_ticks = 0;
-                    if (debug_route_active && debug_route_step == 4)
+                    if (debug_route_active)
                     {
-                        Motor_Stop();
-                        debug_route_step = 5;
-                        debug_line_start(600000, 1, 90.0f);    /*中心复合流程: yaw90下相对前进*/
+                        debug_motion_done();
                     }
                     else
                     {
@@ -1183,31 +1328,9 @@ void MotorTask(void *pvParameters)
 
             if (state == POS_REACHED)
             {
-                if (debug_route_active && debug_route_step == 2)
+                if (debug_route_active)
                 {
-                    if (debug_route_branch == 0)
-                    {
-                        debug_no_next_start();
-                    }
-                    else
-                        debug_point_pause_start(3, 500);       /*已知分支: 到扫码区短暂停留*/
-                }
-                else if (debug_route_active && debug_route_step == 3)
-                {
-                    if (debug_route_branch == 2)
-                    {
-                        Motor_Stop();
-                        debug_route_step = 4;
-                        debug_turn_start(90.0f);               /*中心复合流程: 绝对yaw90*/
-                    }
-                    else
-                    {
-                        debug_no_next_start();                /*右上角后尚无可执行下一段*/
-                    }
-                }
-                else if (debug_route_active && debug_route_step == 5)
-                {
-                    debug_no_next_start();                    /*中心点后尚无可执行下一段*/
+                    debug_motion_done();
                 }
                 else
                 {

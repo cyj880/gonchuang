@@ -52,6 +52,9 @@ typedef struct
 static DebugRouteSegment debug_segments[2][ROUTE_DEBUG_SEG_MAX];
 static volatile uint8_t debug_segment_count[2];
 static volatile uint8_t route_upload_active[2];
+static volatile uint8_t debug_route_busy[2];
+static volatile uint8_t debug_upload_error[2];
+static uint8_t debug_read_segment[2], debug_read_point[2];
 static volatile uint8_t pending_action_valid;
 static volatile uint8_t pending_action_batch;
 static volatile uint8_t pending_action_code;
@@ -331,12 +334,22 @@ void route_rx_byte(uint8_t ch)
             else if (rx_cmd == CMD_ROUTE || rx_cmd == CMD_ROUTE45)
             {
                 g_route[rx_batch - 1].ready = 1;                 /*帧尾校验通过, 正式提交*/
-                route_upload_segment[rx_batch - 1] = 1;
-                if (pending_action_valid && pending_action_batch == rx_batch &&
+                if (!debug_route_busy[rx_batch - 1] &&
+                    pending_action_valid && pending_action_batch == rx_batch &&
+                    rx_cnt >= 2 &&
                     debug_segment_count[rx_batch - 1] < ROUTE_DEBUG_SEG_MAX)
                 {
-                    DebugRouteSegment *s = &debug_segments[rx_batch - 1][debug_segment_count[rx_batch - 1]++];
+                    DebugRouteSegment *s;
                     uint8_t i;
+                    uint16_t first_x = (uint16_t)rx_buf[0] | ((uint16_t)rx_buf[1] << 8);
+                    uint16_t first_y = (uint16_t)rx_buf[2] | ((uint16_t)rx_buf[3] << 8);
+                    /*批次1从启停区重新上传时替换旧记录，不能把两次路线拼接。*/
+                    if (rx_batch == 1 && first_x == 2200 && first_y == 2200)
+                    {
+                        debug_segment_count[0] = 0;
+                        debug_upload_error[0] = 0;
+                    }
+                    s = &debug_segments[rx_batch - 1][debug_segment_count[rx_batch - 1]];
                     s->action = pending_action_code;
                     s->cmd = rx_cmd;
                     s->count = rx_cnt;
@@ -345,24 +358,34 @@ void route_rx_byte(uint8_t ch)
                         s->x[i] = (uint16_t)rx_buf[4 * i] | ((uint16_t)rx_buf[4 * i + 1] << 8);
                         s->y[i] = (uint16_t)rx_buf[4 * i + 2] | ((uint16_t)rx_buf[4 * i + 3] << 8);
                     }
+                    debug_segment_count[rx_batch - 1]++;
+                    route_upload_segment[rx_batch - 1] = 1;
                 }
-                pending_action_valid = 0;
+                else if (!debug_route_busy[rx_batch - 1])
+                    debug_upload_error[rx_batch - 1] = 1;
+                if (pending_action_batch == rx_batch) pending_action_valid = 0;
                 echo_push_frame(rx_frame_buf, rx_frame_len);     /*整帧原样入回传FIFO, LCD_Task排空发回网页*/
             }
             else if (rx_cmd == CMD_ACTION)
             {
                 g_act_code = rx_act;                             /*路线上传只记录动作，不提交运动命令*/
                 g_act_new = 1;
-                if (!route_upload_active[rx_batch - 1])
+                if (!debug_route_busy[rx_batch - 1])
                 {
-                    route_upload_active[rx_batch - 1] = 1;
-                    debug_segment_count[rx_batch - 1] = 0;
+                    if (!route_upload_active[rx_batch - 1])
+                    {
+                        route_upload_active[rx_batch - 1] = 1;
+                        debug_segment_count[rx_batch - 1] = 0;
+                        debug_upload_error[rx_batch - 1] = 0;
+                    }
+                    else if (pending_action_valid && pending_action_batch == rx_batch)
+                        debug_upload_error[rx_batch - 1] = 1;
+                    pending_action_valid = 1;
+                    pending_action_batch = rx_batch;
+                    pending_action_code = rx_act;
+                    route_upload_action[rx_batch - 1] = 1;
+                    route_upload_segment[rx_batch - 1] = 0;
                 }
-                pending_action_valid = 1;
-                pending_action_batch = rx_batch;
-                pending_action_code = rx_act;
-                route_upload_action[rx_batch - 1] = 1;
-                route_upload_segment[rx_batch - 1] = 0;
                 echo_push_frame(rx_frame_buf, rx_frame_len);     /*动作帧也原样回传网页*/
             }
             else if (rx_cmd == CMD_DEBUG_RUN)
@@ -449,58 +472,64 @@ uint8_t route_debug_take(uint8_t batch)
     uint8_t ready;
     if (batch < 1 || batch > 2) return 0;
     taskENTER_CRITICAL();
-    ready = (uint8_t)(route_upload_action[batch - 1] && route_upload_segment[batch - 1]);
+    ready = (uint8_t)(route_upload_action[batch - 1] && route_upload_segment[batch - 1] &&
+                      debug_segment_count[batch - 1] && !debug_upload_error[batch - 1] &&
+                      !debug_route_busy[batch - 1]);
     if (ready)
     {
         route_upload_action[batch - 1] = 0;
         route_upload_segment[batch - 1] = 0;
         route_upload_active[batch - 1] = 0;
+        debug_route_busy[batch - 1] = 1;
+        debug_read_segment[batch - 1] = 0;
+        debug_read_point[batch - 1] = 1;
     }
     taskEXIT_CRITICAL();
     return ready;
 }
 
-static uint8_t route_near(uint16_t a, uint16_t b, uint16_t tol)
+uint8_t route_debug_next(uint8_t batch, RouteDebugLeg *leg)
 {
-    return (a > b) ? (uint8_t)(a - b <= tol) : (uint8_t)(b - a <= tol);
-}
-
-static uint8_t route_is_qr(uint16_t x, uint16_t y)
-{
-    return (uint8_t)(route_near(x, 2000, 80) && route_near(y, 1200, 180));
-}
-
-static uint8_t route_is_ru(uint16_t x, uint16_t y)
-{
-    return (uint8_t)(route_near(x, 2000, 80) && route_near(y, 1900, 80));
-}
-
-static uint8_t route_is_center(uint16_t x, uint16_t y)
-{
-    return (uint8_t)(route_near(x, 1200, 80) && route_near(y, 1200, 180));
-}
-
-uint8_t route_debug_branch(uint8_t batch)
-{
-    uint8_t i, j;
-    uint8_t branch = 0;
-    if (batch < 1 || batch > 2) return 0;
+    uint8_t index, segment, point, ready = 0;
+    if (batch < 1 || batch > 2 || !leg) return 0;
+    index = batch - 1;
     taskENTER_CRITICAL();
-    for (i = 0; i < debug_segment_count[batch - 1]; i++)
+    segment = debug_read_segment[index];
+    point = debug_read_point[index];
+    if (debug_route_busy[index] && segment < debug_segment_count[index])
     {
-        DebugRouteSegment *s = &debug_segments[batch - 1][i];
-        for (j = 1; j < s->count; j++)
+        DebugRouteSegment *s = &debug_segments[index][segment];
+        /*段首必须接在上一段末尾，避免缺帧时跳到后面的已知路段。*/
+        if (point > 1 || segment == 0 ||
+            (s->x[0] == debug_segments[index][segment - 1].x[debug_segments[index][segment - 1].count - 1] &&
+             s->y[0] == debug_segments[index][segment - 1].y[debug_segments[index][segment - 1].count - 1]))
         {
-            if (route_is_qr(s->x[j - 1], s->y[j - 1]) &&
-                route_is_center(s->x[j], s->y[j]))
-                branch = 2;
-            else if (!branch && route_is_qr(s->x[j - 1], s->y[j - 1]) &&
-                     route_is_ru(s->x[j], s->y[j]))
-                branch = 1;
+            leg->action = (point == 1) ? s->action :
+                          (s->action == CMD_ACT_BACK ? CMD_ACT_BACK : CMD_ACT_FWD);
+            leg->from_x = s->x[point - 1];
+            leg->from_y = s->y[point - 1];
+            leg->to_x = s->x[point];
+            leg->to_y = s->y[point];
+            if (++point >= s->count)
+            {
+                segment++;
+                point = 1;
+            }
+            debug_read_segment[index] = segment;
+            debug_read_point[index] = point;
+            ready = 1;
         }
     }
     taskEXIT_CRITICAL();
-    return branch;
+    return ready;
+}
+
+void route_debug_release(uint8_t batch)
+{
+    if (batch < 1 || batch > 2) return;
+    taskENTER_CRITICAL();
+    debug_route_busy[batch - 1] = 0;
+    taskEXIT_CRITICAL();
 }
 
 /* ================= 坐标回传：按命令字 02 帧经 UART7(ZigBee) 发回网页 =================
