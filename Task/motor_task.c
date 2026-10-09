@@ -668,6 +668,7 @@ typedef struct
     uint8_t sub;                               /*08帧子命令: 0直线/1右前斜行/2绝对转向*/
     uint8_t relative;
     int32_t value;
+    int16_t yaw;                               /*-1继承路线航向，其余为用户指定绝对yaw*/
 } DebugMotion;
 
 typedef struct
@@ -677,12 +678,14 @@ typedef struct
     DebugMotion motion[3];
 } DebugPointRule;
 
-/*仅在此表添加用户确认的点对；直行航向继承路线转向后的目标yaw。*/
+/*仅添加用户提供的点对；yaw=-1继承路线，其余使用该段明确指定的绝对航向。*/
 static const DebugPointRule debug_rules[] = {
-    {RP_START1,RP_DIAG_RU,1,{{1,1,100000}}},
-    {RP_DIAG_RU,RP_QR,1,{{0,1,520000}}},
-    {RP_QR,RP_RU,1,{{0,0,100000}}},
-    {RP_QR,RP_CENTER,3,{{0,0,720000},{2,0,90},{0,1,600000}}}
+    {RP_START1,RP_DIAG_RU,1,{{1,1,100000,-1}}},
+    {RP_DIAG_RU,RP_QR,1,{{0,1,520000,-1}}},
+    {RP_QR,RP_RU,1,{{0,0,100000,-1}}},
+    {RP_QR,RP_CENTER,3,{{0,0,725000,-1},{2,0,90,-1},{0,1,620000,-1}}},
+    {RP_CENTER,RP_RAW,1,{{0,1,620000,180}}},
+    {RP_RU,RP_RAW,1,{{0,1,620000,90}}}
 };
 #define DEBUG_RULE_COUNT (sizeof(debug_rules) / sizeof(debug_rules[0]))
 
@@ -772,8 +775,10 @@ static void debug_motion_start(void)
     {
         debug_route_step = (debug_rule_index == 1) ? 2 :
                            (debug_motion_index == 2 ? 5 : 3);
-        debug_line_start(motion->relative ? debug_relative_value(motion->value) : motion->value,
-                         motion->relative, (float)debug_route_heading);
+        debug_line_start(motion->relative && motion->yaw < 0 ?
+                         debug_relative_value(motion->value) : motion->value,
+                         motion->relative, motion->yaw < 0 ?
+                         (float)debug_route_heading : (float)motion->yaw);
     }
 }
 
@@ -824,6 +829,9 @@ static void debug_motion_done(void)
             return;
         }
     }
+    if (phase == PHASE_LINE && debug_rule_index < DEBUG_RULE_COUNT &&
+        debug_rules[debug_rule_index].motion[debug_motion_index].yaw >= 0)
+        debug_route_heading = (uint16_t)debug_rules[debug_rule_index].motion[debug_motion_index].yaw;
     debug_motion_index++;
     if (debug_motion_index < debug_rules[debug_rule_index].count)
         debug_motion_start();                        /*复合点对内部动作，不提前记为到点*/
