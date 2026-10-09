@@ -312,7 +312,9 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define TURN_OUT_SIGN       (-1.0f)  /*原地转向输出方向: 实车"左转发成右转270°"已实测, 翻转。
                                         与YAW_OUT_SIGN同值(两者闭环的都是IMU增方向)*/
 
-#define POS_LEG1_RPM        40       /* 45°斜走段: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
+#define POS_LEG1_RPM        48       /* 45°斜走巡航: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
+#define POS_LEG1_APPROACH_RPM 40     /*接近段末恢复原速度，控制停车误差*/
+#define POS_LEG1_APPROACH_COUNTS 20000 /*段末约30mm保持原速度*/
 
 /* ---- 场地与点位(编码值) ----
    注意: 两启停区出发时X轮计数方向镜像 —— 同一"场地右上角",
@@ -394,6 +396,9 @@ static const TaskStep task_z1[] = {
 #define TURN_CREEP_DEG      15.0f    /* 爬行带(deg): 带内固定低速逼近 */
 #define TURN_CREEP_RPM      12       /* 爬行转速(RPM), 高于电机低速死区 */
 #define TURN_OUT_MAX_RPM    70       /* 转向PID输出限幅(RPM) */
+#define TURN_FAST_DEG       30.0f    /*此角度以内沿用已实测的减速参数*/
+#define TURN_FAST_KP        0.25f    /*远段增量: (剩余角度-30°)*0.25RPM*/
+#define TURN_FAST_MAX_RPM   85       /*大角度阶段的转向输出限幅*/
 #define TURN_MIN_RPM        12       /* PID输出最低有效转速(RPM) */
 #define TURN_SETTLE_TICKS   8        /* 到位后连续确认次数(10ms/次) */
 #define TURN_TIMEOUT_MS     15000u   /* 转向最长运行时间, 超时自动停车(陀螺仪无效兜底) */
@@ -1235,22 +1240,27 @@ void MotorTask(void *pvParameters)
         if (phase == PHASE_DIAG)
         {
             OdomData_t o;
+            float travel;
+            int diagonal_rpm = POS_LEG1_RPM;
             odometry_get(&o);
+            travel = fabsf((float)o.enc_pos[ODOM_POS_AXIS] - (float)diag_start);
+            if (fabsf((float)leg1_end) - travel <= POS_LEG1_APPROACH_COUNTS)
+                diagonal_rpm = POS_LEG1_APPROACH_RPM;
 
             YawPID.Actual = IMU_GetYaw();                     /*直读最新yaw(不经35ms透传)*/
             YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
             PID_Update(&YawPID);
 
             if (leg_dir == 1)                       /*右前45°: LF+RR出力*/
-                Motor_Move(-POS_LEG1_RPM / 2, POS_LEG1_RPM / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
+                Motor_Move(-diagonal_rpm / 2, diagonal_rpm / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
             else if (leg_dir == 2)                  /*左前45°: RF+LR出力*/
-                Motor_Move(POS_LEG1_RPM / 2, POS_LEG1_RPM / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
+                Motor_Move(diagonal_rpm / 2, diagonal_rpm / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
             else if (leg_dir == 3)                  /*右后45°: RF+LR反转*/
-                Motor_Move(-POS_LEG1_RPM / 2, -POS_LEG1_RPM / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
+                Motor_Move(-diagonal_rpm / 2, -diagonal_rpm / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
             else                                    /*左后45°: LF+RR反转*/
-                Motor_Move(POS_LEG1_RPM / 2, -POS_LEG1_RPM / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
+                Motor_Move(diagonal_rpm / 2, -diagonal_rpm / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
 
-            if (fabsf((float)o.enc_pos[ODOM_POS_AXIS] - (float)diag_start) >= fabsf((float)leg1_end))
+            if (travel >= fabsf((float)leg1_end))
             {
                 if (!array_mode && leg1_next_valid)
                 {
@@ -1306,6 +1316,16 @@ void MotorTask(void *pvParameters)
                 err = turn_angdiff(turn_target - rel_now, 0.0f);
             }
             aerr = fabsf(err);
+
+            /*只增强远段比例输出，在30°边界连续回到原增益；近段阻尼和爬行不变。*/
+            TurnPID.Kp = TURN_PID_KP;
+            TurnPID.OutMax = TURN_OUT_MAX_RPM;
+            if (aerr > TURN_FAST_DEG)
+            {
+                TurnPID.Kp += TURN_FAST_KP * (aerr - TURN_FAST_DEG) / aerr;
+                TurnPID.OutMax = TURN_FAST_MAX_RPM;
+            }
+            TurnPID.OutMin = -TurnPID.OutMax;
 
             if ((xTaskGetTickCount() - posrun_start) >= pdMS_TO_TICKS(turn_timeout_ms))
             {
