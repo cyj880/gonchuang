@@ -476,6 +476,8 @@ static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基�
 static uint8_t      line_axis = 0;     /*直线段反馈轴: 0=里程计1(vy) 1=里程计2(vx)*/
 static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
 static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
+static uint8_t      debug_route_batch = 1;
+static uint8_t      debug_route_next_batch = 0; /*两批连跑时预先锁定的第二批*/
 static uint8_t      debug_route_step = 0;   /*1斜行/2扫码/3校准或回右上/4内部转向/5中心/6路线转向/7到站*/
 static uint16_t     debug_route_heading = 0; /*已完成动作的目标yaw，限定0/90/180/270*/
 static uint16_t     debug_goal_heading = 0;
@@ -548,10 +550,17 @@ static PosRunState pos_run_check(int32_t current, uint8_t online)
     return POS_RUNNING;
 }
 
+static void debug_route_release(void)
+{
+    if (debug_route_active) route_debug_release(debug_route_batch);
+    if (debug_route_next_batch) route_debug_release(debug_route_next_batch);
+    debug_route_next_batch = 0;
+}
+
 static void pos_run_abort(void)
 {
     array_mode = 0;
-    if (debug_route_active) route_debug_release(1);
+    debug_route_release();
     debug_route_active = 0;
     debug_route_step = 0;
     if (debug_pause_active) Buzzer_Off();
@@ -730,7 +739,16 @@ static uint8_t debug_leg_load(void)
 {
     uint8_t i;
     RoutePoint from, to;
-    if (!route_debug_next(1, &debug_route_leg)) return 0;
+    if (!route_debug_next(debug_route_batch, &debug_route_leg))
+    {
+        if (!debug_route_next_batch || !route_debug_finished(debug_route_batch) ||
+            debug_route_leg.to_x != 400 || debug_route_leg.to_y != 1200 ||
+            debug_route_heading != 0) return 0;
+        route_debug_release(debug_route_batch);
+        debug_route_batch = debug_route_next_batch;
+        debug_route_next_batch = 0;
+        if (!route_debug_next(debug_route_batch, &debug_route_leg)) return 0;
+    }
     from = debug_point_at(debug_route_leg.from_x, debug_route_leg.from_y);
     to = debug_point_at(debug_route_leg.to_x, debug_route_leg.to_y);
     debug_rule_index = DEBUG_RULE_COUNT;
@@ -850,18 +868,21 @@ static void debug_motion_done(void)
         debug_no_next_start();
 }
 
-static void debug_route_start(void)
+static void debug_route_start(uint8_t selection)
 {
     OdomData_t o;
     uint8_t have_leg;
     debug_route_active = 1;
+    debug_route_batch = (selection == 2) ? 2 : 1;
+    debug_route_next_batch = (selection == 3) ? 2 : 0;
     debug_route_heading = 0;                         /*两启停区车头均朝下，出发yaw=0*/
-    debug_pos_offset = 0;
+    if (selection == 2 || debug_route_batch == 1) debug_pos_offset = 0;
     debug_turn_pos_active = 0;
     no_next_alarm = 0;
     Motor_Enable(true);
     have_leg = debug_leg_load();
-    if (debug_point_at(debug_route_leg.from_x, debug_route_leg.from_y) == RP_START2)
+    if (debug_route_batch == 1 &&
+        debug_point_at(debug_route_leg.from_x, debug_route_leg.from_y) == RP_START2)
     {
         odometry_get(&o);
         debug_pos_offset = 1450000 - o.enc_pos[ODOM_POS_AXIS];
@@ -1173,11 +1194,12 @@ void MotorTask(void *pvParameters)
 
             case CMD_DEBUG_RUN:                    /*0x13: 路线已上传后的调试一键启动*/
                 cmd_tx_ack(&c);
-                if (c.param != 1 || !PHASE_CAN_START(phase) || !route_debug_take(1))
-                    break;                         /*未完整上传/非批次1: 只确认收帧, 保持停车*/
+                if (!PHASE_CAN_START(phase) || debug_route_active || debug_pause_active ||
+                    !route_debug_take((uint8_t)c.param))
+                    break;                         /*未完整上传/运行中: 只确认收帧, 保持停车*/
                 array_mode = 0;
                 leg1_next_valid = 0;
-                debug_route_start();
+                debug_route_start((uint8_t)c.param);
                 break;
 
             case CMD_CHAIN:                        /*一键任务链: dir=1右前/4左前
@@ -1195,7 +1217,7 @@ void MotorTask(void *pvParameters)
             case CMD_POS_ABORT:
                 array_mode = 0;
                 no_next_alarm = 0;
-                if (debug_route_active) route_debug_release(1);
+                debug_route_release();
                 debug_route_active = 0;
                 debug_route_step = 0;
                 if (debug_pause_active) Buzzer_Off();
@@ -1239,7 +1261,7 @@ void MotorTask(void *pvParameters)
                 else
                 {
                     debug_pause_next = 0;
-                    route_debug_release(1);
+                    debug_route_release();
                     debug_route_active = 0;
                     debug_route_step = 0;
                     phase = PHASE_DONE;

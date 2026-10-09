@@ -149,6 +149,8 @@
         <button class="btn mini green" id="btnSendB2">📡 发第二批坐标</button>
         <button class="btn mini" id="btnSendBoth">两批连发</button>
         <button class="btn mini warn" id="btnDebugStart1" disabled title="先发送第一批并等待STM32回传完成">▶ 调试一键启动（批次1）</button>
+        <button class="btn mini green" id="btnDebugStart2" disabled title="先发送第二批并等待STM32回传完成">▶ 启动第二批</button>
+        <button class="btn mini" id="btnDebugStartBoth" disabled title="两批均上传并完成回传后，按第一批、第二批顺序运行">▶ 连续跑两批</button>
       </div>
       <div class="param"><span class="name">车体包络</span><input type="range" id="pRadius" min="30" max="200" step="10" value="50"><span class="val" id="pRadiusV">50</span></div>
       <div id="routeInfo">尚未规划。第一批：启停区→扫码区→原料区→粗加工区→暂存区
@@ -164,7 +166,7 @@
       <div class="hint">规划方式：在<strong>标准点位图</strong>（启停区1/2、右上角45度、右上角、扫码区、右下角45度、右下角、中心点、原料区、粗加工区、左上角、左下角、暂存区，共 13 点）上跑最短路，发送给 STM32 的关键点坐标<strong>全部取自车端点位表</strong>，同名点每次发送相同坐标。涂禁行格会把对应通道封死，路线自动绕行；通道全被封时报 NO PATH。车体包络=车体外接圆+安全余量，按实车调整（默认 50mm）。</div>
       <div class="hint">🚦 45°点硬规则：45°点为<b>单向边（只允许 启停区→45°点）</b>，且<b>仅出现在第一批出发段</b>，此后任何段不再经过；<b>第二批全程不出现右上角45度/右下角45度</b>。回程（用户指定，固定）：启停区1 经 左上角→右上角→斜插回区；启停区2 经 <strong>左下角→右下角</strong>→斜插回区。</div>
       <div class="hint">✂️ 直线途经点自动精简：关键点=任务站点+实际拐点。站点之间同一直线上的非任务点（如 左上角→右上角 直线上的 原料区、暂存区→扫码区 直线上的 中心点）不列为关键点、不发给车端；45°点永不剔除。</div>
-      <div class="hint">📡 帧协议（二进制，115200-8N1，蓝牙/ZigBee 透传）：<b>AA 55</b> | CMD | 批次(1/2) | [点数N | 坐标…mm,小端] | SUM | <b>0D 0A</b>，SUM=中间字节累加和低8位。CMD：<b>04</b>=动作指令帧；<b>01</b>=直角段坐标帧；<b>03</b>=含45°斜走的段坐标帧；<b>13</b>=调试一键启动帧。路线上传完成并收到STM32全部回传后，才可点击调试启动；启动帧为 <code>AA 55 13 01 14 0D 0A</code>。</div>
+      <div class="hint">📡 帧协议（二进制，115200-8N1，蓝牙/ZigBee 透传）：<b>AA 55</b> | CMD | 批次(1/2) | [点数N | 坐标…mm,小端] | SUM | <b>0D 0A</b>，SUM=中间字节累加和低8位。CMD：<b>04</b>=动作指令帧；<b>01</b>=直角段坐标帧；<b>03</b>=含45°斜走的段坐标帧；<b>13</b>=调试启动选择帧（1第一批、2第二批、3两批连续）。对应启动帧为 <code>AA 55 13 01 14 0D 0A</code>、<code>AA 55 13 02 15 0D 0A</code>、<code>AA 55 13 03 16 0D 0A</code>。</div>
       <div class="hint">📥 回传：车端把收到的每一帧（01/03 段帧、04 动作帧）<b>原样发回</b>，右上回传板按收到顺序显示指令词与坐标；收满发送帧数自动标“回传完成”并删除该批路线任务。
     </section>
 
@@ -1570,28 +1572,38 @@ function updateRouteSendButtons(){
   $('btnSendBoth').disabled=$('btnSendB1').disabled || $('btnSendB2').disabled;
   updateDebugStartButton(1);
 }
-function updateDebugStartButton(batch){
-  const b=$('btnDebugStart1');
-  if(!b || batch!==1) return;
-  const rb=state.rxBoards[1];
-  b.disabled=!!state.routeErrors[1] || !(rb && rb.done && !state.debugStartSent[1]);
+function updateDebugStartButton(){
+  for(const batch of [1,2]){
+    const rb=state.rxBoards[batch];
+    $('btnDebugStart'+batch).disabled=!!state.routeErrors[batch] ||
+      !(rb && rb.done && !state.debugStartSent[batch]);
+  }
+  $('btnDebugStartBoth').disabled=$('btnDebugStart1').disabled || $('btnDebugStart2').disabled;
 }
-async function sendDebugStart(batch){
-  if(batch!==1){ logLine('sys','[系统] 当前仅支持批次1调试启动。'); return; }
-  const rb=state.rxBoards[1];
-  if(state.routeErrors[1]){ logLine('sys',`[系统] ${state.routeErrors[1]}，禁止启动。`); return; }
-  if(!rb || !rb.done){ logLine('sys','[系统] 请先发送第一批路线并等待STM32回传完成。'); return; }
+async function sendDebugStart(selection){
+  if(![1,2,3].includes(selection))return;
+  const batches=selection===3?[1,2]:[selection];
+  const label=selection===3?'连续跑两批':`启动第${selection}批`;
+  for(const batch of batches){
+    if(state.routeErrors[batch]){ logLine('sys',`[系统] 第${batch}批${state.routeErrors[batch]}，禁止启动。`); return; }
+    const rb=state.rxBoards[batch];
+    if(!rb || !rb.done || state.debugStartSent[batch]){
+      logLine('sys',`[系统] 请重新上传第${batch}批路线并等待STM32全部回传后启动。`); return;
+    }
+  }
   try{
-    const frame=buildDebugRunFrame(1);
+    const frame=buildDebugRunFrame(selection);
     await uartWrite(frame);
-    state.debugStartSent[1]=true;
-    updateDebugStartButton(1);
-    logLine('tx',`▷ 调试一键启动（批次1）: ${bytesToHex(frame)}`);
+    for(const batch of batches)state.debugStartSent[batch]=true;
+    updateDebugStartButton();
+    logLine('tx',`▷ ${label}: ${bytesToHex(frame)}`);
   }catch(err){ logLine('sys',`[系统] 调试启动发送失败：${err.message}`); }
 }
 $('btnSendB1').addEventListener('click',()=>sendRouteFrame(1));
 $('btnSendB2').addEventListener('click',()=>sendRouteFrame(2));
 $('btnDebugStart1').addEventListener('click',()=>sendDebugStart(1));
+$('btnDebugStart2').addEventListener('click',()=>sendDebugStart(2));
+$('btnDebugStartBoth').addEventListener('click',()=>sendDebugStart(3));
 $('btnSendBoth').addEventListener('click',async()=>{
   await sendRouteFrame(1);
   setTimeout(()=>sendRouteFrame(2), 300);   // 两批间隔 300ms，给单片机留处理时间
@@ -1617,7 +1629,7 @@ function rxFsmFeed(ch){
       else rxFsm.st=0;
       break;
     case 3:
-      if(ch>=1&&ch<=2){ rxFsm.batch=ch; rxFsm.sum+=ch;
+      if(ch>=1&&ch<=(rxFsm.cmd===0x13?3:2)){ rxFsm.batch=ch; rxFsm.sum+=ch;
         if(rxFsm.cmd===0x04){ rxFsm.cnt=1; rxFsm.expect=1; rxFsm.idx=0; rxFsm.st=5; }   // 动作帧：载荷=1字节动作码
         else if(rxFsm.cmd===0x13){ rxFsm.st=6; }  // 调试启动ACK：批次后直接校验和
         else rxFsm.st=4; }
@@ -1641,7 +1653,8 @@ function rxFsmFeed(ch){
       rxFsm.st=0;
       if(ch===0x0A){
         if(rxFsm.cmd===0x13){
-          logLine('rx',`📥 STM32已确认调试一键启动（批次${rxFsm.batch}），车辆仍由下位机闭环控制。`);
+          const label=rxFsm.batch===3?'连续跑两批':`启动第${rxFsm.batch}批`;
+          logLine('rx',`📥 STM32已收到${label}帧，是否发车由下位机上传资格和运行状态决定。`);
         } else if(rxFsm.cmd===0x04){
           rxEchoAccept(4, rxFsm.batch, null, rxFsm.buf[0]);
         } else {

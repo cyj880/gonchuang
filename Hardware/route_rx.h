@@ -86,7 +86,7 @@
    12 帧: AA 55 12 12 0D 0A (4字节, 无载荷) ---- */
 #define CMD_RUNALL       0x12    /* 上位机 -> 车端：一键执行任务步骤数组 */
 #define CMD_DEBUG_RUN    0x13    /* 上位机 -> 车端：启动已上传的调试路线 */
-/* 13帧: AA 55 | 13 | BATCH | SUM | 0D 0A；当前仅BATCH=1按上传点序执行已配置点对和转向 */
+/*13帧: AA 55 | 13 | SELECT | SUM | 0D 0A；1第一批/2第二批/3两批连续*/
 
 
 /* ---- 动作指令帧(上位机 -> 车端, 7字节): AA 55 | 04 | BATCH | CODE | SUM | 0D 0A ----
@@ -120,7 +120,8 @@ typedef struct
 uint8_t cmd_get(ZbeeCmd *c);                     /* 取走一条新命令，1=有 */
 void cmd_last(ZbeeCmd *c, uint8_t *cnt);         /* LCD 只读最后命令 */
 void cmd_tx_ack(const ZbeeCmd *c);               /* 按原命令字+载荷回应答帧(任务上下文) */
-uint8_t route_debug_take(uint8_t batch);          /* 原子检查并消费本批启动资格 */
+uint8_t route_debug_take(uint8_t batch);          /*1/2单批；3原子检查并锁定两批*/
+uint8_t route_debug_finished(uint8_t batch);      /*缓存点序正常耗尽，区别于不连续路段*/
 
 typedef struct
 {

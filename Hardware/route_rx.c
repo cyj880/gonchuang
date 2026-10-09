@@ -19,7 +19,8 @@
    回传帧：AA 55 | 02 | BATCH | N | X1L X1H Y1L Y1H | ... | SUM | 0D 0A
    应答帧：AA 55 | 11 | DIR | PL0 PL1 PL2 PL3 | SUM | 0D 0A   （对10帧的应答）
    帧头/命令/长度/校验/帧尾五重验证，坏帧自动丢弃重新同步。
-   两批数据分存 g_route[0]/g_route[1]，帧尾 0D 0A 校验通过才置 ready 供任务取用。
+   两批数据分存 g_route[0]/g_route[1]，帧尾 0D 0A 校验通过才置 ready 供任务取用；
+   0x13选择1=第一批、2=第二批、3=两批连续，3会同时锁定两批缓存。
    01/03/04 网页协议帧校验通过后整帧原样压入回传FIFO，LCD_Task 排空经 UART7 发回网页。
    05/06 帧校验通过后先暂存，帧尾验证通过才提交 g_cmd（防坏帧触发运动）。 */
 
@@ -195,7 +196,7 @@ void route_rx_byte(uint8_t ch)
             if (rx_cmd == CMD_PULSE)       bmax = PULSE_DIR_CW;   /*方向码 0~9*/
             else if (rx_cmd == CMD_POS_GO) bmax = 7;              /*子命令 0=直线 1=右前45° 2=左转 3=右转 4=左前45° 5=缓行扫码 6=二维码校准 7=回右上角*/
             else if (rx_cmd == CMD_POS_ADV) bmax = 4;              /*0直线/1斜行/2绝对yaw/3相对左转/4相对右转*/
-            else if (rx_cmd == CMD_DEBUG_RUN) bmax = 2;            /*启动批次1/2，当前仅实现批次1*/
+            else if (rx_cmd == CMD_DEBUG_RUN) bmax = 3;            /*1批次1/2批次2/3两批连续*/
             else if (rx_cmd == CMD_CHAIN)  bmax = 4;              /*方向: 仅1=右前 4=左前合法(见下)*/
             else { rx_state = RX_H1; break; }
             if (rx_cmd == CMD_CHAIN && ch != 1 && ch != 4) { rx_state = RX_H1; break; }
@@ -470,23 +471,52 @@ RouteFrame* route_get(uint8_t batch)         { return &g_route[batch - 1]; }
 
 uint8_t route_debug_take(uint8_t batch)
 {
-    uint8_t ready;
-    if (batch < 1 || batch > 2) return 0;
+    uint8_t i, ready = 1;
+    if (batch < 1 || batch > 3) return 0;
     taskENTER_CRITICAL();
-    ready = (uint8_t)(route_upload_action[batch - 1] && route_upload_segment[batch - 1] &&
-                      debug_segment_count[batch - 1] && !debug_upload_error[batch - 1] &&
-                      !debug_route_busy[batch - 1]);
+    for (i = 0; i < 2; i++)
+        if ((batch & (1u << i)) &&
+            !(route_upload_action[i] && route_upload_segment[i] &&
+              debug_segment_count[i] && !debug_upload_error[i] && !debug_route_busy[i]))
+            ready = 0;
+    /*第二批起点必须为暂存区；连跑还要求第一批上传终点与其衔接。*/
+    if (ready && (batch & 2u))
+    {
+        DebugRouteSegment *first = &debug_segments[1][0];
+        if (first->x[0] != 400 || first->y[0] != 1200) ready = 0;
+        if (ready && batch == 3)
+        {
+            DebugRouteSegment *last = &debug_segments[0][debug_segment_count[0] - 1];
+            if (last->x[last->count - 1] != first->x[0] ||
+                last->y[last->count - 1] != first->y[0]) ready = 0;
+        }
+    }
     if (ready)
     {
-        route_upload_action[batch - 1] = 0;
-        route_upload_segment[batch - 1] = 0;
-        route_upload_active[batch - 1] = 0;
-        debug_route_busy[batch - 1] = 1;
-        debug_read_segment[batch - 1] = 0;
-        debug_read_point[batch - 1] = 1;
+        for (i = 0; i < 2; i++)
+            if (batch & (1u << i))
+            {
+                route_upload_action[i] = 0;
+                route_upload_segment[i] = 0;
+                route_upload_active[i] = 0;
+                debug_route_busy[i] = 1;
+                debug_read_segment[i] = 0;
+                debug_read_point[i] = 1;
+            }
     }
     taskEXIT_CRITICAL();
     return ready;
+}
+
+uint8_t route_debug_finished(uint8_t batch)
+{
+    uint8_t finished;
+    if (batch < 1 || batch > 2) return 0;
+    taskENTER_CRITICAL();
+    finished = (uint8_t)(debug_route_busy[batch - 1] &&
+                        debug_read_segment[batch - 1] >= debug_segment_count[batch - 1]);
+    taskEXIT_CRITICAL();
+    return finished;
 }
 
 uint8_t route_debug_next(uint8_t batch, RouteDebugLeg *leg)
