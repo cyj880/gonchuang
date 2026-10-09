@@ -395,7 +395,7 @@ static const TaskStep task_z1[] = {
 #define TURN_TOL_DEG        2.0f     /* 到位容差(deg), 进入即停车(留滞后余量) */
 #define TURN_CREEP_DEG      15.0f    /* 爬行带(deg): 带内固定低速逼近 */
 #define TURN_CREEP_RPM      17       /*当前14RPM再提高1.2倍，取最近整数*/
-#define TURN_SPEED_SCALE    6.0f     /*15°外在上一版3倍基础上再乘2，合计原输出6倍*/
+#define TURN_SPEED_SCALE    9.0f     /*最后15°仍用固定低速，前75°在原6倍基础上再提速1.5倍*/
 #define TURN_OUT_MAX_RPM    70       /* 转向PID输出限幅(RPM) */
 #define TURN_FAST_DEG       30.0f    /*此角度以内沿用已实测的减速参数*/
 #define TURN_FAST_KP        0.25f    /*远段增量: (剩余角度-30°)*0.25RPM*/
