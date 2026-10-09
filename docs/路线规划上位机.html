@@ -93,6 +93,7 @@
     border:1px solid var(--line);border-radius:6px;padding:6px 8px;
     max-height:190px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;
   }
+  #routeSummaryText{font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;}
   footer{
     flex:none;display:flex;gap:18px;align-items:center;
     padding:4px 14px;background:#1c2b3a;color:#9fb3c8;font-size:12px;
@@ -152,6 +153,7 @@
       <div class="param"><span class="name">车体包络</span><input type="range" id="pRadius" min="30" max="200" step="10" value="50"><span class="val" id="pRadiusV">50</span></div>
       <div id="routeInfo">尚未规划。第一批：启停区→扫码区→原料区→粗加工区→暂存区
 第二批：暂存区→原料区→粗加工区→暂存区→回启停区（经右上角/右下角斜插，不经过45°点）</div>
+      <div id="routeSummaryText" hidden></div>
       <div class="row" style="margin-top:6px;">
         <button class="btn mini" id="btnAnim">▶ 路线演示</button>
         <button class="btn mini" id="btnAnimReset">↺ 复位</button>
@@ -308,6 +310,7 @@ const state = {
   txFrames: {1:0, 2:0},         // 每批已发送帧数（回传完成判定）
   debugStartSent: {1:false, 2:false},
   txEndHeading: {},             // 每批发送后的结束朝向（0上1右2下3左，下一批承接）
+  routeErrors: {1:null, 2:null},
   field: {rawX:1200, qrY:1200}, // 现场标定：原料区中心X / 二维码板中心Y（1100~1300随机，默认1200=正中）
   showGrid:false, showAxis:true, showDim:true,
   nogoPending: -1,          // 待确认删除的禁行格（防误触）
@@ -724,6 +727,9 @@ function describeRoute(route,segBounds){
 }
 function planBatch(batch){
   buildOccupy();
+  state.rxBoards[batch]=null; state.txFrames[batch]=0;
+  state.debugStartSent[batch]=false; state.routeErrors[batch]=null;
+  delete state.txEndHeading[batch];
   const startName='启停区'+state.routeStart;
   const startKey='start'+state.routeStart;
   let seq, names;
@@ -731,7 +737,11 @@ function planBatch(batch){
     seq=[startKey,'qr','raw','rough','storage'];
     names=[startName,'扫码区','原料区','粗加工区','暂存区'];
   }else{
-    if(!state.routes.b1){ showRoute(batch,'NO PATH（第一批未规划或未成功，暂存区站位未知）',null); return; }
+    if(!state.routes.b1){
+      state.routes.b2=null; state.routeErrors[2]='第一批未规划或未成功';
+      showRoute(batch,'NO PATH（第一批未规划或未成功，暂存区站位未知）',null);
+      updateRouteSendButtons(); return;
+    }
     // 第二批末段回启停区:经 右上角/右下角 斜插回停区(不经过45°点)
     seq=['storage','raw','rough','storage',startKey];
     names=['暂存区','原料区','粗加工区','暂存区',startName];
@@ -745,8 +755,9 @@ function planBatch(batch){
     const g=graphRoute(seq[i],seq[i+1],ex);
     if(!g){
       state.routes[batch===1?'b1':'b2']=null;   // 清掉旧路线,避免误导
+      state.routeErrors[batch]='NO PATH';
       showRoute(batch,`NO PATH（第 ${i+1} 段 ${names[i]}→${names[i+1]}：通道被禁行格封死）`,null);
-      draw(); return;
+      updateRouteSendButtons(); draw(); return;
     }
     const A=NODES[NODE_IX[seq[i]]], B=NODES[NODE_IX[seq[i+1]]];
     const diag = (A.x!==B.x && A.y!==B.y);      // 起终点不同行不同列 = 斜线段
@@ -773,10 +784,18 @@ function planBatch(batch){
   }
   const route={pts:marks, marks, handoff:marks[marks.length-1], stops:names,
                hasDiag: marks.some(m=>m.name==='右上角45度'||m.name==='右下角45度')};
+  route.chain=cmdChain(marks,batch===1?'下':state.routes.b1.chain.endHeading);
+  state.routeErrors[batch]=route.chain.error;
+  if(route.chain.error){
+    state.routes[batch===1?'b1':'b2']=null;
+    showRoute(batch,route.chain.error,null);
+    updateRouteSendButtons(); draw(); return;
+  }
   routeCumulative(route);
   state.routes[batch===1?'b1':'b2']=route;
   state.currentBatch=batch;
   showRoute(batch,describeRoute(route,segBounds),route);
+  updateRouteSendButtons();
   draw(); saveLocal();
 }
 function showRoute(batch,text,route){
@@ -824,29 +843,67 @@ function animTick(ts){
    不再显示数字坐标；发给 STM32 的帧仍是标准点位坐标。 */
 /* ===== 相对动作指令链：车头初始向下，指令=前进/后退/顺时针转90度/逆时针转90度 ===== */
 const HEAD_IX={'上':0,'右':1,'下':2,'左':3};   // 顺时针顺序编码（上→右→下→左）
+const STATION_WORK={
+  '扫码区':{yaw:0, name:'扫码预留'},
+  '原料区':{yaw:90, name:'夹取预留'},
+  '粗加工区':{yaw:270, name:'放置预留'},
+  '暂存区':{yaw:0, name:'放置预留'},
+};
 function cmdChain(marks, startHeading){
-  const DN={'上':0,'右':1,'下':2,'左':3};
   const runs=dirRuns(marks);
-  let heading=(typeof startHeading==='number')?startHeading:DN[startHeading];
-  const runsOut=[], parts=[];
-  runs.forEach((run,ri)=>{
-    const md=DN[run.dir], rel=(md-heading+4)%4;
-    let code, turn=null, move;
-    if(rel===0){code=1;move='前进';}
-    else if(rel===2){code=2;move='后退';}
-    else if(rel===1){code=3;turn='顺时针转90度';}
-    else {code=4;turn='逆时针转90度';}
-    if(turn)heading=md;                          // 转弯后车头朝向=移动方向；前进/后退不改变朝向
-    move=turn?'前进':move;
-    runsOut.push({run, code, cmdName:turn||move, move, turn});
-    if(turn)parts.push({t:turn, cmd:'turn'});
-    parts.push({t:move, cmd:'move'});
-    for(let i=run.from;i<=run.to;i++){
-      if(ri>0&&i===run.from)continue;            // 转折点已在上段末尾
-      const m=marks[i]; parts.push({t:m.stop||m.name, stop:!!m.stop, turn:!m.stop});
+  const start=(typeof startHeading==='number')?startHeading:HEAD_IX[startHeading];
+  const turnName=code=>code===3?'顺时针转90度':'逆时针转90度';
+  const compare=(a,b)=>a.changes-b.changes || a.turns-b.turns;
+  let candidates=[{heading:start, changes:0, turns:0, runs:[]}];
+  // 四种朝向之间保留最少改动的方案，避免局部选择导致到站需掉头180度。
+  for(const run of runs){
+    const next=[];
+    for(const prev of candidates){
+      const md=HEAD_IX[run.dir], rel=(md-prev.heading+4)%4;
+      const choices=(rel===0||rel===2)
+        ? [{heading:prev.heading,code:rel===0?1:2,move:rel===0?'前进':'后退',change:0}]
+        : [{heading:md,code:rel===1?3:4,move:'前进',change:0},
+           {heading:(md+2)%4,code:rel===1?4:3,move:'后退',change:1}];
+      for(const choice of choices){
+        const turn=choice.code>=3?turnName(choice.code):null;
+        let heading=choice.heading, turns=prev.turns+(turn?1:0);
+        const items=[...prev.runs,{kind:'move',run,code:choice.code,move:choice.move,
+                                  cmdName:turn||choice.move,turn,heading}];
+        const station=STATION_WORK[marks[run.to].stop];
+        if(station){
+          const target=(HEAD_IX['下']+station.yaw/90)%4, delta=(target-heading+4)%4;
+          if(delta===2) continue;
+          const code=delta===0?1:(delta===1?3:4);
+          items.push({kind:'station',run:{from:run.to,to:run.to},code,
+                      cmdName:delta?turnName(code):'到站对准',turn:delta?turnName(code):null,
+                      heading:target,station});
+          heading=target; turns+=delta?1:0;
+        }
+        next.push({heading,changes:prev.changes+choice.change,turns,runs:items});
+      }
     }
-  });
-  return {runs:runsOut, parts, endHeading:heading};
+    next.sort(compare);
+    candidates=next.filter((item,i)=>next.findIndex(p=>p.heading===item.heading)===i);
+    if(!candidates.length)
+      return {runs:[],parts:[],endHeading:start,error:`航向冲突（${marks[run.to].stop||marks[run.to].name}，到站不能转180度）`};
+  }
+  candidates.sort(compare);
+  const best=candidates[0], parts=[];
+  let first=true;
+  for(const item of best.runs){
+    if(item.turn)parts.push({t:item.turn,cmd:'turn'});
+    if(item.kind==='station'){
+      parts.push({t:`${item.station.name}500ms（yaw ${item.station.yaw}°）`,cmd:'operation'});
+      continue;
+    }
+    parts.push({t:item.move,cmd:'move'});
+    for(let i=item.run.from;i<=item.run.to;i++){
+      if(!first&&i===item.run.from)continue;
+      const m=marks[i]; parts.push({t:m.stop||m.name,stop:!!m.stop,turn:!m.stop});
+    }
+    first=false;
+  }
+  return {runs:best.runs,parts,endHeading:best.heading,error:null};
 }
 function layoutSummaryLines(parts, maxTextW){
   const lines=[]; let line={w:0, items:[]};
@@ -870,11 +927,15 @@ function roundRectPath(x,y,w,h,r){
   ctx.closePath();
 }
 function drawRouteSummaryBoard(cw,ch){
-  const blocks=[]; let bdHeading='下';            // 车头初始向下，航向跨批连续
-  if(state.routes.b1){ const c=cmdChain(state.routes.b1.marks,bdHeading); bdHeading=c.endHeading;
+  const blocks=[];
+  if(state.routes.b1){ const c=state.routes.b1.chain;
     blocks.push({title:'【第一批·黄】', parts:c.parts, tc:'#7a5c00', bar:'#e8b400', hi:state.currentBatch===1}); }
-  if(state.routes.b2){ const c=cmdChain(state.routes.b2.marks,bdHeading); bdHeading=c.endHeading;
+  if(state.routes.b2){ const c=state.routes.b2.chain;
     blocks.push({title:'【第二批·绿】', parts:c.parts, tc:'#0d5c2a', bar:'#1ca848', hi:state.currentBatch===2}); }
+  const compact=cw<700||ch<500;
+  $('routeSummaryText').hidden=!compact;
+  $('routeSummaryText').textContent=blocks.map(b=>b.title+'\n'+b.parts.map(p=>p.t).join(' → ')).join('\n\n');
+  if(compact)return;
   if(!blocks.length) return;
   const font='11.5px Consolas,"Courier New",monospace';
   ctx.font=font;
@@ -1358,6 +1419,9 @@ $('btnBatch1').addEventListener('click',()=>planBatch(1));
 $('btnBatch2').addEventListener('click',()=>planBatch(2));
 $('btnClearRoute').addEventListener('click',()=>{
   state.routes.b1=state.routes.b2=null; state.currentBatch=0; state.anim.t=0;
+  state.rxBoards[1]=null; state.rxBoards[2]=null;
+  state.txFrames[1]=state.txFrames[2]=0;
+  updateRouteSendButtons();
   $('routeInfo').textContent='尚未规划。第一批：启停区→扫码区→原料区→粗加工区→暂存区\n第二批：暂存区→原料区→粗加工区→暂存区→回启停区（经右上角/右下角斜插，不经过45°点）';
   draw();
 });
@@ -1416,7 +1480,8 @@ $('btnAnimReset').addEventListener('click',()=>{ state.anim.t=0; state.anim.on=f
  *          指令码 1=前进 2=后退 3=顺时针转90度 4=逆时针转90度（相对当前车头朝向，车头初始向下）
  *   CMD = 0x02 坐标回传帧（车端 → 网页）
  * 发送序列：指令帧(段1动作) → 段1坐标帧 → 指令帧(段2动作) → 段2坐标帧 → …（每方向段一条指令帧）
- * 每段坐标帧首点=上一段末点(车端去重拼接)。
+ * 每段坐标帧首点=上一段末点；站点操作用01帧的两个相同坐标，不作为平移段。
+ * 转向后前进/后退由点序方向与最终车头朝向判断；CODE=1重复坐标段表示已对准。
  * SUM = CMD+批次+[点数]+数据字节 的累加和低 8 位。
  */
 const CMD_CODE = {'前进':1, '后退':2, '顺时针转90度':3, '逆时针转90度':4};
@@ -1432,7 +1497,9 @@ function dirRuns(marks){
   const dirs=segDirs(marks), runs=[];
   let s=0;
   for(let i=0;i<dirs.length;i++)
-    if(i===dirs.length-1 || dirs[i+1]!==dirs[i]){ runs.push({dir:dirs[i], from:s, to:i+1}); s=i+1; }
+    if(i===dirs.length-1 || dirs[i+1]!==dirs[i] || STATION_WORK[marks[i+1].stop]){
+      runs.push({dir:dirs[i],from:s,to:i+1}); s=i+1;
+    }
   return runs;
 }
 function buildCmdFrame(batch, code){
@@ -1468,13 +1535,8 @@ async function sendRouteFrame(batch){
   const route=state.routes[batch===1?'b1':'b2'];
   if(!route){ logLine('sys',`[系统] 第 ${batch} 批路线尚未规划，无法发送。`); return; }
   if(!serial.port||!serial.port.writable){ logLine('sys','[系统] 请先连接串口（蓝牙/ZigBee）。'); return; }
-  // 车头初始向下；批2 承接批1 结束朝向（航向跨批连续；批1 回传完成删任务后仍记录其结束朝向）
-  let startH;
-  if(batch===1) startH='下';
-  else if(state.txEndHeading[1]!==undefined) startH=state.txEndHeading[1];
-  else if(state.routes.b1) startH=cmdChain(state.routes.b1.marks,'下').endHeading;
-  else startH='下';
-  const chain = cmdChain(route.marks, startH);
+  const chain=route.chain;
+  if(chain.error){ logLine('sys',`[系统] ${chain.error}，无法发送。`); return; }
   state.txEndHeading[batch] = chain.endHeading;                    // 记录结束朝向（下一批承接）
   state.txFrames[batch] = chain.runs.length * 2;                   // 已发送帧数（每段=指令帧+段坐标帧，回传完成判定）
   state.rxBoards[batch] = {seq:[], frames:0, lastTime:null, done:false};   // 清空该批回传累计
@@ -1486,25 +1548,38 @@ async function sendRouteFrame(batch){
       const df=buildCmdFrame(batch, item.code);
       await uartWrite(df);
       logLine('tx',`▷ 第${batch}批动作指令【${item.cmdName}】(CMD 04): ${bytesToHex(df)}`);
-      const pts=route.marks.slice(item.run.from, item.run.to+1);
-      const cmd = pts.some(m=>m.name==='右上角45度'||m.name==='右下角45度') ? 0x03 : 0x01;
+      const pts=item.kind==='station'
+        ? [route.marks[item.run.from],route.marks[item.run.from]]
+        : route.marks.slice(item.run.from,item.run.to+1);
+      const cmd=item.kind==='station'?0x01:
+        (pts.some(m=>m.name==='右上角45度'||m.name==='右下角45度')?0x03:0x01);
       const sf=buildSegFrame(batch, pts, cmd);
       await uartWrite(sf);
-      logLine('tx',`▷ 第${batch}批${item.run.dir}行段帧（CMD 0x${cmd.toString(16).toUpperCase()}，${sf.length}字节，${pts.length}点${cmd===0x03?'，含45°斜走':''}）: ${bytesToHex(sf)}`);
+      const label=item.kind==='station'
+        ? `${pts[0].name}原地对准/操作节点（yaw ${item.station.yaw}°）`
+        : `${item.run.dir}行${item.move}段`;
+      logLine('tx',`▷ 第${batch}批${label}（CMD 0x${cmd.toString(16).toUpperCase()}，${sf.length}字节，${pts.length}点${cmd===0x03?'，含45°斜走':''}）: ${bytesToHex(sf)}`);
       sent+=pts.length;
     }
-    logLine('sys',`[系统] 第 ${batch} 批发送完成：${chain.runs.length} 个动作段 / ${sent} 个关键点（等待车端回传 ${chain.runs.length} 帧）。`);
+    logLine('sys',`[系统] 第 ${batch} 批发送完成：${chain.runs.length} 个动作段 / ${sent} 个关键点（等待车端回传 ${state.txFrames[batch]} 帧）。`);
   }catch(err){ logLine('sys',`[系统] 发送失败：${err.message}`); }
+}
+function updateRouteSendButtons(){
+  $('btnSendB1').disabled=!state.routes.b1 || !!state.routeErrors[1];
+  $('btnSendB2').disabled=!state.routes.b2 || !!state.routeErrors[2];
+  $('btnSendBoth').disabled=$('btnSendB1').disabled || $('btnSendB2').disabled;
+  updateDebugStartButton(1);
 }
 function updateDebugStartButton(batch){
   const b=$('btnDebugStart1');
   if(!b || batch!==1) return;
   const rb=state.rxBoards[1];
-  b.disabled=!(rb && rb.done && !state.debugStartSent[1]);
+  b.disabled=!!state.routeErrors[1] || !(rb && rb.done && !state.debugStartSent[1]);
 }
 async function sendDebugStart(batch){
   if(batch!==1){ logLine('sys','[系统] 当前仅支持批次1调试启动。'); return; }
   const rb=state.rxBoards[1];
+  if(state.routeErrors[1]){ logLine('sys',`[系统] ${state.routeErrors[1]}，禁止启动。`); return; }
   if(!rb || !rb.done){ logLine('sys','[系统] 请先发送第一批路线并等待STM32回传完成。'); return; }
   try{
     const frame=buildDebugRunFrame(1);
@@ -1600,7 +1675,7 @@ function rxEchoAccept(cmd, batch, pts, act){
     rb.done=true;
     logLine('sys',`[系统] 第 ${batch} 批回传完成（${rb.frames}/${want} 帧）——删除该批路线任务`);
     state.routes['b'+batch]=null;
-    updateDebugStartButton(batch);
+    updateRouteSendButtons();
   }
 }
 

@@ -507,6 +507,8 @@ uint8_t route_debug_next(uint8_t batch, RouteDebugLeg *leg)
         {
             leg->action = (point == 1) ? s->action :
                           (s->action == CMD_ACT_BACK ? CMD_ACT_BACK : CMD_ACT_FWD);
+            leg->station = (uint8_t)(s->cmd == CMD_ROUTE && s->count == 2 &&
+                                    s->x[0] == s->x[1] && s->y[0] == s->y[1]);
             leg->from_x = s->x[point - 1];
             leg->from_y = s->y[point - 1];
             leg->to_x = s->x[point];

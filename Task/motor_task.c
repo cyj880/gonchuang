@@ -470,7 +470,7 @@ static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基�
 static uint8_t      line_axis = 0;     /*直线段反馈轴: 0=里程计1(vy) 1=里程计2(vx)*/
 static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
 static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
-static uint8_t      debug_route_step = 0;   /*1斜行/2扫码/3校准或回右上/4内部转向/5中心/6路线转向*/
+static uint8_t      debug_route_step = 0;   /*1斜行/2扫码/3校准或回右上/4内部转向/5中心/6路线转向/7到站*/
 static uint16_t     debug_route_heading = 0; /*已完成动作的目标yaw，限定0/90/180/270*/
 static uint16_t     debug_goal_heading = 0;
 static volatile int32_t debug_pos_offset = 0; /*路线任务写，LCD读：路线pos=原始pos+偏移*/
@@ -482,7 +482,7 @@ static uint8_t      debug_rule_index = 0;
 static uint8_t      debug_motion_index = 0;
 static volatile uint8_t no_next_alarm = 0;  /*MotorTask写，LCD_Task读*/
 static uint8_t      debug_pause_active = 0;
-static uint8_t      debug_pause_next = 0;   /*1=下一点对, 2=转向后执行点对, 0=结束*/
+static uint8_t      debug_pause_next = 0;   /*1=下一点对, 2=转向后执行点对, 3=操作后取下一段, 0=结束*/
 static TickType_t   debug_pause_until = 0;
 static void task_step_done(void);
 static void turn_run_start(float start_yaw, float delta, uint8_t accumulate);
@@ -692,6 +692,26 @@ static RoutePoint debug_point_at(uint16_t x, uint16_t y)
     return RP_UNKNOWN;
 }
 
+static int debug_station_heading(RoutePoint point)
+{
+    if (point == RP_QR || point == RP_STORAGE) return 0;
+    if (point == RP_RAW) return 90;
+    if (point == RP_ROUGH) return 270;
+    return -1;
+}
+
+/*左下原点点序只判断前后方向，行程大小仍取用户标定的规则。*/
+static int32_t debug_relative_value(int32_t value)
+{
+    int32_t dx = (int32_t)debug_route_leg.to_x - debug_route_leg.from_x;
+    int32_t dy = (int32_t)debug_route_leg.to_y - debug_route_leg.from_y;
+    uint16_t heading = ((dy >= 0 ? dy : -dy) >= (dx >= 0 ? dx : -dx)) ?
+                       (dy >= 0 ? 180 : 0) : (dx >= 0 ? 270 : 90);
+    if ((heading + 180) % 360 == debug_route_heading)
+        return value > 0 ? -value : value;
+    return value;
+}
+
 static uint8_t debug_leg_load(void)
 {
     uint8_t i;
@@ -712,6 +732,11 @@ static uint8_t debug_leg_load(void)
         debug_goal_heading = (debug_route_heading + 90) % 360;
     else if (debug_route_leg.action == CMD_ACT_CCW)
         debug_goal_heading = (debug_route_heading + 270) % 360;
+    if (debug_route_leg.from_x == debug_route_leg.to_x &&
+        debug_route_leg.from_y == debug_route_leg.to_y)
+        return (uint8_t)(debug_route_leg.station &&
+                        debug_route_leg.action != CMD_ACT_BACK &&
+                        debug_station_heading(from) == debug_goal_heading);
     return (uint8_t)(debug_rule_index < DEBUG_RULE_COUNT ||
                      debug_route_leg.action == CMD_ACT_CW ||
                      debug_route_leg.action == CMD_ACT_CCW);
@@ -742,7 +767,8 @@ static void debug_motion_start(void)
     {
         debug_route_step = (debug_rule_index == 1) ? 2 :
                            (debug_motion_index == 2 ? 5 : 3);
-        debug_line_start(motion->value, motion->relative, (float)debug_route_heading);
+        debug_line_start(motion->relative ? debug_relative_value(motion->value) : motion->value,
+                         motion->relative, (float)debug_route_heading);
     }
 }
 
@@ -752,6 +778,17 @@ static void debug_leg_start(void)
     uint8_t has_internal_turn = (uint8_t)(debug_rule_index < DEBUG_RULE_COUNT &&
                                 debug_rules[debug_rule_index].count > 1 &&
                                 debug_rules[debug_rule_index].motion[1].sub == 2);
+    if (debug_route_leg.station)
+    {
+        debug_route_step = 7;
+        if (debug_goal_heading != debug_route_heading ||
+            fabsf(turn_angdiff(yaw_abs360_to_signed((float)debug_goal_heading),
+                              IMU_GetYaw())) > TURN_TOL_DEG)
+            debug_turn_start((float)debug_goal_heading);
+        else
+            debug_point_pause_start(3, 500);
+        return;
+    }
     if (!has_internal_turn &&
         (debug_route_leg.action == CMD_ACT_CW || debug_route_leg.action == CMD_ACT_CCW))
     {
@@ -768,6 +805,11 @@ static void debug_motion_done(void)
     if (phase == PHASE_TURN)
     {
         debug_route_heading = debug_goal_heading;
+        if (debug_route_step == 7)
+        {
+            debug_point_pause_start(3, 500);           /*作业接口预留，未接机械臂*/
+            return;
+        }
         if (debug_route_step == 6)
         {
             if (debug_rule_index < DEBUG_RULE_COUNT)
@@ -781,7 +823,10 @@ static void debug_motion_done(void)
     if (debug_motion_index < debug_rules[debug_rule_index].count)
         debug_motion_start();                        /*复合点对内部动作，不提前记为到点*/
     else if (debug_leg_load())
-        debug_point_pause_start(1, 500);
+    {
+        if (debug_route_leg.station) debug_leg_start();
+        else debug_point_pause_start(1, 500);
+    }
     else
         debug_no_next_start();
 }
@@ -1165,6 +1210,12 @@ void MotorTask(void *pvParameters)
                 {
                     debug_pause_next = 0;
                     debug_motion_start();
+                }
+                else if (debug_pause_next == 3)
+                {
+                    debug_pause_next = 0;
+                    if (debug_leg_load()) debug_leg_start();
+                    else debug_no_next_start();
                 }
                 else
                 {
