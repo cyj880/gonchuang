@@ -312,7 +312,7 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define TURN_OUT_SIGN       (-1.0f)  /*原地转向输出方向: 实车"左转发成右转270°"已实测, 翻转。
                                         与YAW_OUT_SIGN同值(两者闭环的都是IMU增方向)*/
 
-#define POS_LEG1_RPM        48       /* 45°斜走巡航: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
+#define POS_LEG1_RPM        60       /* 45°斜走巡航: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
 #define POS_LEG1_APPROACH_RPM 40     /*接近段末恢复原速度，控制停车误差*/
 #define POS_LEG1_APPROACH_COUNTS 20000 /*段末约30mm保持原速度*/
 
@@ -394,7 +394,8 @@ static const TaskStep task_z1[] = {
    以触发时刻航向为原点计算相对角, 角差全程归一, 无±180°环绕跳变。 */
 #define TURN_TOL_DEG        2.0f     /* 到位容差(deg), 进入即停车(留滞后余量) */
 #define TURN_CREEP_DEG      15.0f    /* 爬行带(deg): 带内固定低速逼近 */
-#define TURN_CREEP_RPM      12       /* 爬行转速(RPM), 高于电机低速死区 */
+#define TURN_CREEP_RPM      14       /* 原12RPM提高约1.2倍，14.4取最近整数 */
+#define TURN_SPEED_SCALE    2.0f     /*剩余角度大于15°：原转向输出提高2倍*/
 #define TURN_OUT_MAX_RPM    70       /* 转向PID输出限幅(RPM) */
 #define TURN_FAST_DEG       30.0f    /*此角度以内沿用已实测的减速参数*/
 #define TURN_FAST_KP        0.25f    /*远段增量: (剩余角度-30°)*0.25RPM*/
@@ -1328,7 +1329,7 @@ void MotorTask(void *pvParameters)
             }
             aerr = fabsf(err);
 
-            /*只增强远段比例输出，在30°边界连续回到原增益；近段阻尼和爬行不变。*/
+            /*保留原比例/阻尼配比，15°外输出提高2倍，最后15°用14RPM逼近。*/
             TurnPID.Kp = TURN_PID_KP;
             TurnPID.OutMax = TURN_OUT_MAX_RPM;
             if (aerr > TURN_FAST_DEG)
@@ -1336,6 +1337,14 @@ void MotorTask(void *pvParameters)
                 TurnPID.Kp += TURN_FAST_KP * (aerr - TURN_FAST_DEG) / aerr;
                 TurnPID.OutMax = TURN_FAST_MAX_RPM;
             }
+            if (aerr > TURN_CREEP_DEG)
+            {
+                TurnPID.Kp *= TURN_SPEED_SCALE;
+                TurnPID.Kd = TURN_PID_KD * TURN_SPEED_SCALE;
+                TurnPID.OutMax *= TURN_SPEED_SCALE;
+            }
+            else
+                TurnPID.Kd = TURN_PID_KD;
             TurnPID.OutMin = -TurnPID.OutMax;
 
             if ((xTaskGetTickCount() - posrun_start) >= pdMS_TO_TICKS(turn_timeout_ms))
@@ -1391,8 +1400,10 @@ void MotorTask(void *pvParameters)
                     /*软件限斜率(移植自开源工程): 每拍速度最多变化TURN_SLEW_RPM,
                       命令永不阶跃, 不激励ZDT内部斜率跟随, 消除惯性甩尾超调*/
                     w_raw = (int)(TurnPID.Out * TURN_OUT_SIGN);
-                    if (w_raw > 0 && w_raw < TURN_MIN_RPM) w_raw = TURN_MIN_RPM;
-                    if (w_raw < 0 && w_raw > -TURN_MIN_RPM) w_raw = -TURN_MIN_RPM;
+                    if (w_raw > 0 && w_raw < (int)(TURN_MIN_RPM * TURN_SPEED_SCALE))
+                        w_raw = (int)(TURN_MIN_RPM * TURN_SPEED_SCALE);
+                    if (w_raw < 0 && w_raw > -(int)(TURN_MIN_RPM * TURN_SPEED_SCALE))
+                        w_raw = -(int)(TURN_MIN_RPM * TURN_SPEED_SCALE);
                     if (w_raw > turn_w_last + TURN_SLEW_RPM)      w_raw = turn_w_last + TURN_SLEW_RPM;
                     else if (w_raw < turn_w_last - TURN_SLEW_RPM) w_raw = turn_w_last - TURN_SLEW_RPM;
                     turn_w_last = w_raw;
