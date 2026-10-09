@@ -691,7 +691,9 @@ typedef struct
 /*仅添加用户提供的点对；yaw=-1继承路线，其余使用该段明确指定的绝对航向。*/
 static const DebugPointRule debug_rules[] = {
     {RP_START1,RP_DIAG_RU,1,{{1,1,100000,-1}}},
+    {RP_START2,RP_DIAG_RD,1,{{0,1,-100000,0}}},
     {RP_DIAG_RU,RP_QR,1,{{0,1,520000,-1}}},
+    {RP_DIAG_RD,RP_QR,1,{{0,1,-520000,0}}},
     {RP_QR,RP_RU,1,{{0,0,110000,-1}}},
     {RP_QR,RP_CENTER,3,{{0,0,725000,-1},{2,0,90,-1},{0,1,620000,-1}}},
     {RP_CENTER,RP_RAW,1,{{0,1,620000,180}}},
