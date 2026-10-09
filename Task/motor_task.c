@@ -474,6 +474,9 @@ static uint8_t      debug_route_step = 0;   /*1斜行/2扫码/3校准或回右�
 static uint16_t     debug_route_heading = 0; /*已完成动作的目标yaw，限定0/90/180/270*/
 static uint16_t     debug_goal_heading = 0;
 static volatile int32_t debug_pos_offset = 0; /*路线任务写，LCD读：路线pos=原始pos+偏移*/
+static int32_t      debug_turn_pos_raw = 0;    /*转弯开始时里程计1原始pos*/
+static volatile int32_t debug_turn_pos_hold = 0;   /*转弯期间保持的路线pos*/
+static volatile uint8_t debug_turn_pos_active = 0; /*路线转弯期间冻结路线pos*/
 static RouteDebugLeg debug_route_leg;
 static uint8_t      debug_rule_index = 0;
 static uint8_t      debug_motion_index = 0;
@@ -548,6 +551,7 @@ static void pos_run_abort(void)
     if (debug_pause_active) Buzzer_Off();
     debug_pause_active = 0;
     debug_pause_next = 0;
+    debug_turn_pos_active = 0;
     leg1_next_valid = 0;
     phase = PHASE_IDLE;
     Motor_Stop();
@@ -610,8 +614,27 @@ static void debug_line_start(int32_t value, uint8_t relative, float heading)
 
 static void debug_turn_start(float target_yaw)
 {
+    if (debug_route_active)
+    {
+        OdomData_t o;
+        odometry_get(&o);
+        debug_turn_pos_raw = o.enc_pos[ODOM_POS_AXIS];
+        debug_turn_pos_hold = debug_turn_pos_raw + debug_pos_offset;
+        debug_turn_pos_active = 1;
+    }
     float now_yaw = IMU_GetYaw();
     turn_run_start(now_yaw, turn_angdiff(yaw_abs360_to_signed(target_yaw), now_yaw), 0);
+}
+
+/*转弯结束后抵消里程计1在原地转向期间产生的计数。
+  编码器原始pos只读，路线坐标通过offset完成等效清零。*/
+static void debug_turn_pos_commit(void)
+{
+    OdomData_t o;
+    if (!debug_turn_pos_active) return;
+    odometry_get(&o);
+    debug_pos_offset += debug_turn_pos_raw - o.enc_pos[ODOM_POS_AXIS];
+    debug_turn_pos_active = 0;
 }
 
 typedef enum
@@ -770,6 +793,7 @@ static void debug_route_start(void)
     debug_route_active = 1;
     debug_route_heading = 0;                         /*两启停区车头均朝下，出发yaw=0*/
     debug_pos_offset = 0;
+    debug_turn_pos_active = 0;
     no_next_alarm = 0;
     Motor_Enable(true);
     have_leg = debug_leg_load();
@@ -788,6 +812,8 @@ static void debug_route_start(void)
 
 int32_t Motor_RoutePos(int32_t encoder_pos)
 {
+    if (debug_turn_pos_active)
+        return debug_turn_pos_hold;
     return encoder_pos + debug_pos_offset;
 }
 
@@ -1111,6 +1137,7 @@ void MotorTask(void *pvParameters)
                 if (debug_pause_active) Buzzer_Off();
                 debug_pause_active = 0;
                 debug_pause_next = 0;
+                debug_turn_pos_active = 0;
                 phase = PHASE_IDLE;
                 leg1_next_valid = 0;
                 turn_w_last = 0;
@@ -1244,6 +1271,7 @@ void MotorTask(void *pvParameters)
                     turn_settle_ticks = 0;
                     if (debug_route_active)
                     {
+                        debug_turn_pos_commit();
                         debug_motion_done();
                     }
                     else
