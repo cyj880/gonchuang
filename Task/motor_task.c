@@ -289,8 +289,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define POS_QR_SLOW_RPM     10       /* 缓行速度(RPM), 减弱接近目标的速度衰减 */
 
 #define POS_OUT_MAX_RPM     100      /* 位置PID输出限幅(RPM) */
-#define POS_START_RPM       30       /* 起步速度上限(RPM) */
-#define POS_START_RAMP_MS   300u     /* 起步上限平滑增加至POS_OUT_MAX_RPM */
+#define POS_START_RPM       20       /* 起步速度上限(RPM)，降低打滑风险 */
+#define POS_START_RAMP_MS   500u     /* 起步上限平滑增加至POS_OUT_MAX_RPM */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
 #define POS_PROGRESS_MS     1000u   /* 持续未向目标靠近时停车(反馈不变/方向错误) */
 #define POS_PROGRESS_COUNTS 1000.0f /* 每次确认进度需至少靠近约1.5mm */
