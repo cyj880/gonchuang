@@ -286,11 +286,11 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
    (里程计约35ms刷新一次位置, 微分对量化噪声敏感)。 */
 #define POS_TOL_COUNTS      5000     /* 到位容差(编码值): 目标±5000, 进入即停车 */
 #define POS_QR_SLOW_COUNTS  60000    /* 接近目标约91mm时限制为缓行速度 */
-#define POS_QR_SLOW_RPM     8        /* 接近目标低速逼近(RPM)，减少冲过目标 */
+#define POS_QR_SLOW_RPM     5        /* 接近目标低速逼近(RPM)，减少冲过目标 */
 
 #define POS_OUT_MAX_RPM     160      /* 直线巡航位置PID输出限幅(RPM) */
-#define POS_START_RPM       15       /* 更柔和的直线起步速度上限(RPM) */
-#define POS_START_RAMP_MS   800u     /* 延长起步平滑爬升，降低打滑 */
+#define POS_START_RPM       10       /* 更柔和的直线起步速度上限(RPM) */
+#define POS_START_RAMP_MS   1200u     /* 延长起步平滑爬升，降低打滑 */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
 #define POS_PROGRESS_MS     1000u   /* 持续未向目标靠近时停车(反馈不变/方向错误) */
 #define POS_PROGRESS_COUNTS 1000.0f /* 每次确认进度需至少靠近约1.5mm */
