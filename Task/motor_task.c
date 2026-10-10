@@ -1167,11 +1167,11 @@ void MotorTask(void *pvParameters)
                     turn_run_start(IMU_GetYaw(), (c.sub == 3) ? delta : -delta, 1);
                     break;
                 }
-                if (c.sub == 1)
+                if (c.sub == 1 || c.sub == 5)
                 {
                     array_mode = 0;
                     leg1_next_valid = 0;
-                    diag_run_start(1, (int32_t)c.param, (c.flags & 0x02) ?
+                    diag_run_start((c.sub == 1) ? 1 : 3, (int32_t)c.param, (c.flags & 0x02) ?
                                    yaw_abs360_to_signed((float)c.yaw_target) : IMU_GetYaw());
                     Motor_Enable(true);
                     break;
