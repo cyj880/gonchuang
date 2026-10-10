@@ -705,7 +705,13 @@ static const DebugPointRule debug_rules[] = {
     {RP_STORAGE,RP_LU,1,{{0,1,-560000,0}}},
     {RP_LU,RP_RAW,1,{{0,1,-580000,90}}},
     {RP_LU,RP_RU,1,{{0,1,1200000,270}}},
-    {RP_STORAGE,RP_QR,1,{{0,1,1200000,270}}}
+    {RP_STORAGE,RP_QR,1,{{0,1,1200000,270}}},
+    {RP_STORAGE,RP_LD,1,{{0,1,615000,0}}},
+    {RP_LD,RP_RD,1,{{0,1,1200000,270}}},
+    {RP_RAW,RP_CENTER,1,{{0,1,620000,0}}},
+    {RP_CENTER,RP_STORAGE,1,{{0,1,620000,90}}},
+    {RP_LD,RP_ROUGH,1,{{0,1,605000,270}}},
+    {RP_LU,RP_LD,1,{{0,1,1175000,0}}}
 };
 #define DEBUG_RULE_COUNT (sizeof(debug_rules) / sizeof(debug_rules[0]))
 
