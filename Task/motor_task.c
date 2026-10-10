@@ -313,8 +313,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
                                         与YAW_OUT_SIGN同值(两者闭环的都是IMU增方向)*/
 
 #define POS_LEG1_RPM        60       /* 45°斜走巡航: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
-#define POS_LEG1_APPROACH_RPM 40     /*接近段末恢复原速度，控制停车误差*/
-#define POS_LEG1_APPROACH_COUNTS 20000 /*段末约30mm保持原速度*/
+#define POS_LEG1_APPROACH_RPM 8      /*低速到点，降低停车瞬间的轮胎打滑*/
+#define POS_LEG1_APPROACH_COUNTS 40000 /*末段约61mm平滑减速*/
 
 /* ---- 场地与点位(编码值) ----
    注意: 两启停区出发时X轮计数方向镜像 —— 同一"场地右上角",
@@ -1296,12 +1296,21 @@ void MotorTask(void *pvParameters)
         if (phase == PHASE_DIAG)
         {
             OdomData_t o;
-            float travel;
+            float travel, remaining;
             int diagonal_rpm = POS_LEG1_RPM;
             odometry_get(&o);
             travel = fabsf((float)o.enc_pos[ODOM_POS_AXIS] - (float)diag_start);
-            if (fabsf((float)leg1_end) - travel <= POS_LEG1_APPROACH_COUNTS)
-                diagonal_rpm = POS_LEG1_APPROACH_RPM;
+            remaining = fabsf((float)leg1_end) - travel;
+            if (remaining <= POS_LEG1_APPROACH_COUNTS)
+            {
+                float ratio = remaining > 0.0f ? remaining / POS_LEG1_APPROACH_COUNTS : 0.0f;
+                /*smoothstep：减速带两端斜率为0，避免60→40的突降；
+                  轮速按偶数取整，与下面两个平移分量的整数除2一致。*/
+                float speed = POS_LEG1_APPROACH_RPM +
+                              (POS_LEG1_RPM - POS_LEG1_APPROACH_RPM) *
+                              ratio * ratio * (3.0f - 2.0f * ratio);
+                diagonal_rpm = 2 * (int)(speed / 2.0f + 0.5f);
+            }
 
             YawPID.Actual = IMU_GetYaw();                     /*直读最新yaw(不经35ms透传)*/
             YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
