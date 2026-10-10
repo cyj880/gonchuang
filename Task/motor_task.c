@@ -692,7 +692,7 @@ typedef struct
 /*仅添加用户提供的点对；保持标定行程，上传航向相反时只反转直线正负。*/
 static const DebugPointRule debug_rules[] = {
     {RP_START1,RP_DIAG_RU,1,{{1,1,100000,-1}}},
-    {RP_START2,RP_DIAG_RD,1,{{0,1,-100000,0}}},
+    {RP_START2,RP_DIAG_RD,1,{{5,1,100000,0}}},
     {RP_DIAG_RU,RP_QR,1,{{0,1,520000,-1}}},
     {RP_DIAG_RD,RP_QR,1,{{0,1,-520000,0}}},
     {RP_QR,RP_RU,1,{{0,0,110000,-1}}},
@@ -784,10 +784,11 @@ static void debug_motion_start(void)
         return;
     }
     motion = &debug_rules[debug_rule_index].motion[debug_motion_index];
-    if (motion->sub == 1)
+    if (motion->sub == 1 || motion->sub == 5)
     {
         debug_route_step = 1;
-        diag_run_start(1, motion->value, (float)debug_route_heading);
+        diag_run_start((motion->sub == 1) ? 1 : 3, motion->value,
+                       motion->yaw < 0 ? (float)debug_route_heading : (float)motion->yaw);
     }
     else if (motion->sub == 2)
     {
