@@ -393,9 +393,9 @@ static const TaskStep task_z1[] = {
    若经 OdomTask(35ms RS485轮询节奏)透传, 高速段每盲区多转2~3°, 会来回振荡!
    以触发时刻航向为原点计算相对角, 角差全程归一, 无±180°环绕跳变。 */
 #define TURN_TOL_DEG        2.0f     /* 到位容差(deg), 进入即停车(留滞后余量) */
-#define TURN_CREEP_DEG      8.0f     /* 最后8°固定低速逼近 */
+#define TURN_CREEP_DEG      15.0f    /* 最后15°固定低速逼近 */
 #define TURN_CREEP_RPM      17       /*当前14RPM再提高1.2倍，取最近整数*/
-#define TURN_SPEED_SCALE    18.0f    /*前82°在原9倍基础上再提高2倍，最后8°低速逼近*/
+#define TURN_SPEED_SCALE    9.0f     /*恢复前75°的9倍输出，降低打滑*/
 #define TURN_OUT_MAX_RPM    70       /* 转向PID输出限幅(RPM) */
 #define TURN_FAST_DEG       30.0f    /*此角度以内沿用已实测的减速参数*/
 #define TURN_FAST_KP        0.25f    /*远段增量: (剩余角度-30°)*0.25RPM*/
@@ -1389,7 +1389,7 @@ void MotorTask(void *pvParameters)
             }
             aerr = fabsf(err);
 
-            /*保留原比例/阻尼配比，8°外输出提高18倍，最后8°用17RPM逼近。*/
+            /*保留原比例/阻尼配比，15°外输出提高9倍，最后15°用17RPM逼近。*/
             TurnPID.Kp = TURN_PID_KP;
             TurnPID.OutMax = TURN_OUT_MAX_RPM;
             if (aerr > TURN_FAST_DEG)
