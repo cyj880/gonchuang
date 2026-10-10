@@ -478,6 +478,7 @@ static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
 static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
 static uint8_t      debug_route_batch = 1;
 static uint8_t      debug_route_next_batch = 0; /*两批连跑时预先锁定的第二批*/
+static uint8_t      debug_first_raw_reached = 0; /*首次到原料区后，扫码区校准改用相对行程*/
 static uint8_t      debug_route_step = 0;   /*1斜行/2扫码/3校准或回右上/4内部转向/5中心/6路线转向/7到站*/
 static uint16_t     debug_route_heading = 0; /*已完成动作的目标yaw，限定0/90/180/270*/
 static uint16_t     debug_goal_heading = 0;
@@ -678,7 +679,7 @@ typedef struct
     uint8_t sub;                               /*08帧子命令: 0直线/1右前斜行/2绝对转向*/
     uint8_t relative;
     int32_t value;
-    int16_t yaw;                               /*-1继承路线航向，其余为用户指定绝对yaw*/
+    int16_t yaw;                               /*标定航向；-1的出发直线以0°标定*/
 } DebugMotion;
 
 typedef struct
@@ -688,14 +689,14 @@ typedef struct
     DebugMotion motion[3];
 } DebugPointRule;
 
-/*仅添加用户提供的点对；yaw=-1继承路线，其余使用该段明确指定的绝对航向。*/
+/*仅添加用户提供的点对；保持标定行程，上传航向相反时只反转直线正负。*/
 static const DebugPointRule debug_rules[] = {
     {RP_START1,RP_DIAG_RU,1,{{1,1,100000,-1}}},
     {RP_START2,RP_DIAG_RD,1,{{0,1,-100000,0}}},
     {RP_DIAG_RU,RP_QR,1,{{0,1,520000,-1}}},
     {RP_DIAG_RD,RP_QR,1,{{0,1,-520000,0}}},
     {RP_QR,RP_RU,1,{{0,0,110000,-1}}},
-    {RP_QR,RP_CENTER,3,{{0,0,725000,-1},{2,0,90,-1},{0,1,620000,-1}}},
+    {RP_QR,RP_CENTER,3,{{0,0,725000,-1},{2,0,90,-1},{0,1,620000,90}}},
     {RP_CENTER,RP_RAW,1,{{0,1,620000,180}}},
     {RP_RU,RP_RAW,1,{{0,1,620000,90}}},
     {RP_RAW,RP_ROUGH,1,{{0,1,1160000,0}}},
@@ -727,15 +728,11 @@ static int debug_station_heading(RoutePoint point)
     return -1;
 }
 
-/*左下原点点序只判断前后方向，行程大小仍取用户标定的规则。*/
-static int32_t debug_relative_value(int32_t value)
+/*保留标定时的正负方向，仅在上传航向相反时翻转。*/
+static int32_t debug_relative_value(int32_t value, uint16_t calibrated_heading)
 {
-    int32_t dx = (int32_t)debug_route_leg.to_x - debug_route_leg.from_x;
-    int32_t dy = (int32_t)debug_route_leg.to_y - debug_route_leg.from_y;
-    uint16_t heading = ((dy >= 0 ? dy : -dy) >= (dx >= 0 ? dx : -dx)) ?
-                       (dy >= 0 ? 180 : 0) : (dx >= 0 ? 270 : 90);
-    if ((heading + 180) % 360 == debug_route_heading)
-        return value > 0 ? -value : value;
+    if ((calibrated_heading + 180) % 360 == debug_route_heading)
+        return -value;
     return value;
 }
 
@@ -801,12 +798,27 @@ static void debug_motion_start(void)
     }
     else
     {
-        debug_route_step = (debug_rule_index == 1) ? 2 :
+        int32_t value = motion->value;
+        uint8_t relative = motion->relative;
+        uint16_t calibrated_heading = motion->yaw < 0 ? 0 : (uint16_t)motion->yaw;
+        debug_route_step = (debug_rules[debug_rule_index].from == RP_DIAG_RU) ? 2 :
                            (debug_motion_index == 2 ? 5 : 3);
-        debug_line_start(motion->relative && motion->yaw < 0 ?
-                         debug_relative_value(motion->value) : motion->value,
-                         motion->relative, motion->yaw < 0 ?
-                         (float)debug_route_heading : (float)motion->yaw);
+        /*扫码区位置随机，首次去原料区前保持绝对校准。后续用标定扫码pos
+          620000换算原行程，避免连续路线累计pos改变后追赶旧的绝对目标。*/
+        if (!relative && debug_first_raw_reached &&
+            debug_rules[debug_rule_index].from == RP_QR)
+        {
+            value -= 620000;
+            relative = 1;
+        }
+        if (debug_route_heading != calibrated_heading &&
+            debug_route_heading != (calibrated_heading + 180) % 360)
+        {
+            debug_no_next_start();
+            return;
+        }
+        if (relative) value = debug_relative_value(value, calibrated_heading);
+        debug_line_start(value, relative, (float)debug_route_heading);
     }
 }
 
@@ -857,19 +869,21 @@ static void debug_motion_done(void)
             return;
         }
     }
-    if (phase == PHASE_LINE && debug_rule_index < DEBUG_RULE_COUNT &&
-        debug_rules[debug_rule_index].motion[debug_motion_index].yaw >= 0)
-        debug_route_heading = (uint16_t)debug_rules[debug_rule_index].motion[debug_motion_index].yaw;
     debug_motion_index++;
     if (debug_motion_index < debug_rules[debug_rule_index].count)
         debug_motion_start();                        /*复合点对内部动作，不提前记为到点*/
-    else if (debug_leg_load())
-    {
-        if (debug_route_leg.station) debug_leg_start();
-        else debug_point_pause_start(1, 500);
-    }
     else
-        debug_no_next_start();
+    {
+        if (debug_rules[debug_rule_index].to == RP_RAW)
+            debug_first_raw_reached = 1;
+        if (debug_leg_load())
+        {
+            if (debug_route_leg.station) debug_leg_start();
+            else debug_point_pause_start(1, 500);
+        }
+        else
+            debug_no_next_start();
+    }
 }
 
 static void debug_route_start(uint8_t selection)
@@ -879,6 +893,7 @@ static void debug_route_start(uint8_t selection)
     debug_route_active = 1;
     debug_route_batch = (selection == 2) ? 2 : 1;
     debug_route_next_batch = (selection == 3) ? 2 : 0;
+    debug_first_raw_reached = (uint8_t)(selection == 2);
     debug_route_heading = 0;                         /*两启停区车头均朝下，出发yaw=0*/
     if (selection == 2 || debug_route_batch == 1) debug_pos_offset = 0;
     debug_turn_pos_active = 0;
