@@ -285,12 +285,13 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
    整定: 先 Kp(0.0005起, 太慢加大/振荡减小), 再 Ki(消除稳态误差), Kd 默认关闭
    (里程计约35ms刷新一次位置, 微分对量化噪声敏感)。 */
 #define POS_TOL_COUNTS      5000     /* 到位容差(编码值): 目标±5000, 进入即停车 */
-#define POS_DECEL_COUNTS    160000   /* 距目标约244mm开始平滑收紧速度上限 */
+#define POS_DECEL_COUNTS    320000   /* 距目标约488mm开始渐进减速，降低末段制动负担 */
 #define POS_QR_SLOW_COUNTS  20000    /* 最后约30mm限制为缓行速度 */
 #define POS_QR_SLOW_RPM     5        /* 接近目标低速逼近(RPM)，减少冲过目标 */
 
 #define POS_OUT_MAX_RPM     160      /* 直线巡航位置PID输出限幅(RPM) */
 #define POS_START_RPM       10       /* 更柔和的直线起步速度上限(RPM) */
+#define POS_DECEL_RPM_S     100.0f   /*直行制动时每秒最多降100RPM，减少反馈跳变引起的急刹*/
 #define POS_START_RAMP_MS   1200u     /* 延长起步平滑爬升，降低打滑 */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
 #define POS_PROGRESS_MS     1000u   /* 持续未向目标靠近时停车(反馈不变/方向错误) */
@@ -317,6 +318,7 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define LINE_YAW_EXIT_DEG  0.2f
 #define LINE_YAW_RATE_TAU  0.04f
 #define LINE_YAW_SLEW_RPM_S 120.0f /*比上一版更快建立纠偏，仍按真实dt限斜率*/
+#define LINE_DIRECTION_FADE_RPM 40.0f /*40RPM以下逐渐减少横向补偿，5RPM时仅保持yaw*/
 #define LINE_DIRECTION_MAX_DEG 15.0f /*车头暂时偏移时补偿直行方向，限制横向分量*/
 #define YAW_ERR_INT_MAX     30.0f    /* 积分限幅(deg) */
 #define YAW_OUT_SIGN        (-1.0f)  /*航向纠正方向: 实车45°斜走实测越纠越偏, 已翻转。
@@ -473,7 +475,7 @@ static int line_yaw_output(float target_yaw, int translation_rpm)
     TickType_t now = xTaskGetTickCount();
     float yaw = IMU_GetYaw();
     float error = turn_angdiff(target_yaw, yaw);
-    float dt, desired, limit, slew, corrected_error;
+    float dt, desired, limit, slew, corrected_error, int_limit;
 
     if (!line_yaw.ready)
     {
@@ -515,6 +517,11 @@ static int line_yaw_output(float target_yaw, int translation_rpm)
         line_yaw.integral = 0.0f;
     line_yaw.error_last = error;
 
+    int_limit = limit * 0.25f;
+    if (int_limit > LINE_YAW_INT_RPM) int_limit = LINE_YAW_INT_RPM;
+    /*减速期间无论是否饱和，都要扣除超过当前积分限幅的旧修正。*/
+    if (line_yaw.integral > int_limit) line_yaw.integral = int_limit;
+    if (line_yaw.integral < -int_limit) line_yaw.integral = -int_limit;
     corrected_error = 0.0f;
     if (line_yaw.active)
     {
@@ -526,8 +533,6 @@ static int line_yaw_output(float target_yaw, int translation_rpm)
     if (line_yaw.active && translation_rpm != 0 &&
         ((fabsf(desired) < limit) || desired * error < 0.0f))
     {
-        float int_limit = limit * 0.25f;
-        if (int_limit > LINE_YAW_INT_RPM) int_limit = LINE_YAW_INT_RPM;
         line_yaw.integral += LINE_YAW_KI * corrected_error * dt;
         if (line_yaw.integral > int_limit) line_yaw.integral = int_limit;
         if (line_yaw.integral < -int_limit) line_yaw.integral = -int_limit;
@@ -555,11 +560,16 @@ static int line_yaw_output(float target_yaw, int translation_rpm)
 static void line_move(int translation_rpm, float target_yaw)
 {
     float error = turn_angdiff(target_yaw, IMU_GetYaw());
-    float radians;
+    float radians, direction_blend;
     int vx, vy, w;
     if (error > LINE_DIRECTION_MAX_DEG) error = LINE_DIRECTION_MAX_DEG;
     if (error < -LINE_DIRECTION_MAX_DEG) error = -LINE_DIRECTION_MAX_DEG;
-    radians = error * 0.01745329252f;
+    direction_blend = (fabsf((float)translation_rpm) - POS_QR_SLOW_RPM) /
+                      (LINE_DIRECTION_FADE_RPM - POS_QR_SLOW_RPM);
+    if (direction_blend < 0.0f) direction_blend = 0.0f;
+    if (direction_blend > 1.0f) direction_blend = 1.0f;
+    direction_blend = direction_blend * direction_blend * (3.0f - 2.0f * direction_blend);
+    radians = error * direction_blend * 0.01745329252f;
     vx = line_rpm_round(-(float)translation_rpm * sinf(radians));
     vy = line_rpm_round((float)translation_rpm * cosf(radians));
     w = line_yaw_output(target_yaw, translation_rpm);
@@ -603,6 +613,9 @@ static float        yaw_hold = 0.0f;   /*本步航向保持目标: 每步启动�
 static float        pos_initial_error = 0.0f;
 static float        pos_best_error = 0.0f;
 static TickType_t   pos_progress_tick = 0;
+static float        pos_speed_last = 0.0f;
+static TickType_t   pos_speed_tick = 0;
+static uint8_t      pos_speed_ready = 0;
 static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基准)*/
 static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
 static uint8_t      debug_route_batch = 1;
@@ -644,6 +657,7 @@ static void pos_run_start(int32_t current)
     pos_initial_error = (float)pos_target - (float)current;
     pos_best_error = fabsf(pos_initial_error);
     pos_progress_tick = posrun_start = xTaskGetTickCount();
+    pos_speed_ready = 0;
 }
 
 static float pos_speed_limit(float output, float error_abs)
@@ -667,8 +681,20 @@ static float pos_speed_limit(float output, float error_abs)
                          ratio * ratio * (3.0f - 2.0f * ratio);
         if (limit > approach_limit) limit = approach_limit;
     }
-    if (output > limit) return limit;
-    if (output < -limit) return -limit;
+    if (output > limit) output = limit;
+    if (output < -limit) output = -limit;
+    if (pos_speed_ready && output * pos_speed_last > 0.0f &&
+        fabsf(output) < fabsf(pos_speed_last))
+    {
+        float dt = (float)(xTaskGetTickCount() - pos_speed_tick) / (float)configTICK_RATE_HZ;
+        float next_speed;
+        if (dt > 0.1f) dt = 0.1f;
+        next_speed = fabsf(pos_speed_last) - POS_DECEL_RPM_S * dt;
+        if (fabsf(output) < next_speed) output = (output > 0.0f) ? next_speed : -next_speed;
+    }
+    pos_speed_last = output;
+    pos_speed_tick = xTaskGetTickCount();
+    pos_speed_ready = 1;
     return output;
 }
 
