@@ -495,6 +495,7 @@ static uint8_t      debug_pause_active = 0;
 static uint8_t      debug_pause_next = 0;   /*1下一点对/2转向后/3操作后/4首声后/5静音后/6末声后/0结束*/
 static TickType_t   debug_pause_until = 0;
 static uint8_t      debug_qr_scan_active = 0;
+static uint8_t      debug_qr_scan_done = 0; /*成功后跳过后续找码；新一轮第一批重置*/
 static int8_t       debug_qr_scan_dir = 1;
 static uint16_t     debug_qr_scan_seq = 0;
 #define DEBUG_QR_SCAN_COUNTS 300000  /*到站后沿原方向低速找码，最多约458mm*/
@@ -625,6 +626,7 @@ static void debug_no_next_start(void)
 static void debug_qr_scan_found(void)
 {
     debug_qr_scan_active = 0;
+    debug_qr_scan_done = 1;
     debug_point_pause_start(4, 500);
 }
 
@@ -652,9 +654,13 @@ static void debug_line_start(int32_t value, uint8_t relative, float heading)
 
 static void debug_qr_scan_start(void)
 {
+    if (debug_qr_scan_done)
+    {
+        debug_point_pause_start(3, 500);
+        return;
+    }
     debug_qr_scan_seq = UART8_Seq();
-    debug_line_start(debug_qr_scan_dir * DEBUG_QR_SCAN_COUNTS, 1,
-                     (float)debug_route_heading);
+    debug_line_start(debug_qr_scan_dir * DEBUG_QR_SCAN_COUNTS, 1, 0.0f);
     slow_axis = line_axis;
     debug_qr_scan_active = 1;
     phase = PHASE_SLOW;
@@ -942,6 +948,7 @@ static void debug_route_start(uint8_t selection)
     debug_route_batch = (selection == 2) ? 2 : 1;
     debug_route_next_batch = (selection == 3) ? 2 : 0;
     debug_first_raw_reached = (uint8_t)(selection == 2);
+    if (selection != 2) debug_qr_scan_done = 0;
     debug_qr_scan_active = 0;
     debug_qr_scan_dir = 1;
     debug_route_heading = 0;                         /*两启停区车头均朝下，出发yaw=0*/
