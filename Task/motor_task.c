@@ -306,8 +306,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define YAW_PID_KI          0.5f
 #define YAW_PID_KD          0.0f
 #define YAW_OUT_MAX_RPM     50
-#define LINE_YAW_SCALE     0.5f    /*直行/缓行纠偏输出减半，斜行沿用原参数*/
-#define LINE_YAW_MAX_RPM   20      /*直行/缓行纠偏限幅*/
+#define LINE_YAW_SCALE     0.25f   /*直行/缓行纠偏在上一版基础上再减半*/
+#define LINE_YAW_MAX_RPM   10      /*纠偏限幅由20RPM减半*/
 #define YAW_ERR_INT_MAX     30.0f    /* 积分限幅(deg) */
 #define YAW_OUT_SIGN        (-1.0f)  /*航向纠正方向: 实车45°斜走实测越纠越偏, 已翻转。
                                         适用于直线/缓行/校准/45°的yaw保持(共用YawPID);
@@ -398,7 +398,7 @@ static const TaskStep task_z1[] = {
 #define TURN_TOL_DEG        2.0f     /* 到位容差(deg), 进入即停车(留滞后余量) */
 #define TURN_CREEP_DEG      15.0f    /* 最后15°固定低速逼近 */
 #define TURN_CREEP_RPM      11       /*最后15°：原17RPM的2/3，取最近整数*/
-#define TURN_SPEED_SCALE    4.5f     /*前75°：原9倍输出减半，降低打滑*/
+#define TURN_SPEED_SCALE    3.0f     /*前75°：上一版4.5的2/3，降低打滑*/
 #define TURN_OUT_MAX_RPM    70       /* 转向PID输出限幅(RPM) */
 #define TURN_FAST_DEG       30.0f    /*此角度以内沿用已实测的减速参数*/
 #define TURN_FAST_KP        0.25f    /*远段增量: (剩余角度-30°)*0.25RPM*/
@@ -1455,6 +1455,10 @@ void MotorTask(void *pvParameters)
         if (phase == PHASE_TURN)
         {
             float rel_now, err, aerr;
+            float turn_scale = 1.0f;
+            float turn_transition = 0.0f;
+            float turn_min_rpm;
+            float turn_speed_cap;
 
             if (turn_accumulate)
             {
@@ -1471,7 +1475,7 @@ void MotorTask(void *pvParameters)
             }
             aerr = fabsf(err);
 
-            /*保留原比例/阻尼配比，15°外输出倍率4.5，最后15°用11RPM逼近。*/
+            /*前75°使用3倍倍率；进入最后15°前从该倍率平滑过渡到低速爬行。*/
             TurnPID.Kp = TURN_PID_KP;
             TurnPID.OutMax = TURN_OUT_MAX_RPM;
             if (aerr > TURN_FAST_DEG)
@@ -1481,13 +1485,28 @@ void MotorTask(void *pvParameters)
             }
             if (aerr > TURN_CREEP_DEG)
             {
-                TurnPID.Kp *= TURN_SPEED_SCALE;
-                TurnPID.Kd = TURN_PID_KD * TURN_SPEED_SCALE;
-                TurnPID.OutMax *= TURN_SPEED_SCALE;
+                /* 30°到15°平滑降倍率，避免从巡航直接切到11RPM。 */
+                if (aerr < TURN_FAST_DEG)
+                    turn_transition = (aerr - TURN_CREEP_DEG) /
+                                      (TURN_FAST_DEG - TURN_CREEP_DEG);
+                else
+                    turn_transition = 1.0f;
+                turn_transition = turn_transition * turn_transition *
+                                  (3.0f - 2.0f * turn_transition);
+                turn_scale = 1.0f + (TURN_SPEED_SCALE - 1.0f) * turn_transition;
+                TurnPID.Kp *= turn_scale;
+                TurnPID.Kd = TURN_PID_KD * turn_scale;
+                TurnPID.OutMax *= turn_scale;
             }
             else
                 TurnPID.Kd = TURN_PID_KD;
             TurnPID.OutMin = -TurnPID.OutMax;
+            turn_min_rpm = TURN_CREEP_RPM +
+                           (TURN_MIN_RPM * turn_scale - TURN_CREEP_RPM) * turn_transition;
+            turn_speed_cap = TurnPID.OutMax;
+            if (aerr < TURN_FAST_DEG)
+                turn_speed_cap = TURN_CREEP_RPM +
+                    (TURN_OUT_MAX_RPM * TURN_SPEED_SCALE - TURN_CREEP_RPM) * turn_transition;
 
             if ((xTaskGetTickCount() - posrun_start) >= pdMS_TO_TICKS(turn_timeout_ms))
             {
@@ -1542,10 +1561,13 @@ void MotorTask(void *pvParameters)
                     /*软件限斜率(移植自开源工程): 每拍速度最多变化TURN_SLEW_RPM,
                       命令永不阶跃, 不激励ZDT内部斜率跟随, 消除惯性甩尾超调*/
                     w_raw = (int)(TurnPID.Out * TURN_OUT_SIGN);
-                    if (w_raw > 0 && w_raw < (int)(TURN_MIN_RPM * TURN_SPEED_SCALE))
-                        w_raw = (int)(TURN_MIN_RPM * TURN_SPEED_SCALE);
-                    if (w_raw < 0 && w_raw > -(int)(TURN_MIN_RPM * TURN_SPEED_SCALE))
-                        w_raw = -(int)(TURN_MIN_RPM * TURN_SPEED_SCALE);
+                    if (w_raw > 0 && w_raw < (int)turn_min_rpm)
+                        w_raw = (int)turn_min_rpm;
+                    if (w_raw < 0 && w_raw > -(int)turn_min_rpm)
+                        w_raw = -(int)turn_min_rpm;
+                    /*过渡段也渐进降低上限，保证15°边界的目标输出接近11RPM。*/
+                    if (w_raw > (int)turn_speed_cap) w_raw = (int)turn_speed_cap;
+                    if (w_raw < -(int)turn_speed_cap) w_raw = -(int)turn_speed_cap;
                     if (w_raw > turn_w_last + TURN_SLEW_RPM)      w_raw = turn_w_last + TURN_SLEW_RPM;
                     else if (w_raw < turn_w_last - TURN_SLEW_RPM) w_raw = turn_w_last - TURN_SLEW_RPM;
                     turn_w_last = w_raw;
