@@ -6,13 +6,12 @@
 
 /**
   * UART8 —— 摄像头链路 + 任务码显示屏转发口
-  *   PE0 = RX ← MaixCam 的 TX：收二维码内容(任务码) + 码中心横坐标 x
+  *   PE0 = RX ← MaixCam 的 TX：收二维码内容(任务码)
   *   PE1 = TX → 任务码显示屏的 USART2_RX：转发任务码 + 搬运信息
   * 接收在 UART8_IRQHandler 里逐字节喂进 UART8_RxByte()。
   *
- * 摄像头帧（AA 55 | LEN | 内容 | x低 | x高 | SUM）解析成两样东西：
- *   1) 内容里的数字 -> 任务码（集满 12 位即发布）
- *   2) x            -> 二维码中心横坐标，供横向纠偏
+ * 摄像头帧（AA 55 | LEN | 内容 | SUM）解析任务码：
+ *   内容里的数字 -> 任务码（集满 12 位即发布）；摄像头只发内容不回传坐标
  * 摄像头扫到码才发、没码时静默；车端用 CAM_FRESH_MS 内有没有新帧判目标在不在。
  * 校验和不对的帧直接丢弃，不会污染任务码。
   * 另外兼容"摄像头直接发纯文本内容"的情况（没有 AA 55 帧头时按 ASCII 解析）。
@@ -26,18 +25,14 @@ TaskLinkStat g_link_stat;
 #define CAM_ST_H2   1       /* 找 0x55 */
 #define CAM_ST_LEN  2       /* 读内容长度 */
 #define CAM_ST_PAY  3       /* 读内容 */
-#define CAM_ST_XL   4       /* 读 x 低字节 */
-#define CAM_ST_XH   5       /* 读 x 高字节 */
-#define CAM_ST_SUM  6       /* 读校验和 */
+#define CAM_ST_SUM  4       /* 读校验和 */
 
 static uint8_t  cam_st;
 static uint8_t  cam_len;                    /* 本帧内容长度 */
 static uint8_t  cam_idx;
 static uint8_t  cam_buf[CAM_PAY_MAX];       /* 本帧内容 */
-static uint16_t cam_x;                      /* 本帧 x */
 static uint8_t  cam_sum;                    /* 累加校验 */
 
-static volatile uint16_t g_cam_x      = CAM_X_LOST;
 static volatile uint8_t  g_cam_ok     = 0;
 static volatile uint16_t g_cam_frames = 0;
 static volatile uint16_t g_cam_bad    = 0;
@@ -218,9 +213,9 @@ void UART8_RxByte(uint8_t ch)
             g_cam_bad++;
             cam_st = CAM_ST_H1;
         }
-        else if (cam_len == 0)                   /* ★心跳帧(画面里没有码): 没有内容, 直接去读 x */
+        else if (cam_len == 0)                   /* 空内容帧(现在摄像头不会发,兼容保留) */
         {
-            cam_st = CAM_ST_XL;
+            cam_st = CAM_ST_SUM;
         }
         else
         {
@@ -239,19 +234,7 @@ void UART8_RxByte(uint8_t ch)
         }
         cam_buf[cam_idx++] = ch;
         cam_sum += ch;
-        if (cam_idx >= cam_len) cam_st = CAM_ST_XL;
-        break;
-
-    case CAM_ST_XL:
-        cam_x = ch;
-        cam_sum += ch;
-        cam_st = CAM_ST_XH;
-        break;
-
-    case CAM_ST_XH:
-        cam_x |= (uint16_t)ch << 8;
-        cam_sum += ch;
-        cam_st = CAM_ST_SUM;
+        if (cam_idx >= cam_len) cam_st = CAM_ST_SUM;
         break;
 
     case CAM_ST_SUM:
@@ -264,8 +247,7 @@ void UART8_RxByte(uint8_t ch)
                避免上次上电/丢帧时残留的半个码和新码拼成错码 */
             rx_cnt = 0;
             for (i = 0; i < cam_len; i++) Code_Feed(cam_buf[i]);   /* 内容里的数字 -> 任务码 */
-            g_cam_x  = cam_x;                                      /* 心跳帧 LEN=0,x=0xFFFF(现摄像头已不发,兼容保留) */
-            g_cam_ok = (cam_x == CAM_X_LOST) ? 0 : 1;
+            g_cam_ok = 1;
             g_cam_last_tick = xTaskGetTickCountFromISR();
         }
         else
@@ -289,10 +271,8 @@ void UART8_LinkInit(void)
     cam_st  = CAM_ST_H1;
     cam_len = 0;
     cam_idx = 0;
-    cam_x   = CAM_X_LOST;
     cam_sum = 0;
 
-    g_cam_x      = CAM_X_LOST;
     g_cam_ok     = 0;
     g_cam_frames = 0;
     g_cam_bad    = 0;
@@ -403,25 +383,17 @@ const char* UART8_ColorName(uint8_t color)
 }
 
 /* ==================================================================
-   四、摄像头坐标（横向纠偏）
+   四、摄像头链路状态（画面里有没有码）
    ================================================================== */
-uint16_t UART8_CamX(void)          { return g_cam_x; }
 uint16_t UART8_CamFrames(void)     { return g_cam_frames; }
 uint16_t UART8_CamBadFrames(void)  { return g_cam_bad; }
 
-/* 画面里有没有码:摄像头扫到才发、没码时静默,所以用"多久没来新帧"判断——
-   超过 CAM_FRESH_MS 没收到有效帧即视为无码,避免拿最后一次的旧 x 继续纠偏 */
+/* 画面里有没有码:摄像头只发内容不回传坐标,扫到才发、没码静默,
+   所以用"多久没来新帧"判断——超过 CAM_FRESH_MS 没收到有效帧即视为无码 */
 uint8_t  UART8_CamHasTarget(void)
 {
     return g_cam_ok &&
            (xTaskGetTickCount() - g_cam_last_tick) < pdMS_TO_TICKS(CAM_FRESH_MS);
-}
-
-/* 偏差 = x - 图像中心 320：正数表示码偏右，机器人应右移/右转；没目标时返回 0 */
-int16_t UART8_CamError(void)
-{
-    if (!UART8_CamHasTarget() || g_cam_x == CAM_X_LOST) return 0;
-    return (int16_t)g_cam_x - (int16_t)(CAM_IMG_W / 2);
 }
 
 /* ==================================================================

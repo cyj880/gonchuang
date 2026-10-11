@@ -43,20 +43,20 @@ static void lcd_odom_cmd_line(void)
         LCD_Printf(0, 64, LCD_6X8, "c%02X %-9lu #%-2u", c.type, (unsigned long)c.param, ccnt);
 }
 
-/* CAM 行：MaixCam 的二维码中心横坐标 x + 偏差(x-320，正=码偏右)
-   画面里没有码时显示 noQR 和已经收到的有效帧数(帧数在涨说明摄像头链路是通的) */
+/* CAM 行：MaixCam 链路状态（坐标已按需求去掉，只看有没有扫到码）
+   画面里没有码时显示 noQR；帧数在涨说明摄像头链路是通的 */
 static void lcd_odom_cam_line(void)
 {
     if (UART8_CamHasTarget())
     {
         LCD_SetColor(LCD_CYAN);
-        LCD_Printf(0, 98, LCD_6X8, "CAM x=%3u e=%+4d  ",
-                   (unsigned)UART8_CamX(), UART8_CamError());
+        LCD_Printf(0, 98, LCD_6X8, "CAM got code f=%-5u",
+                   (unsigned)UART8_CamFrames());
     }
     else
     {
         LCD_SetColor(LCD_LGRAY);
-        LCD_Printf(0, 98, LCD_6X8, "CAM noQR f=%-5u ",
+        LCD_Printf(0, 98, LCD_6X8, "CAM noQR     f=%-5u",
                    (unsigned)UART8_CamFrames());
     }
 }

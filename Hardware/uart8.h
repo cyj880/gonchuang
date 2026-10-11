@@ -6,7 +6,7 @@
 /**
   * UART8 —— 摄像头链路 + 任务码显示屏转发口（一根串口同时收发）
   *
-  *   PE0 = UART8_RX  ← 上位机 MaixCam 的 TX：收二维码内容(任务码) + 码中心横坐标 x
+  *   PE0 = UART8_RX  ← 上位机 MaixCam 的 TX：收二维码内容(任务码，不回传坐标)
   *   PE1 = UART8_TX  → 任务码显示屏(F103) 的 USART2_RX：转发任务码 + 搬运信息
   *
   *   摄像头只发不收、显示屏只收不发，所以一根口就能把两边接上，不会打架：
@@ -16,11 +16,10 @@
   *     双方共地，115200-8-N-1
   *
   * 摄像头帧格式（见 MaixPy projects/app_scan_qrcode/scan_uart.py）：
-  *   AA 55 | LEN | 内容(LEN 字节, UTF-8, 二维码原文) | x低 | x高 | SUM
- *   SUM = (LEN + 全部内容字节 + x低 + x高) 累加和低 8 位
- *   画面里没有码时摄像头静默不发；车端用"多久没来新帧"判无码：
- *   超过 CAM_FRESH_MS 没收到有效帧，UART8_CamHasTarget() 返回 0（应停止纠偏）
- *   x = 二维码中心在图像里的横坐标（0~639，图像 640x480）
+  *   AA 55 | LEN | 内容(LEN 字节, UTF-8, 二维码原文) | SUM
+ *   SUM = (LEN + 全部内容字节) 累加和低 8 位
+ *   摄像头扫到码才发、没码静默；车端用"多久没来新帧"判无码：
+ *   超过 CAM_FRESH_MS 没收到有效帧，UART8_CamHasTarget() 返回 0
   *
   * 任务码（二维码原文，例如 "426+213+432+123"）：
   *   组1 = 第一批三件物料的颜色与搬运顺序
@@ -42,8 +41,6 @@
 #define TASK_LINK_DIGITS   (TASK_LINK_GROUPS * TASK_LINK_GLEN)   /* 12 位 */
 
 #define CAM_PAY_MAX        64      /* 摄像头一帧的内容最大字节数 */
-#define CAM_IMG_W          640     /* 摄像头图像宽度，用于算偏差 */
-#define CAM_X_LOST         0xFFFF  /* x=0xFFFF 表示画面里没有码（兼容保留） */
 #define CAM_FRESH_MS       300     /* 摄像头没码时静默,超过该时间没新帧=画面里无码 */
 
 /* 解析出来的任务码 */
@@ -91,10 +88,8 @@ uint8_t  UART8_StoreRing(uint8_t idx);                    /* 第一批暂存区�
 int8_t   UART8_StackRing(uint8_t idx);                    /* 第二批第 idx 件码垛到哪个环；-1 = 没同色底座 */
 const char* UART8_ColorName(uint8_t color);               /* "RED"/"YEL"/"BLU"/"GRN"/"BLK"/"LBL" */
 
-/* ---------------- 摄像头坐标（码中心横坐标，做横向纠偏用） ---------------- */
-uint16_t UART8_CamX(void);               /* 0~639；CAM_X_LOST(0xFFFF) = 画面里没有码 */
-uint8_t  UART8_CamHasTarget(void);       /* 1 = 最近一帧有效且画面里有码 */
-int16_t  UART8_CamError(void);           /* x - 320，正数表示码偏右；没目标时返回 0 */
+/* ---------------- 摄像头链路状态（画面里有没有码） ---------------- */
+uint8_t  UART8_CamHasTarget(void);       /* 1 = 300ms 内收到过有效帧(画面里有码) */
 uint16_t UART8_CamFrames(void);          /* 收到并校验通过的帧数 */
 uint16_t UART8_CamBadFrames(void);       /* 校验失败/超长的帧数 */
 

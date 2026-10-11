@@ -492,8 +492,12 @@ static uint8_t      debug_rule_index = 0;
 static uint8_t      debug_motion_index = 0;
 static volatile uint8_t no_next_alarm = 0;  /*MotorTask写，LCD_Task读*/
 static uint8_t      debug_pause_active = 0;
-static uint8_t      debug_pause_next = 0;   /*1=下一点对, 2=转向后执行点对, 3=操作后取下一段, 0=结束*/
+static uint8_t      debug_pause_next = 0;   /*1下一点对/2转向后/3操作后/4首声后/5静音后/6末声后/0结束*/
 static TickType_t   debug_pause_until = 0;
+static uint8_t      debug_qr_scan_active = 0;
+static int8_t       debug_qr_scan_dir = 1;
+static uint16_t     debug_qr_scan_seq = 0;
+#define DEBUG_QR_SCAN_COUNTS 300000  /*到站后沿原方向低速找码，最多约458mm*/
 static void task_step_done(void);
 static void turn_run_start(float start_yaw, float delta, uint8_t accumulate);
 
@@ -578,6 +582,7 @@ static void pos_run_abort(void)
     if (debug_pause_active) Buzzer_Off();
     debug_pause_active = 0;
     debug_pause_next = 0;
+    debug_qr_scan_active = 0;
     debug_turn_pos_active = 0;
     leg1_next_valid = 0;
     phase = PHASE_IDLE;
@@ -617,6 +622,12 @@ static void debug_no_next_start(void)
     debug_point_pause_start(0, 5000);
 }
 
+static void debug_qr_scan_found(void)
+{
+    debug_qr_scan_active = 0;
+    debug_point_pause_start(4, 500);
+}
+
 static void debug_line_start(int32_t value, uint8_t relative, float heading)
 {
     OdomData_t o;
@@ -637,6 +648,16 @@ static void debug_line_start(int32_t value, uint8_t relative, float heading)
     YawPID.ErrorIntMax = YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
     YawPID.OutMax = YAW_OUT_MAX_RPM;  YawPID.OutMin = -YAW_OUT_MAX_RPM;
     phase = PHASE_LINE;
+}
+
+static void debug_qr_scan_start(void)
+{
+    debug_qr_scan_seq = UART8_Seq();
+    debug_line_start(debug_qr_scan_dir * DEBUG_QR_SCAN_COUNTS, 1,
+                     (float)debug_route_heading);
+    slow_axis = line_axis;
+    debug_qr_scan_active = 1;
+    phase = PHASE_SLOW;
 }
 
 static void debug_turn_start(float target_yaw)
@@ -806,6 +827,7 @@ static void debug_motion_start(void)
     if (motion->sub == 1 || motion->sub == 5)
     {
         debug_route_step = 1;
+        debug_qr_scan_dir = (motion->sub == 5) ? -1 : 1;
         diag_run_start((motion->sub == 1) ? 1 : 3, motion->value,
                        motion->yaw < 0 ? (float)debug_route_heading : (float)motion->yaw);
     }
@@ -839,6 +861,7 @@ static void debug_motion_start(void)
         }
         if (relative) value = debug_relative_value(value, calibrated_heading);
         debug_line_start(value, relative, (float)debug_route_heading);
+        debug_qr_scan_dir = (pos_initial_error < 0) ? -1 : 1;
     }
 }
 
@@ -855,6 +878,8 @@ static void debug_leg_start(void)
             fabsf(turn_angdiff(yaw_abs360_to_signed((float)debug_goal_heading),
                               IMU_GetYaw())) > TURN_TOL_DEG)
             debug_turn_start((float)debug_goal_heading);
+        else if (debug_point_at(debug_route_leg.from_x, debug_route_leg.from_y) == RP_QR)
+            debug_qr_scan_start();
         else
             debug_point_pause_start(3, 500);
         return;
@@ -877,7 +902,10 @@ static void debug_motion_done(void)
         debug_route_heading = debug_goal_heading;
         if (debug_route_step == 7)
         {
-            debug_point_pause_start(3, 500);           /*作业接口预留，未接机械臂*/
+            if (debug_point_at(debug_route_leg.from_x, debug_route_leg.from_y) == RP_QR)
+                debug_qr_scan_start();
+            else
+                debug_point_pause_start(3, 500);       /*作业接口预留，未接机械臂*/
             return;
         }
         if (debug_route_step == 6)
@@ -914,6 +942,8 @@ static void debug_route_start(uint8_t selection)
     debug_route_batch = (selection == 2) ? 2 : 1;
     debug_route_next_batch = (selection == 3) ? 2 : 0;
     debug_first_raw_reached = (uint8_t)(selection == 2);
+    debug_qr_scan_active = 0;
+    debug_qr_scan_dir = 1;
     debug_route_heading = 0;                         /*两启停区车头均朝下，出发yaw=0*/
     if (selection == 2 || debug_route_batch == 1) debug_pos_offset = 0;
     debug_turn_pos_active = 0;
@@ -1262,6 +1292,7 @@ void MotorTask(void *pvParameters)
                 if (debug_pause_active) Buzzer_Off();
                 debug_pause_active = 0;
                 debug_pause_next = 0;
+                debug_qr_scan_active = 0;
                 debug_turn_pos_active = 0;
                 phase = PHASE_IDLE;
                 leg1_next_valid = 0;
@@ -1279,7 +1310,7 @@ void MotorTask(void *pvParameters)
         {
             if ((int32_t)(xTaskGetTickCount() - debug_pause_until) >= 0)
             {
-                Buzzer_Off();
+                if (debug_pause_next != 5) Buzzer_Off();
                 debug_pause_active = 0;
                 if (debug_pause_next == 1)
                 {
@@ -1292,6 +1323,27 @@ void MotorTask(void *pvParameters)
                     debug_motion_start();
                 }
                 else if (debug_pause_next == 3)
+                {
+                    debug_pause_next = 0;
+                    if (debug_leg_load()) debug_leg_start();
+                    else debug_no_next_start();
+                }
+                else if (debug_pause_next == 4)
+                {
+                    /* 扫码成功：第一声结束后静音500ms。 */
+                    debug_pause_next = 5;
+                    debug_pause_active = 1;
+                    debug_pause_until = xTaskGetTickCount() + pdMS_TO_TICKS(500);
+                }
+                else if (debug_pause_next == 5)
+                {
+                    /* 静音结束，第二声500ms。 */
+                    Buzzer_On();
+                    debug_pause_next = 6;
+                    debug_pause_active = 1;
+                    debug_pause_until = xTaskGetTickCount() + pdMS_TO_TICKS(500);
+                }
+                else if (debug_pause_next == 6)
                 {
                     debug_pause_next = 0;
                     if (debug_leg_load()) debug_leg_start();
@@ -1592,7 +1644,31 @@ void MotorTask(void *pvParameters)
             err  = (float)pos_target - (float)cur;
             state = pos_run_check(cur, o.online[slow_axis]);
 
-            if (state == POS_FAILED)
+            if (debug_route_active && debug_qr_scan_active)
+            {
+                if (state == POS_FAILED)
+                {
+                    debug_qr_scan_active = 0;
+                    debug_no_next_start();
+                }
+                else if (UART8_Seq() != debug_qr_scan_seq &&
+                         UART8_CamHasTarget() && UART8_Valid() && !g_link.bad)
+                    debug_qr_scan_found();
+                else if (state == POS_REACHED)
+                {
+                    debug_qr_scan_active = 0;
+                    debug_no_next_start();
+                }
+                else
+                {
+                    YawPID.Actual = IMU_GetYaw();
+                    YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
+                    PID_Update(&YawPID);
+                    Motor_Move(0, debug_qr_scan_dir * POS_QR_SLOW_RPM,
+                               (int)(YawPID.Out * YAW_OUT_SIGN));
+                }
+            }
+            else if (state == POS_FAILED)
             {
                 pos_run_abort();
             }

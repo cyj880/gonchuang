@@ -31,17 +31,17 @@ uint8_t lunqu_RunFlag  = 1;    /*1=轮趣FDI FDILink@921600*/
   *   2. 舵机扫描   —— PA1（TIM5_CH2）0↔180° 往复，每 100ms 走 10°
   *   3. 坐标链路   —— 接收走 UART7（PE7=RX），发送走 UART8（PE1=TX），115200-8N1，
   *   *      接收坐标帧（AA 55 01 BATCH N ... SUM 0D 0A），解析成功后打印回上位机
-  *   6. 摄像头 + 任务码显示屏 —— 一根 UART8（PE0=RX / PE1=TX）同时接两边：
-  *          PE0 ← MaixCam 的 TX：收二维码内容(任务码) + 码中心横坐标 x
-  *                （帧格式 AA 55 | LEN | 内容 | x低 | x高 | SUM，x=0xFFFF 表示画面里没码）
-  *          PE1 → 任务码显示屏(F103) 的 USART2_RX：转发任务码 + 搬运信息
-  *                （任务码行 "426+213+432+123"；搬运信息行 "S,抓取正确,放置正确,当前载物"）
-  *          摄像头只发、显示屏只收，所以一根口就够，不会打架；
-  *          显示屏原来的回传线 PA2 不用接（任务码现在由摄像头直接给主控）
-  *          接口都在 Hardware/uart8.c：
-  *            任务码 UART8_GetCode()/UART8_Color()/UART8_Ring()/UART8_StackRing()/UART8_NewCode()
-  *            坐标   UART8_CamX()/UART8_CamHasTarget()/UART8_CamError()  ← 横向纠偏用
-  *            上报   UART8_GrabOk()/UART8_PlaceOk()/UART8_LoadInc()/UART8_SetLoad()
+ *   6. 摄像头 + 任务码显示屏 —— 一根 UART8（PE0=RX / PE1=TX）同时接两边：
+ *          PE0 ← MaixCam 的 TX：收二维码内容(任务码)（帧格式 AA 55 | LEN | 内容 | SUM，
+ *                只发内容不回传坐标；没码静默，CAM_FRESH_MS 内没新帧=无码）
+ *          PE1 → 任务码显示屏(F103) 的 USART2_RX：转发任务码 + 搬运信息
+ *                （任务码行 "426+213+432+123"；搬运信息行 "S,抓取正确,放置正确,当前载物"）
+ *          摄像头只发、显示屏只收，所以一根口就够，不会打架；
+ *          显示屏原来的回传线 PA2 不用接（任务码现在由摄像头直接给主控）
+ *          接口都在 Hardware/uart8.c：
+ *            任务码 UART8_GetCode()/UART8_Color()/UART8_Ring()/UART8_StackRing()/UART8_NewCode()
+ *            链路   UART8_CamHasTarget()/UART8_CamFrames()
+ *            上报   UART8_GrabOk()/UART8_PlaceOk()/UART8_LoadInc()/UART8_SetLoad()
   *   4. 四轮电机   —— CAN2（PB12=RX/PB13=TX，500Kbps）驱动 4 路 Emm_V5 闭环步进，
   *          一次调用下发四轮速度并同步起步（Task/motor_task.c）
  *   5. TFT-LCD    —— 1.8寸 ST7735S（硬件SPI1+DMA2_Stream3，5.25MHz）：PB3=SCK / PA7=SDA /
