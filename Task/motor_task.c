@@ -356,9 +356,8 @@ typedef enum
 
 /* ---- 任务步骤数组(上位机04动作帧驱动, 每改变一个方向=一步) ----
    type: 1=45°斜走(dir=地图方向码05右前/04左前/07右后/06左后)
-         2=直线到pos(axis选反馈轮, target正负=计数方向)
+         2=直线到pos(里程计1反馈, target正负=计数方向)
          3=缓行+扫到码即停  5=原地转90°(dir=3顺/4逆)
-   axis: 0=纵向(Y轴闭环: 里程计1反馈+vy前后通道)  1=横向(X轴闭环: 里程计2反馈+vx横移通道)
    区一坐标系: X总长1450000, 右上角100000, 扫码区650000 —— 数值实测后直接改本表 */
 #define STEPT_DIAG  1
 #define STEPT_LINE  2
@@ -369,23 +368,22 @@ typedef struct
 {
     uint8_t type;      /*步骤类型*/
     uint8_t dir;       /*斜走方向码 / 转弯方向(3顺4逆)*/
-    uint8_t axis;      /*闭环反馈轴: 0=纵向(里程计1, 默认) 1=横向(里程计2, 预留)*/
     int32_t target;    /*相对步长(编码值): 正=沿当前车头前进, 负=后退; 45°斜走=斜向距离*/
 } TaskStep;
 
 /* 图二"第一批"动作序列(黄色物料) —— target=每步相对步长(正前进/负后退), 全部走里程计1 */
 static const TaskStep task_z1[] = {
-    {STEPT_DIAG, 5, 1,   100000},   /*45度斜走: 纵向计到100000(启停区1-右上角45度, 方向码实测调)*/
-    {STEPT_LINE, 0, 0,   650000},   /*切换直线: 继续纵向到650000(扫码区)*/
-    {STEPT_LINE, 0, 0,  -550000},   /*后退550000: 扫码区-右上角(650000-100000)*/
-    {STEPT_TURN, 3, 0,         0},  /*顺时针转90度(车头变为朝场地左)*/
-    {STEPT_LINE, 0, 0,   634000},   /*前进(估算1050mm): 到原料区横向位置——实测改*/
-    {STEPT_TURN, 4, 0,         0},  /*逆时针转90度(车头回朝场地下方)*/
-    {STEPT_LINE, 0, 0,  1253000},   /*前进(估算2075mm): 到粗加工区——实测改*/
-    {STEPT_TURN, 3, 0,         0},  /*顺时针转90度(车头朝场地左)*/
-    {STEPT_LINE, 0, 0,   300000},   /*前进(估算500mm): 到左下角/暂存区横向位——实测改*/
-    {STEPT_TURN, 3, 0,         0},  /*顺时针转90度*/
-    {STEPT_LINE, 0, 0,   544000},   /*前进(估算900mm): 到暂存区纵向位——实测改*/
+    {STEPT_DIAG, 5,   100000},   /*45度斜走: 纵向计到100000(启停区1-右上角45度, 方向码实测调)*/
+    {STEPT_LINE, 0,   650000},   /*切换直线: 继续纵向到650000(扫码区)*/
+    {STEPT_LINE, 0,  -550000},   /*后退550000: 扫码区-右上角(650000-100000)*/
+    {STEPT_TURN, 3,         0},  /*顺时针转90度(车头变为朝场地左)*/
+    {STEPT_LINE, 0,   634000},   /*前进(估算1050mm): 到原料区横向位置——实测改*/
+    {STEPT_TURN, 4,         0},  /*逆时针转90度(车头回朝场地下方)*/
+    {STEPT_LINE, 0,  1253000},   /*前进(估算2075mm): 到粗加工区——实测改*/
+    {STEPT_TURN, 3,         0},  /*顺时针转90度(车头朝场地左)*/
+    {STEPT_LINE, 0,   300000},   /*前进(估算500mm): 到左下角/暂存区横向位——实测改*/
+    {STEPT_TURN, 3,         0},  /*顺时针转90度*/
+    {STEPT_LINE, 0,   544000},   /*前进(估算900mm): 到暂存区纵向位——实测改*/
 };
 #define TASK_Z1_N  (sizeof(task_z1) / sizeof(task_z1[0]))
 
@@ -418,7 +416,6 @@ static const TaskStep task_z1[] = {
                                         (开源工程同款电机靠此招稳住90°转弯), 必加 */
 
 static PID_t PosPID;    /* 位置环: 里程计1(X纵向) -> vy(RPM) */
-static PID_t PosXPID;   /* 位置环: 里程计2(X横向) -> vx(RPM) */
 static PID_t YawPID;    /* 航向环: yaw误差 -> w(RPM) */
 static PID_t TurnPID;   /* 转向环: 相对角误差 -> w(RPM) */
 
@@ -485,8 +482,6 @@ static float        pos_initial_error = 0.0f;
 static float        pos_best_error = 0.0f;
 static TickType_t   pos_progress_tick = 0;
 static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基准)*/
-static uint8_t      line_axis = 0;     /*直线段反馈轴: 0=里程计1(vy) 1=里程计2(vx)*/
-static uint8_t      slow_axis = 0;     /*缓行段反馈轴*/
 static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
 static uint8_t      debug_route_batch = 1;
 static uint8_t      debug_route_next_batch = 0; /*两批连跑时预先锁定的第二批*/
@@ -647,8 +642,7 @@ static void debug_line_start(int32_t value, uint8_t relative, float heading)
     int32_t current;
 
     odometry_get(&o);
-    line_axis = ODOM_POS_AXIS;
-    current = o.enc_pos[line_axis];
+    current = o.enc_pos[ODOM_POS_AXIS];
     pos_target = relative ? current + value : value - debug_pos_offset;
     pos_run_start(current);
     yaw_hold = yaw_abs360_to_signed(heading);
@@ -672,7 +666,6 @@ static void debug_qr_scan_start(void)
     }
     debug_qr_scan_seq = UART8_Seq();
     debug_line_start(debug_qr_scan_dir * DEBUG_QR_SCAN_COUNTS, 1, 0.0f);
-    slow_axis = line_axis;
     debug_qr_scan_active = 1;
     phase = PHASE_SLOW;
 }
@@ -1026,22 +1019,17 @@ static void task_step_start(const TaskStep *st)
         break;
     }
 
-    case STEPT_LINE:                        /*直线PID(axis选反馈轮/输出通道), target=相对步长*/
+    case STEPT_LINE:                        /*直线PID(里程计1反馈/前后通道), target=相对步长*/
     {
         OdomData_t o0;
         odometry_get(&o0);
-        line_axis  = st->axis;
-        pos_target = ((line_axis == 0) ? o0.enc_pos[0] : o0.enc_pos[1]) + st->target;
-        pos_run_start(o0.enc_pos[line_axis]);
+        pos_target = o0.enc_pos[ODOM_POS_AXIS] + st->target;
+        pos_run_start(o0.enc_pos[ODOM_POS_AXIS]);
         yaw_hold    = IMU_GetYaw();        /*本步保持朝向=启动时刻车头*/
         PID_Init(&PosPID);
         PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
         PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
         PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
-        PID_Init(&PosXPID);
-        PosXPID.Kp = POS_PID_KP;  PosXPID.Ki = POS_PID_KI;  PosXPID.Kd = POS_PID_KD;
-        PosXPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosXPID.ErrorIntMin = -POS_ERR_INT_MAX;
-        PosXPID.OutMax =  POS_OUT_MAX_RPM;      PosXPID.OutMin = -POS_OUT_MAX_RPM;
         PID_Init(&YawPID);
         YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
         YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
@@ -1050,13 +1038,12 @@ static void task_step_start(const TaskStep *st)
         break;
     }
 
-    case STEPT_SLOW:                        /*缓行+扫码(axis选反馈轮), target=相对步长*/
+    case STEPT_SLOW:                        /*缓行+扫码(里程计1反馈), target=相对步长*/
     {
         OdomData_t o0;
         odometry_get(&o0);
-        slow_axis  = st->axis;
-        pos_target = o0.enc_pos[slow_axis] + st->target;
-        pos_run_start(o0.enc_pos[slow_axis]);
+        pos_target = o0.enc_pos[ODOM_POS_AXIS] + st->target;
+        pos_run_start(o0.enc_pos[ODOM_POS_AXIS]);
         yaw_hold    = IMU_GetYaw();        /*本步保持朝向=启动时刻车头*/
         PID_Init(&YawPID);
         YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
@@ -1180,9 +1167,8 @@ void MotorTask(void *pvParameters)
                     OdomData_t o;
                     if (!PHASE_CAN_START(phase)) break;
                     odometry_get(&o);
-                    slow_axis = ODOM_POS_AXIS;
                     pos_target   = (int32_t)c.param;
-                    pos_run_start(o.enc_pos[slow_axis]);
+                    pos_run_start(o.enc_pos[ODOM_POS_AXIS]);
                     yaw_hold = IMU_GetYaw();
                     PID_Init(&YawPID);                 /*缓行段yaw保持用*/
                     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
@@ -1200,9 +1186,8 @@ void MotorTask(void *pvParameters)
                 {
                     OdomData_t o;
                     odometry_get(&o);
-                    line_axis = ODOM_POS_AXIS;
                     pos_target   = (int32_t)c.param;
-                    pos_run_start(o.enc_pos[line_axis]);
+                    pos_run_start(o.enc_pos[ODOM_POS_AXIS]);
                     yaw_hold = IMU_GetYaw();
                     PID_Init(&PosPID);                         /* 清运行状态 */
                     PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
@@ -1250,8 +1235,7 @@ void MotorTask(void *pvParameters)
                     int32_t current;
                     odometry_get(&o);
                     array_mode = 0;
-                    line_axis = ODOM_POS_AXIS;
-                    current = o.enc_pos[line_axis];
+                    current = o.enc_pos[ODOM_POS_AXIS];
                     if (c.flags & 0x01)
                         pos_target = current + (int32_t)c.param; /*相对当前位置累加*/
                     else
@@ -1420,8 +1404,7 @@ void MotorTask(void *pvParameters)
                 {
                     /*07旧链: 无缝衔接直线段(里程计累计不清, 目标绝对值直接生效)*/
                     pos_target   = leg1_next;
-                    line_axis = ODOM_POS_AXIS;
-                    pos_run_start(o.enc_pos[line_axis]);
+                    pos_run_start(o.enc_pos[ODOM_POS_AXIS]);
                     leg1_next_valid = 0;
                     PID_Init(&PosPID);
                     PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
@@ -1614,7 +1597,7 @@ void MotorTask(void *pvParameters)
             }
         }
 
-        /*---- 直线行驶段(10ms 周期; axis=0里程计1/vy  1=里程计2/vx) ----
+        /*---- 直线行驶段(10ms 周期; 里程计1/vy前后通道) ----
            纯PID直行+航向保持; 接近目标自动限速; 到位±TOL停车推进步骤 */
         if (phase == PHASE_LINE)
         {
@@ -1623,10 +1606,10 @@ void MotorTask(void *pvParameters)
             float err, aerr, out;
             PosRunState state;
             odometry_get(&o);
-            cur  = (line_axis == 0) ? o.enc_pos[0] : o.enc_pos[1];
+            cur  = o.enc_pos[ODOM_POS_AXIS];
             err  = (float)pos_target - (float)cur;           /*与PID使用同一累计坐标*/
             aerr = fabsf(err);
-            state = pos_run_check(cur, o.online[line_axis]);
+            state = pos_run_check(cur, o.online[ODOM_POS_AXIS]);
 
             if (state == POS_REACHED)
             {
@@ -1649,29 +1632,16 @@ void MotorTask(void *pvParameters)
                 YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
                 PID_Update(&YawPID);
 
-                if (line_axis == 0)
-                {
-                    PosPID.Target = (float)pos_target;
-                    PosPID.Actual = (float)cur;
-                    PID_Update(&PosPID);
-                    out = PosPID.Out;
-                }
-                else
-                {
-                    PosXPID.Target = (float)pos_target;
-                    PosXPID.Actual = (float)cur;
-                    PID_Update(&PosXPID);
-                    out = PosXPID.Out;
-                }
+                PosPID.Target = (float)pos_target;
+                PosPID.Actual = (float)cur;
+                PID_Update(&PosPID);
+                out = PosPID.Out;
                 out = pos_speed_limit(out, aerr);
-                if (line_axis == 0)
-                    Motor_Move(0, (int)out, line_yaw_output());
-                else
-                    Motor_Move((int)out, 0, line_yaw_output());
+                Motor_Move(0, (int)out, line_yaw_output());
             }
         }
 
-        /*---- 缓行直行+扫码段(10ms 周期; axis=0里程计1/vy  1=里程计2/vx) ----
+        /*---- 缓行直行+扫码段(10ms 周期; 里程计1/vy前后通道) ----
            低速逼近+二维码判停; 扫到码或到位即完成步骤(码的位置即最终停靠点) */
         if (phase == PHASE_SLOW)
         {
@@ -1680,9 +1650,9 @@ void MotorTask(void *pvParameters)
             float err;
             PosRunState state;
             odometry_get(&o);
-            cur  = (slow_axis == 0) ? o.enc_pos[0] : o.enc_pos[1];
+            cur  = o.enc_pos[ODOM_POS_AXIS];
             err  = (float)pos_target - (float)cur;
-            state = pos_run_check(cur, o.online[slow_axis]);
+            state = pos_run_check(cur, o.online[ODOM_POS_AXIS]);
 
             if (debug_route_active && debug_qr_scan_active)
             {
@@ -1723,10 +1693,7 @@ void MotorTask(void *pvParameters)
                 YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
                 PID_Update(&YawPID);
 
-                if (slow_axis == 0)
-                    Motor_Move(0, slow_dir * POS_QR_SLOW_RPM, line_yaw_output());
-                else
-                    Motor_Move(slow_dir * POS_QR_SLOW_RPM, 0, line_yaw_output());
+                Motor_Move(0, slow_dir * POS_QR_SLOW_RPM, line_yaw_output());
             }
         }
 

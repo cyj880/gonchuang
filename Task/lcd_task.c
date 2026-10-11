@@ -13,7 +13,7 @@
  * LCD 显示任务（1.8寸 TFT-LCD，ST7735S，128x160）
  *
  * 只显示 ODOM 里程计主页面（单页常显，已取消多页轮显）：
- *   X/Y 坐标、双编码器原始值、通信状态、最近命令、yaw、MaixCam 状态。
+ *   里程计1的里程、速度、原始值、通信状态、最近命令、yaw、MaixCam 状态。
  * 顺带协议维护：帧中途超时复位 + 回传FIFO排空（校验通过的帧逐帧原样发回网页）。
  *
  * 引脚（A板）：PB3=SCK  PA7=SDA  PB9=DC  PB0=RES  PA6=CS  PI2=BL
@@ -70,16 +70,16 @@ static void lcd_draw_odom(void)
     LCD_SetColor(LCD_CYAN);
     LCD_Printf(0, 0, LCD_6X8, "== ODOM (RS485) ==");
 
-    /*主显: X/Y双测量轮直读坐标(站1=X 站2=Y, 绝对值无累计误差)*/
+    /*主显: 站号1里程和速度，不显示不存在的第二测量轮*/
     LCD_SetColor(LCD_WHITE);
-    LCD_Printf(0, 14, LCD_6X8, "X: %-9d mm", (int)o.x_mm);
+    LCD_Printf(0, 14, LCD_6X8, "d1:%-9d mm", (int)o.dist_mm[0]);
     LCD_SetColor(LCD_GREEN);
-    LCD_Printf(0, 26, LCD_6X8, "Y: %-9d mm", (int)o.y_mm);
+    LCD_Printf(0, 26, LCD_6X8, "v1:%-9d mm/s", (int)o.speed_mm_s[0]);
 
     LCD_SetColor(LCD_WHITE);
-    LCD_Printf(0, 42, LCD_6X8, "p1:%-10d p2:%-9d", (int)o.enc_pos[0], (int)o.enc_pos[1]);
+    LCD_Printf(0, 42, LCD_6X8, "p1:%-10d", (int)o.enc_pos[0]);
     LCD_SetColor(LCD_CYAN);
-    LCD_Printf(0, 52, LCD_6X8, "E1:%s E2:%s", o.online[0] ? "ON" : "OFF", o.online[1] ? "ON" : "OFF");
+    LCD_Printf(0, 52, LCD_6X8, "E1:%-3s", o.online[0] ? "ON" : "OFF");
 
     lcd_odom_cmd_line();
 
@@ -99,13 +99,13 @@ static void lcd_update_odom(void)
     odometry_get(&o);
 
     LCD_SetColor(LCD_WHITE);
-    LCD_Printf(0, 14, LCD_6X8, "X: %-9d mm", (int)o.x_mm);
+    LCD_Printf(0, 14, LCD_6X8, "d1:%-9d mm", (int)o.dist_mm[0]);
     LCD_SetColor(LCD_GREEN);
-    LCD_Printf(0, 26, LCD_6X8, "Y: %-9d mm", (int)o.y_mm);
+    LCD_Printf(0, 26, LCD_6X8, "v1:%-9d mm/s", (int)o.speed_mm_s[0]);
     LCD_SetColor(LCD_WHITE);
-    LCD_Printf(0, 42, LCD_6X8, "p1:%-10d p2:%-9d", (int)o.enc_pos[0], (int)o.enc_pos[1]);
+    LCD_Printf(0, 42, LCD_6X8, "p1:%-10d", (int)o.enc_pos[0]);
     LCD_SetColor(LCD_CYAN);
-    LCD_Printf(0, 52, LCD_6X8, "E1:%s E2:%s", o.online[0] ? "ON" : "OFF", o.online[1] ? "ON" : "OFF");
+    LCD_Printf(0, 52, LCD_6X8, "E1:%-3s", o.online[0] ? "ON" : "OFF");
     lcd_odom_cmd_line();
     LCD_Printf(0, 76, LCD_6X8, "yaw %-6d", (int)IMU_GetYawAbs360());   /*0~360, 零点=上电/按PB2*/
     lcd_odom_cam_line();            /*MaixCam 坐标*/
