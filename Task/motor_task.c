@@ -306,6 +306,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define YAW_PID_KI          0.5f
 #define YAW_PID_KD          0.0f
 #define YAW_OUT_MAX_RPM     50
+#define LINE_YAW_SCALE     0.5f    /*直行/缓行纠偏输出减半，斜行沿用原参数*/
+#define LINE_YAW_MAX_RPM   20      /*直行/缓行纠偏限幅*/
 #define YAW_ERR_INT_MAX     30.0f    /* 积分限幅(deg) */
 #define YAW_OUT_SIGN        (-1.0f)  /*航向纠正方向: 实车45°斜走实测越纠越偏, 已翻转。
                                         适用于直线/缓行/校准/45°的yaw保持(共用YawPID);
@@ -395,8 +397,8 @@ static const TaskStep task_z1[] = {
    以触发时刻航向为原点计算相对角, 角差全程归一, 无±180°环绕跳变。 */
 #define TURN_TOL_DEG        2.0f     /* 到位容差(deg), 进入即停车(留滞后余量) */
 #define TURN_CREEP_DEG      15.0f    /* 最后15°固定低速逼近 */
-#define TURN_CREEP_RPM      17       /*当前14RPM再提高1.2倍，取最近整数*/
-#define TURN_SPEED_SCALE    9.0f     /*恢复前75°的9倍输出，降低打滑*/
+#define TURN_CREEP_RPM      11       /*最后15°：原17RPM的2/3，取最近整数*/
+#define TURN_SPEED_SCALE    4.5f     /*前75°：原9倍输出减半，降低打滑*/
 #define TURN_OUT_MAX_RPM    70       /* 转向PID输出限幅(RPM) */
 #define TURN_FAST_DEG       30.0f    /*此角度以内沿用已实测的减速参数*/
 #define TURN_FAST_KP        0.25f    /*远段增量: (剩余角度-30°)*0.25RPM*/
@@ -434,6 +436,15 @@ static float turn_angdiff(float a, float b)
 static float yaw_target_near(float target, float actual)
 {
     return actual + turn_angdiff(target, actual);
+}
+
+/*仅平移直行使用较小的航向修正；原地转向和45°斜行保持独立。*/
+static int line_yaw_output(void)
+{
+    float out = YawPID.Out * YAW_OUT_SIGN * LINE_YAW_SCALE;
+    if (out > LINE_YAW_MAX_RPM) out = LINE_YAW_MAX_RPM;
+    if (out < -LINE_YAW_MAX_RPM) out = -LINE_YAW_MAX_RPM;
+    return (int)out;
 }
 
 static float yaw_abs360_to_signed(float yaw)
@@ -1460,7 +1471,7 @@ void MotorTask(void *pvParameters)
             }
             aerr = fabsf(err);
 
-            /*保留原比例/阻尼配比，15°外输出提高9倍，最后15°用17RPM逼近。*/
+            /*保留原比例/阻尼配比，15°外输出倍率4.5，最后15°用11RPM逼近。*/
             TurnPID.Kp = TURN_PID_KP;
             TurnPID.OutMax = TURN_OUT_MAX_RPM;
             if (aerr > TURN_FAST_DEG)
@@ -1577,7 +1588,7 @@ void MotorTask(void *pvParameters)
                 PID_Update(&YawPID);
 
                 vy = (int)pos_speed_limit(PosPID.Out, aerr);
-                Motor_Move(0, vy, (int)(YawPID.Out * YAW_OUT_SIGN));
+                Motor_Move(0, vy, line_yaw_output());
             }
         }
 
@@ -1632,9 +1643,9 @@ void MotorTask(void *pvParameters)
                 }
                 out = pos_speed_limit(out, aerr);
                 if (line_axis == 0)
-                    Motor_Move(0, (int)out, (int)(YawPID.Out * YAW_OUT_SIGN));
+                    Motor_Move(0, (int)out, line_yaw_output());
                 else
-                    Motor_Move((int)out, 0, (int)(YawPID.Out * YAW_OUT_SIGN));
+                    Motor_Move((int)out, 0, line_yaw_output());
             }
         }
 
@@ -1672,7 +1683,7 @@ void MotorTask(void *pvParameters)
                     YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
                     PID_Update(&YawPID);
                     Motor_Move(0, debug_qr_scan_dir * POS_QR_SLOW_RPM,
-                               (int)(YawPID.Out * YAW_OUT_SIGN));
+                               line_yaw_output());
                 }
             }
             else if (state == POS_FAILED)
@@ -1691,9 +1702,9 @@ void MotorTask(void *pvParameters)
                 PID_Update(&YawPID);
 
                 if (slow_axis == 0)
-                    Motor_Move(0, slow_dir * POS_QR_SLOW_RPM, (int)(YawPID.Out * YAW_OUT_SIGN));
+                    Motor_Move(0, slow_dir * POS_QR_SLOW_RPM, line_yaw_output());
                 else
-                    Motor_Move(slow_dir * POS_QR_SLOW_RPM, 0, (int)(YawPID.Out * YAW_OUT_SIGN));
+                    Motor_Move(slow_dir * POS_QR_SLOW_RPM, 0, line_yaw_output());
             }
         }
 
