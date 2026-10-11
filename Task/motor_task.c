@@ -833,7 +833,7 @@ static const DebugPointRule debug_rules[] = {
     {RP_RAW,RP_CENTER,1,{{0,1,615000,0}}},
     {RP_CENTER,RP_STORAGE,1,{{0,1,615000,90}}},
     {RP_LD,RP_ROUGH,1,{{0,1,615000,270}}},
-    {RP_LU,RP_LD,1,{{0,1,1175000,0}}},
+    {RP_LU,RP_LD,1,{{0,1,1230000,0}}},
     {RP_ROUGH,RP_CENTER,1,{{0,1,615000,180}}},
     {RP_RAW,RP_LU,1,{{0,1,615000,90}}}
 };
