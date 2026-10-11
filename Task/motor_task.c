@@ -291,7 +291,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 
 #define POS_OUT_MAX_RPM     160      /* 直线巡航位置PID输出限幅(RPM) */
 #define POS_START_RPM       10       /* 更柔和的直线起步速度上限(RPM) */
-#define POS_DECEL_RPM_S     100.0f   /*直行制动时每秒最多降100RPM，减少反馈跳变引起的急刹*/
+#define POS_FINAL_RPM       1.0f    /*直行到位前继续减到1RPM，避免5RPM直接急停*/
+#define POS_FINISH_MS       150u    /*仅低速正常到位用150ms收尾；故障/超目标仍立即停*/
 #define POS_START_RAMP_MS   1200u     /* 延长起步平滑爬升，降低打滑 */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
 #define POS_PROGRESS_MS     1000u   /* 持续未向目标靠近时停车(反馈不变/方向错误) */
@@ -314,6 +315,7 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define LINE_YAW_MAX_RPM   25.0f
 #define LINE_YAW_SPEED_RATIO 0.35f /*低速随平移速度收紧修正，避免末段反向摆头*/
 #define LINE_YAW_MIN_LIMIT 2.0f
+#define LINE_YAW_SOFT_RPM  20.0f   /*低于20RPM逐渐减弱旋转纠偏，避免停车前摆头*/
 #define LINE_YAW_ENTER_DEG 0.4f
 #define LINE_YAW_EXIT_DEG  0.2f
 #define LINE_YAW_RATE_TAU  0.04f
@@ -470,12 +472,12 @@ static int line_rpm_round(float rpm)
     return (int)(rpm >= 0.0f ? rpm + 0.5f : rpm - 0.5f);
 }
 
-static int line_yaw_output(float target_yaw, int translation_rpm)
+static int line_yaw_output(float target_yaw, int translation_rpm, uint8_t soften_yaw)
 {
     TickType_t now = xTaskGetTickCount();
     float yaw = IMU_GetYaw();
     float error = turn_angdiff(target_yaw, yaw);
-    float dt, desired, limit, slew, corrected_error, int_limit;
+    float dt, desired, limit, slew, corrected_error, int_limit, slow_blend;
 
     if (!line_yaw.ready)
     {
@@ -509,11 +511,18 @@ static int line_yaw_output(float target_yaw, int translation_rpm)
     limit = fabsf((float)translation_rpm) * LINE_YAW_SPEED_RATIO;
     if (limit < LINE_YAW_MIN_LIMIT) limit = LINE_YAW_MIN_LIMIT;
     if (limit > LINE_YAW_MAX_RPM) limit = LINE_YAW_MAX_RPM;
+    slow_blend = (fabsf((float)translation_rpm) - POS_FINAL_RPM) /
+                 (LINE_YAW_SOFT_RPM - POS_FINAL_RPM);
+    if (slow_blend < 0.0f) slow_blend = 0.0f;
+    if (slow_blend > 1.0f) slow_blend = 1.0f;
+    slow_blend = slow_blend * slow_blend * (3.0f - 2.0f * slow_blend);
+    if (soften_yaw) limit *= slow_blend;
     if (translation_rpm == 0) limit = 0.0f;
     limit = floorf(limit); /*整数电机指令也不能因四舍五入超过当前限幅*/
     /*控制间隔异常时不补积一大段误差。*/
     if (dt > 0.1f) dt = 0.1f;
-    if (error * line_yaw.error_last < 0.0f || !line_yaw.active || translation_rpm == 0)
+    if (error * line_yaw.error_last < 0.0f || !line_yaw.active ||
+        (soften_yaw && fabsf((float)translation_rpm) < LINE_YAW_SOFT_RPM) || translation_rpm == 0)
         line_yaw.integral = 0.0f;
     line_yaw.error_last = error;
 
@@ -531,6 +540,7 @@ static int line_yaw_output(float target_yaw, int translation_rpm)
     desired = LINE_YAW_KP * corrected_error + line_yaw.integral - LINE_YAW_KD * line_yaw.rate;
     /*输出已饱和时，只允许有助于解除饱和的积分；目标附近不留积分。*/
     if (line_yaw.active && translation_rpm != 0 &&
+        (!soften_yaw || fabsf((float)translation_rpm) >= LINE_YAW_SOFT_RPM) &&
         ((fabsf(desired) < limit) || desired * error < 0.0f))
     {
         line_yaw.integral += LINE_YAW_KI * corrected_error * dt;
@@ -548,7 +558,7 @@ static int line_yaw_output(float target_yaw, int translation_rpm)
     if (desired > line_yaw.output + slew) line_yaw.output += slew;
     else if (desired < line_yaw.output - slew) line_yaw.output -= slew;
     else line_yaw.output = desired;
-    /*减速后立即遵守当前限幅，末段5RPM时修正最多2RPM。*/
+    /*低速时旋转修正渐弱；末端1RPM只直行收尾。*/
     if (line_yaw.output > limit) line_yaw.output = limit;
     if (line_yaw.output < -limit) line_yaw.output = -limit;
     return line_rpm_round(line_yaw.output);
@@ -557,7 +567,7 @@ static int line_yaw_output(float target_yaw, int translation_rpm)
 /*参考Car_Move的坐标变换：保持本段目标yaw方向的直行速度。
   本车vx正=左移，yaw正=顺时针，与参考车符号不同，横向取负sin。
   只补偿当前航向偏差，不改变路线pos/行程；倒车由translation_rpm符号自然处理。*/
-static void line_move(int translation_rpm, float target_yaw)
+static void line_move(int translation_rpm, float target_yaw, uint8_t soften_yaw)
 {
     float error = turn_angdiff(target_yaw, IMU_GetYaw());
     float radians, direction_blend;
@@ -572,7 +582,7 @@ static void line_move(int translation_rpm, float target_yaw)
     radians = error * direction_blend * 0.01745329252f;
     vx = line_rpm_round(-(float)translation_rpm * sinf(radians));
     vy = line_rpm_round((float)translation_rpm * cosf(radians));
-    w = line_yaw_output(target_yaw, translation_rpm);
+    w = line_yaw_output(target_yaw, translation_rpm, soften_yaw);
     Motor_Move(vx, vy, w);
 }
 
@@ -614,8 +624,8 @@ static float        pos_initial_error = 0.0f;
 static float        pos_best_error = 0.0f;
 static TickType_t   pos_progress_tick = 0;
 static float        pos_speed_last = 0.0f;
-static TickType_t   pos_speed_tick = 0;
-static uint8_t      pos_speed_ready = 0;
+static TickType_t   pos_finish_tick = 0;
+static uint8_t      pos_finish_active = 0;
 static int32_t      diag_start = 0;    /*斜走步起点计数(相对步长基准)*/
 static uint8_t      debug_route_active = 0; /*0x13调试路线运行中*/
 static uint8_t      debug_route_batch = 1;
@@ -657,7 +667,8 @@ static void pos_run_start(int32_t current)
     pos_initial_error = (float)pos_target - (float)current;
     pos_best_error = fabsf(pos_initial_error);
     pos_progress_tick = posrun_start = xTaskGetTickCount();
-    pos_speed_ready = 0;
+    pos_speed_last = 0.0f;
+    pos_finish_active = 0;
 }
 
 static float pos_speed_limit(float output, float error_abs)
@@ -681,21 +692,48 @@ static float pos_speed_limit(float output, float error_abs)
                          ratio * ratio * (3.0f - 2.0f * ratio);
         if (limit > approach_limit) limit = approach_limit;
     }
+    if (error_abs <= POS_QR_SLOW_COUNTS)
+    {
+        float ratio = (error_abs - POS_TOL_COUNTS) /
+                      (POS_QR_SLOW_COUNTS - POS_TOL_COUNTS);
+        float final_limit;
+        if (ratio < 0.0f) ratio = 0.0f;
+        final_limit = POS_FINAL_RPM + (POS_QR_SLOW_RPM - POS_FINAL_RPM) *
+                      ratio * ratio * (3.0f - 2.0f * ratio);
+        if (limit > final_limit) limit = final_limit;
+    }
+    /*空间限速始终是硬上限，不能为平滑指令在接近终点时抬高速度。*/
     if (output > limit) output = limit;
     if (output < -limit) output = -limit;
-    if (pos_speed_ready && output * pos_speed_last > 0.0f &&
-        fabsf(output) < fabsf(pos_speed_last))
-    {
-        float dt = (float)(xTaskGetTickCount() - pos_speed_tick) / (float)configTICK_RATE_HZ;
-        float next_speed;
-        if (dt > 0.1f) dt = 0.1f;
-        next_speed = fabsf(pos_speed_last) - POS_DECEL_RPM_S * dt;
-        if (fabsf(output) < next_speed) output = (output > 0.0f) ? next_speed : -next_speed;
-    }
     pos_speed_last = output;
-    pos_speed_tick = xTaskGetTickCount();
-    pos_speed_ready = 1;
     return output;
+}
+
+/*正常低速到位的短收尾；在线/超时检查仍在pos_run_check优先执行。*/
+static uint8_t pos_finish_soft(int32_t current)
+{
+    float error = (float)pos_target - (float)current;
+    TickType_t elapsed;
+    float rpm;
+    if ((pos_initial_error > 0.0f && error <= 0.0f) ||
+        (pos_initial_error < 0.0f && error >= 0.0f) ||
+        fabsf(pos_speed_last) > POS_QR_SLOW_RPM || pos_speed_last == 0.0f)
+        return 1; /*跨目标/反馈突变/本来就在目标：立即完成，绝不继续滑行*/
+    if (!pos_finish_active)
+    {
+        pos_finish_active = 1;
+        pos_finish_tick = xTaskGetTickCount();
+        line_yaw_reset();
+    }
+    elapsed = xTaskGetTickCount() - pos_finish_tick;
+    if (elapsed >= pdMS_TO_TICKS(POS_FINISH_MS))
+    {
+        pos_finish_active = 0;
+        return 1;
+    }
+    rpm = pos_speed_last * (1.0f - (float)elapsed / (float)pdMS_TO_TICKS(POS_FINISH_MS));
+    Motor_Move(0, line_rpm_round(rpm), 0);
+    return 0;
 }
 
 static PosRunState pos_run_check(int32_t current, uint8_t online)
@@ -707,7 +745,7 @@ static PosRunState pos_run_check(int32_t current, uint8_t online)
     if (!online || (now - posrun_start) >= pdMS_TO_TICKS(POS_RUN_TIMEOUT_MS))
         return POS_FAILED;
     /* 低速到位或跨过目标即停，避免采样跳过容差带后反复追赶。 */
-    if (aerr <= POS_TOL_COUNTS ||
+    if (pos_finish_active || aerr <= POS_TOL_COUNTS ||
         (pos_initial_error > 0.0f && err <= 0.0f) ||
         (pos_initial_error < 0.0f && err >= 0.0f))
         return POS_REACHED;
@@ -1731,6 +1769,11 @@ void MotorTask(void *pvParameters)
 
             if (state == POS_REACHED)
             {
+                if (!pos_finish_soft(o.enc_pos[ODOM_POS_AXIS]))
+                {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
                 phase = PHASE_DONE;                        /*已到右上角点位*/
                 Motor_Stop();
             }
@@ -1746,7 +1789,7 @@ void MotorTask(void *pvParameters)
                 PID_Update(&PosPID);
 
                 vy = (int)pos_speed_limit(PosPID.Out, aerr);
-                line_move(vy, yaw_hold);
+                line_move(vy, yaw_hold, (uint8_t)(aerr <= POS_DECEL_COUNTS));
             }
         }
 
@@ -1766,6 +1809,11 @@ void MotorTask(void *pvParameters)
 
             if (state == POS_REACHED)
             {
+                if (!pos_finish_soft(cur))
+                {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
                 if (debug_route_active)
                 {
                     debug_motion_done();
@@ -1786,7 +1834,7 @@ void MotorTask(void *pvParameters)
                 PID_Update(&PosPID);
                 out = PosPID.Out;
                 out = pos_speed_limit(out, aerr);
-                line_move((int)out, yaw_hold);
+                line_move((int)out, yaw_hold, (uint8_t)(aerr <= POS_DECEL_COUNTS));
             }
         }
 
@@ -1820,7 +1868,7 @@ void MotorTask(void *pvParameters)
                 }
                 else
                 {
-                    line_move(debug_qr_scan_dir * POS_QR_SLOW_RPM, yaw_hold);
+                    line_move(debug_qr_scan_dir * POS_QR_SLOW_RPM, yaw_hold, 0);
                 }
             }
             else if (state == POS_FAILED)
@@ -1835,7 +1883,7 @@ void MotorTask(void *pvParameters)
             {
                 int8_t slow_dir = (err > 0) ? 1 : -1;
 
-                line_move(slow_dir * POS_QR_SLOW_RPM, yaw_hold);
+                line_move(slow_dir * POS_QR_SLOW_RPM, yaw_hold, 0);
             }
         }
 
