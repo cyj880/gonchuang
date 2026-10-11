@@ -654,7 +654,7 @@ static void debug_line_start(int32_t value, uint8_t relative, float heading)
 
 static void debug_qr_scan_start(void)
 {
-    if (debug_qr_scan_done)
+    if (!MOTOR_ROUTE_QR_SCAN_ENABLE || debug_qr_scan_done)
     {
         debug_point_pause_start(3, 500);
         return;
