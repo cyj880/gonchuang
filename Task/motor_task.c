@@ -306,8 +306,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define YAW_PID_KI          0.5f
 #define YAW_PID_KD          0.0f
 #define YAW_OUT_MAX_RPM     50
-#define LINE_YAW_SCALE     0.25f   /*直行/缓行纠偏在上一版基础上再减半*/
-#define LINE_YAW_MAX_RPM   10      /*纠偏限幅由20RPM减半*/
+#define LINE_YAW_SCALE     0.625f  /*直行/缓行纠偏：上一版0.25的2.5倍*/
+#define LINE_YAW_MAX_RPM   25      /*纠偏限幅：上一版10RPM的2.5倍*/
 #define YAW_ERR_INT_MAX     30.0f    /* 积分限幅(deg) */
 #define YAW_OUT_SIGN        (-1.0f)  /*航向纠正方向: 实车45°斜走实测越纠越偏, 已翻转。
                                         适用于直线/缓行/校准/45°的yaw保持(共用YawPID);
