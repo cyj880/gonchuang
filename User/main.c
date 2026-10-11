@@ -53,7 +53,7 @@ uint8_t lunqu_RunFlag  = 1;    /*1=轮趣FDI FDILink@921600*/
  *          编码器 白(485A)/绿(485B) -> RS485收发模块 -> USART2（PD5=TX / PD6=RX，蓝牙口）；
  *          模块 DE+RE 短接 -> PA4（方向控制：高=发送，低=接收）。9600 轮询读"虚拟多圈位置"
  *          （32位，掉电归零，无累计误差），Task/odom_task.c 解算里程；
- *          站号1当前唯一，第二只改站号2后把 ODOM_ENC_NUM 改成2即可；标定见 odom_task.c 顶部
+ *          仅保留站号1里程计，不再轮询站号2；标定见 odom_task.c 顶部
   *
   * 注意：SysTick / PendSV / SVC 三个异常已由 FreeRTOS 接管
   * （见 FreeRTOSConfig.h 尾部宏重定义与 stm32f4xx_it.c 说明），
@@ -94,7 +94,7 @@ int main(void)
     /* RouteTask 已并入 LCD_Task（收帧回传 + 坐标/任务码两页轮显），不再单独创建 */
     xTaskCreate(KeyTask, "Key", 256, NULL, 2, NULL);   /* PB2按键：松开翻转红色LED */
     xTaskCreate(MotorTask, "Motor", 512, NULL, 2, NULL); /* 四轮 Emm_V5 电机（CAN2） */
-    xTaskCreate(OdomTask, "Odom", 1024, NULL, 3, NULL);  /* RS485编码器里程计(双轮X/Y), 优先级2防忙等饿死 */
+    xTaskCreate(OdomTask, "Odom", 1024, NULL, 3, NULL);  /* RS485里程计1(站号1)，与Motor同为优先级3 */
     xTaskCreate(LCD_Task, "LCD", 1024, NULL, 1, NULL);    /* TFT-LCD 显示（SPI1+DMA） */
     xTaskCreate(UART8_ReportTask, "TLink", 256, NULL, 2, NULL); /* 摄像头链路：任务码一变就转发给显示屏，
                                                                   搬运信息一变也转发（不做周期心跳）
