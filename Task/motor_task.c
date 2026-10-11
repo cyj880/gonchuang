@@ -285,7 +285,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
    整定: 先 Kp(0.0005起, 太慢加大/振荡减小), 再 Ki(消除稳态误差), Kd 默认关闭
    (里程计约35ms刷新一次位置, 微分对量化噪声敏感)。 */
 #define POS_TOL_COUNTS      5000     /* 到位容差(编码值): 目标±5000, 进入即停车 */
-#define POS_QR_SLOW_COUNTS  60000    /* 接近目标约91mm时限制为缓行速度 */
+#define POS_DECEL_COUNTS    160000   /* 距目标约244mm开始平滑收紧速度上限 */
+#define POS_QR_SLOW_COUNTS  20000    /* 最后约30mm限制为缓行速度 */
 #define POS_QR_SLOW_RPM     5        /* 接近目标低速逼近(RPM)，减少冲过目标 */
 
 #define POS_OUT_MAX_RPM     160      /* 直线巡航位置PID输出限幅(RPM) */
@@ -521,8 +522,18 @@ static float pos_speed_limit(float output, float error_abs)
     if (elapsed < ramp_ticks)
         limit = POS_START_RPM + (POS_OUT_MAX_RPM - POS_START_RPM) *
                 (float)elapsed / (float)ramp_ticks;
-    if (error_abs <= POS_QR_SLOW_COUNTS && limit > POS_QR_SLOW_RPM)
-        limit = POS_QR_SLOW_RPM;
+    if (error_abs < POS_DECEL_COUNTS)
+    {
+        float ratio = (error_abs - POS_QR_SLOW_COUNTS) /
+                      (POS_DECEL_COUNTS - POS_QR_SLOW_COUNTS);
+        float approach_limit;
+        if (ratio < 0.0f) ratio = 0.0f;
+        /*两端斜率为零，平滑衔接巡航和最终低速；与起步上限取较小值。*/
+        approach_limit = POS_QR_SLOW_RPM +
+                         (POS_OUT_MAX_RPM - POS_QR_SLOW_RPM) *
+                         ratio * ratio * (3.0f - 2.0f * ratio);
+        if (limit > approach_limit) limit = approach_limit;
+    }
     if (output > limit) return limit;
     if (output < -limit) return -limit;
     return output;
