@@ -961,7 +961,7 @@ static void debug_route_start(uint8_t selection)
         debug_point_at(debug_route_leg.from_x, debug_route_leg.from_y) == RP_START2)
     {
         odometry_get(&o);
-        debug_pos_offset = 1430000 - o.enc_pos[ODOM_POS_AXIS];
+        debug_pos_offset = 1390000 - o.enc_pos[ODOM_POS_AXIS];
     }
     if (have_leg)
     {
