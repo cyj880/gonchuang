@@ -308,8 +308,18 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define YAW_PID_KI          0.5f
 #define YAW_PID_KD          0.0f
 #define YAW_OUT_MAX_RPM     50
-#define LINE_YAW_SCALE     0.625f  /*直行/缓行纠偏：上一版0.25的2.5倍*/
-#define LINE_YAW_MAX_RPM   25      /*纠偏限幅：上一版10RPM的2.5倍*/
+#define LINE_YAW_KP        3.0f    /*增强及时回正(RPM/deg)，参考工程PID思路适配本车*/
+#define LINE_YAW_KI        0.8f    /*按秒积分(RPM/(deg*s))，补偿持续轮速偏差*/
+#define LINE_YAW_KD        0.15f   /*角速度阻尼，避免阻尼过强拖慢回正*/
+#define LINE_YAW_INT_RPM   3.0f    /*积分贡献上限，避免旧环的大积分残留*/
+#define LINE_YAW_MAX_RPM   25.0f
+#define LINE_YAW_SPEED_RATIO 0.35f /*低速随平移速度收紧修正，避免末段反向摆头*/
+#define LINE_YAW_MIN_LIMIT 2.0f
+#define LINE_YAW_ENTER_DEG 0.4f
+#define LINE_YAW_EXIT_DEG  0.2f
+#define LINE_YAW_RATE_TAU  0.04f
+#define LINE_YAW_SLEW_RPM_S 120.0f /*比上一版更快建立纠偏，仍按真实dt限斜率*/
+#define LINE_DIRECTION_MAX_DEG 15.0f /*车头暂时偏移时补偿直行方向，限制横向分量*/
 #define YAW_ERR_INT_MAX     30.0f    /* 积分限幅(deg) */
 #define YAW_OUT_SIGN        (-1.0f)  /*航向纠正方向: 实车45°斜走实测越纠越偏, 已翻转。
                                         适用于直线/缓行/校准/45°的yaw保持(共用YawPID);
@@ -437,13 +447,22 @@ static float yaw_target_near(float target, float actual)
     return actual + turn_angdiff(target, actual);
 }
 
-/*仅平移直行使用较小的航向修正；原地转向和45°斜行保持独立。*/
-static int line_yaw_output(void)
+/*直行PID按实际dt积分，配合速度方向补偿；转弯和45°控制保持独立。*/
+static struct
 {
-    float out = YawPID.Out * YAW_OUT_SIGN * LINE_YAW_SCALE;
-    if (out > LINE_YAW_MAX_RPM) out = LINE_YAW_MAX_RPM;
-    if (out < -LINE_YAW_MAX_RPM) out = -LINE_YAW_MAX_RPM;
-    return (int)out;
+    float yaw_last;
+    float rate;
+    float output;
+    float integral;
+    float error_last;
+    TickType_t tick_last;
+    uint8_t active;
+    uint8_t ready;
+} line_yaw;
+
+static void line_yaw_reset(void)
+{
+    line_yaw.ready = 0;
 }
 
 static int line_rpm_round(float rpm)
@@ -451,12 +470,102 @@ static int line_rpm_round(float rpm)
     return (int)(rpm >= 0.0f ? rpm + 0.5f : rpm - 0.5f);
 }
 
+static int line_yaw_output(float target_yaw, int translation_rpm)
+{
+    TickType_t now = xTaskGetTickCount();
+    float yaw = IMU_GetYaw();
+    float error = turn_angdiff(target_yaw, yaw);
+    float dt, desired, limit, slew, corrected_error;
+
+    if (!line_yaw.ready)
+    {
+        line_yaw.yaw_last = yaw;
+        line_yaw.rate = 0.0f;
+        line_yaw.output = 0.0f;
+        line_yaw.integral = 0.0f;
+        line_yaw.error_last = error;
+        line_yaw.active = 0;
+        line_yaw.tick_last = now;
+        line_yaw.ready = 1;
+        dt = 0.01f;
+    }
+    else
+    {
+        TickType_t elapsed = now - line_yaw.tick_last;
+        dt = (float)elapsed / (float)configTICK_RATE_HZ;
+        if (elapsed != 0)
+        {
+            /*角差归一防止359°->0°产生假角速度；真实dt避免调度快慢改变阻尼。*/
+            line_yaw.rate += dt / (LINE_YAW_RATE_TAU + dt) *
+                            (turn_angdiff(yaw, line_yaw.yaw_last) / dt - line_yaw.rate);
+            line_yaw.yaw_last = yaw;
+            line_yaw.tick_last = now;
+        }
+    }
+
+    if (fabsf(error) >= LINE_YAW_ENTER_DEG) line_yaw.active = 1;
+    else if (fabsf(error) <= LINE_YAW_EXIT_DEG) line_yaw.active = 0;
+
+    limit = fabsf((float)translation_rpm) * LINE_YAW_SPEED_RATIO;
+    if (limit < LINE_YAW_MIN_LIMIT) limit = LINE_YAW_MIN_LIMIT;
+    if (limit > LINE_YAW_MAX_RPM) limit = LINE_YAW_MAX_RPM;
+    if (translation_rpm == 0) limit = 0.0f;
+    limit = floorf(limit); /*整数电机指令也不能因四舍五入超过当前限幅*/
+    /*控制间隔异常时不补积一大段误差。*/
+    if (dt > 0.1f) dt = 0.1f;
+    if (error * line_yaw.error_last < 0.0f || !line_yaw.active || translation_rpm == 0)
+        line_yaw.integral = 0.0f;
+    line_yaw.error_last = error;
+
+    corrected_error = 0.0f;
+    if (line_yaw.active)
+    {
+        if (error > LINE_YAW_EXIT_DEG) corrected_error = error - LINE_YAW_EXIT_DEG;
+        if (error < -LINE_YAW_EXIT_DEG) corrected_error = error + LINE_YAW_EXIT_DEG;
+    }
+    desired = LINE_YAW_KP * corrected_error + line_yaw.integral - LINE_YAW_KD * line_yaw.rate;
+    /*输出已饱和时，只允许有助于解除饱和的积分；目标附近不留积分。*/
+    if (line_yaw.active && translation_rpm != 0 &&
+        ((fabsf(desired) < limit) || desired * error < 0.0f))
+    {
+        float int_limit = limit * 0.25f;
+        if (int_limit > LINE_YAW_INT_RPM) int_limit = LINE_YAW_INT_RPM;
+        line_yaw.integral += LINE_YAW_KI * corrected_error * dt;
+        if (line_yaw.integral > int_limit) line_yaw.integral = int_limit;
+        if (line_yaw.integral < -int_limit) line_yaw.integral = -int_limit;
+    }
+    if (!line_yaw.active && fabsf(line_yaw.rate) <= 2.0f) desired = 0.0f;
+    else desired = (LINE_YAW_KP * corrected_error + line_yaw.integral -
+                    LINE_YAW_KD * line_yaw.rate) * YAW_OUT_SIGN;
+    if (desired > limit) desired = limit;
+    if (desired < -limit) desired = -limit;
+    /*调度间隔过长时也限制单次变化，防止补偿指令跳变。*/
+    if (dt > 0.1f) dt = 0.1f;
+    slew = LINE_YAW_SLEW_RPM_S * dt;
+    if (desired > line_yaw.output + slew) line_yaw.output += slew;
+    else if (desired < line_yaw.output - slew) line_yaw.output -= slew;
+    else line_yaw.output = desired;
+    /*减速后立即遵守当前限幅，末段5RPM时修正最多2RPM。*/
+    if (line_yaw.output > limit) line_yaw.output = limit;
+    if (line_yaw.output < -limit) line_yaw.output = -limit;
+    return line_rpm_round(line_yaw.output);
+}
+
+/*参考Car_Move的坐标变换：保持本段目标yaw方向的直行速度。
+  本车vx正=左移，yaw正=顺时针，与参考车符号不同，横向取负sin。
+  只补偿当前航向偏差，不改变路线pos/行程；倒车由translation_rpm符号自然处理。*/
 static void line_move(int translation_rpm, float target_yaw)
 {
-    YawPID.Actual = IMU_GetYaw();
-    YawPID.Target = yaw_target_near(target_yaw, YawPID.Actual);
-    PID_Update(&YawPID);
-    Motor_Move(0, translation_rpm, line_yaw_output());
+    float error = turn_angdiff(target_yaw, IMU_GetYaw());
+    float radians;
+    int vx, vy, w;
+    if (error > LINE_DIRECTION_MAX_DEG) error = LINE_DIRECTION_MAX_DEG;
+    if (error < -LINE_DIRECTION_MAX_DEG) error = -LINE_DIRECTION_MAX_DEG;
+    radians = error * 0.01745329252f;
+    vx = line_rpm_round(-(float)translation_rpm * sinf(radians));
+    vy = line_rpm_round((float)translation_rpm * cosf(radians));
+    w = line_yaw_output(target_yaw, translation_rpm);
+    Motor_Move(vx, vy, w);
 }
 
 static float yaw_abs360_to_signed(float yaw)
@@ -666,6 +775,7 @@ static void diag_run_start(uint8_t direction, int32_t distance, float heading)
     yaw_hold = heading;
     posrun_start = xTaskGetTickCount();
     PID_Init(&YawPID);
+    line_yaw_reset();
     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
     YawPID.ErrorIntMax = YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
     YawPID.OutMax = YAW_OUT_MAX_RPM;  YawPID.OutMin = -YAW_OUT_MAX_RPM;
@@ -709,6 +819,7 @@ static void debug_line_start(int32_t value, uint8_t relative, float heading)
     PosPID.ErrorIntMax = POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
     PosPID.OutMax = POS_OUT_MAX_RPM;  PosPID.OutMin = -POS_OUT_MAX_RPM;
     PID_Init(&YawPID);
+    line_yaw_reset();
     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
     YawPID.ErrorIntMax = YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
     YawPID.OutMax = YAW_OUT_MAX_RPM;  YawPID.OutMin = -YAW_OUT_MAX_RPM;
@@ -1089,6 +1200,7 @@ static void task_step_start(const TaskStep *st)
         PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
         PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
         PID_Init(&YawPID);
+        line_yaw_reset();
             YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
         YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
         YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
@@ -1104,6 +1216,7 @@ static void task_step_start(const TaskStep *st)
         pos_run_start(o0.enc_pos[ODOM_POS_AXIS]);
         yaw_hold    = IMU_GetYaw();        /*本步保持朝向=启动时刻车头*/
         PID_Init(&YawPID);
+        line_yaw_reset();
             YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
         YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
         YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
@@ -1173,6 +1286,7 @@ void MotorTask(void *pvParameters)
     PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
     PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
     PID_Init(&YawPID);
+    line_yaw_reset();
     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
     YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
     YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
@@ -1229,6 +1343,7 @@ void MotorTask(void *pvParameters)
                     pos_run_start(o.enc_pos[ODOM_POS_AXIS]);
                     yaw_hold = IMU_GetYaw();
                     PID_Init(&YawPID);                 /*缓行段yaw保持用*/
+                    line_yaw_reset();
                                     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
                     YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
                     YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
@@ -1252,6 +1367,7 @@ void MotorTask(void *pvParameters)
                     PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
                     PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
                     PID_Init(&YawPID);
+                    line_yaw_reset();
                                     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
                     YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
                     YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
@@ -1306,6 +1422,7 @@ void MotorTask(void *pvParameters)
                     PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
                     PosPID.OutMax =  POS_OUT_MAX_RPM;  PosPID.OutMin = -POS_OUT_MAX_RPM;
                     PID_Init(&YawPID);
+                    line_yaw_reset();
                                     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
                     YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
                     YawPID.OutMax = YAW_OUT_MAX_RPM;  YawPID.OutMin = -YAW_OUT_MAX_RPM;
@@ -1469,6 +1586,7 @@ void MotorTask(void *pvParameters)
                     PosPID.ErrorIntMax =  POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
                     PosPID.OutMax =  POS_OUT_MAX_RPM;       PosPID.OutMin = -POS_OUT_MAX_RPM;
                     PID_Init(&YawPID);
+                    line_yaw_reset();
                                     YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
                     YawPID.ErrorIntMax =  YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
                     YawPID.OutMax =  YAW_OUT_MAX_RPM;       YawPID.OutMin = -YAW_OUT_MAX_RPM;
@@ -1657,7 +1775,7 @@ void MotorTask(void *pvParameters)
         }
 
         /*---- 直线行驶段(10ms 周期; 里程计1/vy前后通道) ----
-           位置PID+原版yaw PID航向保持; 接近目标自动限速; 到位±TOL停车推进步骤 */
+           位置PID+30e53d1航向PID及方向补偿; 接近目标自动限速; 到位±TOL停车推进步骤 */
         if (phase == PHASE_LINE)
         {
             OdomData_t o;
