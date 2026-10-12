@@ -329,6 +329,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
                                         与YAW_OUT_SIGN同值(两者闭环的都是IMU增方向)*/
 
 #define POS_LEG1_RPM        60       /* 45°斜走巡航: 出力轮转速(RPM), 右前=LF+RR 左前=RF+LR */
+#define POS_LEG1_START_MS    800     /*斜走按时间缓启动，减少两轮突然出力打滑*/
+#define POS_LEG1_START_RPM   8
 #define POS_LEG1_APPROACH_RPM 8      /*低速到点，降低停车瞬间的轮胎打滑*/
 #define POS_LEG1_APPROACH_COUNTS 40000 /*末段约61mm平滑减速*/
 
@@ -441,11 +443,6 @@ static float turn_angdiff(float a, float b)
     while (d > 180.0f)   d -= 360.0f;
     while (d <= -180.0f) d += 360.0f;
     return d;
-}
-
-static float yaw_target_near(float target, float actual)
-{
-    return actual + turn_angdiff(target, actual);
 }
 
 /*直行PID按实际dt积分，配合速度方向补偿；转弯和45°控制保持独立。*/
@@ -1561,18 +1558,33 @@ void MotorTask(void *pvParameters)
                 diagonal_rpm = 2 * (int)(speed / 2.0f + 0.5f);
             }
 
-            YawPID.Actual = IMU_GetYaw();                     /*直读最新yaw(不经35ms透传)*/
-            YawPID.Target = yaw_target_near(yaw_hold, YawPID.Actual);
-            PID_Update(&YawPID);
-
-            if (leg_dir == 1)                       /*右前45°: LF+RR出力*/
-                Motor_Move(-diagonal_rpm / 2, diagonal_rpm / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
-            else if (leg_dir == 2)                  /*左前45°: RF+LR出力*/
-                Motor_Move(diagonal_rpm / 2, diagonal_rpm / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
-            else if (leg_dir == 3)                  /*右后45°: RF+LR反转*/
-                Motor_Move(-diagonal_rpm / 2, -diagonal_rpm / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
-            else                                    /*左后45°: LF+RR反转*/
-                Motor_Move(diagonal_rpm / 2, -diagonal_rpm / 2, (int)(YawPID.Out * YAW_OUT_SIGN));
+            {
+                float start_ratio = (float)(xTaskGetTickCount() - posrun_start) /
+                                    (float)pdMS_TO_TICKS(POS_LEG1_START_MS);
+                float error = turn_angdiff(yaw_hold, IMU_GetYaw());
+                float radians, cosine, sine;
+                int vx, vy, w;
+                if (start_ratio < 1.0f)
+                {
+                    float start_cap = POS_LEG1_START_RPM +
+                        (POS_LEG1_RPM - POS_LEG1_START_RPM) *
+                        start_ratio * start_ratio * (3.0f - 2.0f * start_ratio);
+                    int start_rpm = 2 * (int)(start_cap / 2.0f + 0.5f);
+                    if (diagonal_rpm > start_rpm) diagonal_rpm = start_rpm;
+                }
+                vx = (leg_dir == 1 || leg_dir == 3) ? -diagonal_rpm / 2 : diagonal_rpm / 2;
+                vy = (leg_dir == 1 || leg_dir == 2) ? diagonal_rpm / 2 : -diagonal_rpm / 2;
+                if (error > LINE_DIRECTION_MAX_DEG) error = LINE_DIRECTION_MAX_DEG;
+                if (error < -LINE_DIRECTION_MAX_DEG) error = -LINE_DIRECTION_MAX_DEG;
+                radians = error * 0.01745329252f;
+                cosine = cosf(radians);
+                sine = sinf(radians);
+                /*同直行坐标变换，四个斜向均保持目标yaw下的平移方向。
+                  修正限幅以半轮速为基准，减速时避免旋转盖过平移。*/
+                w = line_yaw_output(yaw_hold, diagonal_rpm / 2);
+                Motor_Move(line_rpm_round(vx * cosine - vy * sine),
+                           line_rpm_round(vx * sine + vy * cosine), w);
+            }
 
             if (travel >= fabsf((float)leg1_end))
             {
