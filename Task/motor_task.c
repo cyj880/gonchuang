@@ -286,12 +286,13 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
    (里程计约35ms刷新一次位置, 微分对量化噪声敏感)。 */
 #define POS_TOL_COUNTS      5000     /* 到位容差(编码值): 目标±5000, 进入即停车 */
 #define POS_DECEL_COUNTS    320000   /* 距目标约488mm开始渐进减速，降低末段制动负担 */
-#define POS_QR_SLOW_COUNTS  20000    /* 最后约30mm限制为缓行速度 */
-#define POS_QR_SLOW_RPM     5        /* 接近目标低速逼近(RPM)，减少冲过目标 */
+#define POS_QR_SLOW_COUNTS  12000    /* 最后约18mm进入低速平滑收尾 */
+#define POS_APPROACH_RPM    12       /* 直行末段速度上限，缩短等待 */
+#define POS_QR_SLOW_RPM     5        /* 扫码搜索速度保持5RPM */
 
 #define POS_OUT_MAX_RPM     160      /* 直线巡航位置PID输出限幅(RPM) */
 #define POS_START_RPM       10       /* 更柔和的直线起步速度上限(RPM) */
-#define POS_FINAL_RPM       1.0f    /*直行到位前继续减到1RPM，避免5RPM直接急停*/
+#define POS_FINAL_RPM       4.0f    /*最后约12mm平滑降到4RPM，避免长时间爬行*/
 #define POS_FINISH_MS       150u    /*仅低速正常到位用150ms收尾；故障/超目标仍立即停*/
 #define POS_START_RAMP_MS   1200u     /* 延长起步平滑爬升，降低打滑 */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
@@ -669,8 +670,8 @@ static float pos_speed_limit(float output, float error_abs)
         float approach_limit;
         if (ratio < 0.0f) ratio = 0.0f;
         /*两端斜率为零，平滑衔接巡航和最终低速；与起步上限取较小值。*/
-        approach_limit = POS_QR_SLOW_RPM +
-                         (POS_OUT_MAX_RPM - POS_QR_SLOW_RPM) *
+        approach_limit = POS_APPROACH_RPM +
+                         (POS_OUT_MAX_RPM - POS_APPROACH_RPM) *
                          ratio * ratio * (3.0f - 2.0f * ratio);
         if (limit > approach_limit) limit = approach_limit;
     }
@@ -680,7 +681,7 @@ static float pos_speed_limit(float output, float error_abs)
                       (POS_QR_SLOW_COUNTS - POS_TOL_COUNTS);
         float final_limit;
         if (ratio < 0.0f) ratio = 0.0f;
-        final_limit = POS_FINAL_RPM + (POS_QR_SLOW_RPM - POS_FINAL_RPM) *
+        final_limit = POS_FINAL_RPM + (POS_APPROACH_RPM - POS_FINAL_RPM) *
                       ratio * ratio * (3.0f - 2.0f * ratio);
         if (limit > final_limit) limit = final_limit;
     }
@@ -699,7 +700,7 @@ static uint8_t pos_finish_soft(int32_t current)
     float rpm;
     if ((pos_initial_error > 0.0f && error <= 0.0f) ||
         (pos_initial_error < 0.0f && error >= 0.0f) ||
-        fabsf(pos_speed_last) > POS_QR_SLOW_RPM || pos_speed_last == 0.0f)
+        fabsf(pos_speed_last) > POS_APPROACH_RPM || pos_speed_last == 0.0f)
         return 1; /*跨目标/反馈突变/本来就在目标：立即完成，绝不继续滑行*/
     if (!pos_finish_active)
     {
