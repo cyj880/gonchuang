@@ -294,6 +294,7 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define POS_START_RPM       10       /* 更柔和的直线起步速度上限(RPM) */
 #define POS_FINAL_RPM       4.0f    /*最后约12mm平滑降到4RPM，避免长时间爬行*/
 #define POS_FINISH_MS       150u    /*仅低速正常到位用150ms收尾；故障/超目标仍立即停*/
+#define POS_DECEL_SLEW_RPM_S 80.0f  /*正常接近目标时限制减速斜率，避免轮速突降抖动*/
 #define POS_START_RAMP_MS   1200u     /* 延长起步平滑爬升，降低打滑 */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
 #define POS_PROGRESS_MS     1000u   /* 持续未向目标靠近时停车(反馈不变/方向错误) */
@@ -685,6 +686,16 @@ static float pos_speed_limit(float output, float error_abs)
     /*空间限速始终是硬上限，不能为平滑指令在接近终点时抬高速度。*/
     if (output > limit) output = limit;
     if (output < -limit) output = -limit;
+    /*位置PID的输出可能因量化反馈在相邻周期突降；只限制同向减速，
+       加速仍由原位置环决定，反向和异常情况交给上层保护立即处理。*/
+    if (pos_speed_last != 0.0f && output * pos_speed_last > 0.0f &&
+        fabsf(output) < fabsf(pos_speed_last))
+    {
+        float max_drop = POS_DECEL_SLEW_RPM_S * 0.01f;
+        if (fabsf(pos_speed_last) - fabsf(output) > max_drop)
+            output = pos_speed_last > 0.0f ? pos_speed_last - max_drop :
+                                             pos_speed_last + max_drop;
+    }
     pos_speed_last = output;
     return output;
 }
