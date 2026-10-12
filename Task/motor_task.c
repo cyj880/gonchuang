@@ -11,7 +11,7 @@
 #include "Buzzer.h"
 
 /**
-  * 四路 Emm_V5 步进闭环电机控制任务（CAN2，500Kbps）
+  * 四路 Emm_V5 步进闭环电机控制任务（CAN2，1Mbps）
   * ------------------------------------------------------------------
   * 参考例程：gcs-gold-medal-main/yyb_stm32/can_ZDT/yyb_move.c
   *   car_move(v_x, v_y, w)  —— 麦轮运动学 + 四轮速度模式

@@ -81,7 +81,7 @@ void can_init(void)
 	CAN_InitStructure.CAN_SJW = CAN_SJW_1tq;			// 重新同步跳跃宽度为SJW + 1个时间单位
 	CAN_InitStructure.CAN_BS1 = CAN_BS1_4tq;
 	CAN_InitStructure.CAN_BS2 = CAN_BS2_1tq;
-	CAN_InitStructure.CAN_Prescaler = 14;			  // 波特率 = 42M / 14 / (1 + 4 + 1) = 0.5，即500K
+	CAN_InitStructure.CAN_Prescaler = 7; /*42MHz / 7 / (1+4+1) = 1Mbps*/
 													  // F427: SYSCLK=168M, APB1=168/4=42M，与F407例程一致，波特率参数无需修改
 	CAN_Init(CAN2, &CAN_InitStructure);
 	// 设置STM32的帧ID - 扩展帧格式 - 不过滤任何数据帧

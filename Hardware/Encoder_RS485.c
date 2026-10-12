@@ -6,7 +6,7 @@
   * @file    Encoder_RS485.c
   * @brief   RS-485 绝对值编码器(欧艾迪 OID-R3806D-17S1S)驱动 —— Modbus-RTU 主站
   ******************************************************************************
-  * 硬件: USART2(PD5=TX / PD6=RX, AF7, 9600-8N1) + RS485收发模块(MAX485)
+  * 硬件: USART2(PD5=TX / PD6=RX, AF7, 115200-8N1) + RS485收发模块(MAX485)
   *       模块 DI<-PD5, RO->PD6, DE+RE短接->PA4(方向控制: 高=发送, 低=接收)
   *       模块 A/B -> 编码器 白(485A)/绿(485B), 仅接里程计1(站号1)
   *
@@ -75,7 +75,7 @@ static void rs485_rx_flush(void)
   * 函    数：阻塞读一次虚拟多圈位置(Modbus 0x03, 寄存器0x0000~0x0001)
   * 参    数：station 编码器站号   pos 出参(32位位置值, 掉电归零)
   * 返 回 值：1=成功 0=失败(超时/站号错/功能码错/CRC错)
-  * 说    明：阻塞约25ms(8字节发+9字节收@9600), 只能在任务上下文调用
+  * 说    明：线缆收发约1.5ms(8字节发+9字节收@115200)，另加编码器应答等待, 只能在任务上下文调用
   */
 uint8_t EncRS485_ReadPos(uint8_t station, uint32_t *pos)
 {
@@ -220,8 +220,8 @@ void Encoder_RS485_Init(void)
     GPIO_Init(GPIOA, &GPIO_InitStructure);
     GPIO_ResetBits(GPIOA, GPIO_Pin_4);
 
-    /*USART2: 9600-8-N-1, 收发(编码器出厂默认; 提速用0x0005寄存器)*/
-    USART_InitStructure.USART_BaudRate            = 9600;
+    /*USART2: 115200-8-N-1, 收发(编码器设备端也须配置为115200)*/
+    USART_InitStructure.USART_BaudRate            = 115200;
     USART_InitStructure.USART_WordLength          = USART_WordLength_8b;
     USART_InitStructure.USART_StopBits            = USART_StopBits_1;
     USART_InitStructure.USART_Parity              = USART_Parity_No;
