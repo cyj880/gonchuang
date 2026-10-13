@@ -18,6 +18,7 @@
 #include "Encoder_RS485.h"
 #include "odom_task.h"
 #include "lunqu_imu.h"
+#include "rdk_center.h"
 
 
 /* ---- 陀螺仪选择开关: 两陀螺仪物理共用USART6/PG9, 同一时刻只插一个; 改后重新上电, 只能一个为1 ---- */
@@ -82,6 +83,7 @@ int main(void)
     if (lunqu_RunFlag)        Lunqu_Init(921600);   /*轮趣FDI惯导: PG9=RX, FDILink@921600*/
     else if (Bno085_RunFlag)  BNO08X_Init(115200);  /*BNO085: PG9=RX, RVC@115200*/
     route_rx_init();        /* UART7发送互斥锁: ACK帧(电机任务)与02回传帧(LCD任务)防交错 */
+    RDK_Center_Init(115200); /* RDK圆心链路: USART3(PD8=TX/PD9=RX) */
     Encoder_RS485_Init();   /* RS485绝对值编码器: USART2(PD5=TX/PD6=RX) + PA4方向脚, Modbus轮询站号1 */
 
     /* 上电提示音：蜂鸣器（PH6, TIM12_CH1, 2700Hz）鸣叫1s后关闭。

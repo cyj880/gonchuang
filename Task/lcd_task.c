@@ -6,6 +6,7 @@
 #include "odom_task.h"
 #include "motor_task.h"
 #include "lunqu_imu.h"
+#include "rdk_center.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -61,6 +62,15 @@ static void lcd_odom_cam_line(void)
     }
 }
 
+static void lcd_odom_center_line(void)
+{
+    LCD_SetColor(RDK_CenterValid() ? LCD_GREEN : LCD_LGRAY);
+    if (RDK_CenterValid())
+        LCD_Printf(0, 122, LCD_6X8, "RDK C:%3u,%3u", (unsigned)RDK_CenterX(), (unsigned)RDK_CenterY());
+    else
+        LCD_Printf(0, 122, LCD_6X8, "RDK C:--,--     ");
+}
+
 static void lcd_draw_odom(void)
 {
     OdomData_t o;
@@ -89,6 +99,7 @@ static void lcd_draw_odom(void)
     lcd_odom_cam_line();            /*MaixCam 坐标*/
     LCD_SetColor(LCD_WHITE);
     LCD_Printf(0, 110, LCD_6X8, "pos:%-11ld", (long)Motor_RoutePos(o.enc_pos[ODOM_POS_AXIS]));
+    lcd_odom_center_line();
 }
 
 /* 100ms 数值行刷新：等宽字体，格式左对齐补空格，覆盖上一次的旧数字 */
@@ -111,6 +122,7 @@ static void lcd_update_odom(void)
     lcd_odom_cam_line();            /*MaixCam 坐标*/
     LCD_SetColor(LCD_WHITE);
     LCD_Printf(0, 110, LCD_6X8, "pos:%-11ld", (long)Motor_RoutePos(o.enc_pos[ODOM_POS_AXIS]));
+    lcd_odom_center_line();
 }
 
 /* ================= 任务主体: 只显示 ODOM 主页面 ================= */

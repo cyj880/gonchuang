@@ -9,6 +9,7 @@
 #include "lunqu_imu.h"
 #include "uart8.h"
 #include "Buzzer.h"
+#include "rdk_center.h"
 
 /**
   * 四路 Emm_V5 步进闭环电机控制任务（CAN2，1Mbps）
@@ -766,6 +767,8 @@ static void pos_run_abort(void)
     debug_pause_active = 0;
     debug_pause_next = 0;
     debug_qr_scan_active = 0;
+    RDK_Center_Clear();
+    RDK_Center_Enable(0);
     debug_turn_pos_active = 0;
     leg1_next_valid = 0;
     phase = PHASE_IDLE;
@@ -1117,7 +1120,14 @@ static void debug_motion_done(void)
     else
     {
         if (debug_rules[debug_rule_index].to == RP_RAW)
+        {
             debug_first_raw_reached = 1;
+            RDK_Center_Clear();
+            RDK_Center_Enable(1);
+            RDK_Center_SendLocate(UART8_Color(debug_route_batch, 0),
+                                  UART8_Color(debug_route_batch, 1),
+                                  UART8_Color(debug_route_batch, 2));
+        }
         if (debug_leg_load())
         {
             if (debug_route_leg.station) debug_leg_start();
@@ -1138,6 +1148,8 @@ static void debug_route_start(uint8_t selection)
     debug_first_raw_reached = (uint8_t)(selection == 2);
     if (selection != 2) debug_qr_scan_done = 0;
     debug_qr_scan_active = 0;
+    RDK_Center_Clear();
+    RDK_Center_Enable(0);
     debug_qr_scan_dir = 1;
     debug_route_heading = 0;                         /*两启停区车头均朝下，出发yaw=0*/
     if (selection == 2 || debug_route_batch == 1) debug_pos_offset = 0;
@@ -1309,6 +1321,8 @@ void MotorTask(void *pvParameters)
     for (;;)
     {
         ZbeeCmd c;
+
+        RDK_Center_Poll();
 
         if (cmd_get(&c))
         {

@@ -1034,6 +1034,16 @@
               <FileType>5</FileType>
               <FilePath>.\Hardware\Encoder_RS485.h</FilePath>
             </File>
+            <File>
+              <FileName>rdk_center.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Hardware\rdk_center.c</FilePath>
+            </File>
+            <File>
+              <FileName>rdk_center.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Hardware\rdk_center.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
