@@ -629,6 +629,9 @@ static uint8_t      debug_pause_next = 0;   /*1下一点对/2转向后/3操作�
 static TickType_t   debug_pause_until = 0;
 static uint8_t      debug_qr_scan_active = 0;
 static uint8_t      debug_qr_scan_done = 0; /*成功后跳过后续找码；新一轮第一批重置*/
+static uint8_t      debug_rdk_center_active = 0;
+static uint8_t      debug_rdk_center_sent = 0;
+static TickType_t   debug_rdk_retry_tick = 0;
 static int8_t       debug_qr_scan_dir = 1;
 static uint16_t     debug_qr_scan_seq = 0;
 #define DEBUG_QR_SCAN_COUNTS 300000  /*到站后沿原方向低速找码，最多约458mm*/
@@ -767,6 +770,8 @@ static void pos_run_abort(void)
     debug_pause_active = 0;
     debug_pause_next = 0;
     debug_qr_scan_active = 0;
+    debug_rdk_center_active = 0;
+    debug_rdk_center_sent = 0;
     RDK_Center_Clear();
     RDK_Center_Enable(0);
     debug_turn_pos_active = 0;
@@ -1122,11 +1127,22 @@ static void debug_motion_done(void)
         if (debug_rules[debug_rule_index].to == RP_RAW)
         {
             debug_first_raw_reached = 1;
+            debug_rdk_center_active = 1;
+            debug_rdk_center_sent = 0;
+            debug_rdk_retry_tick = xTaskGetTickCount();
             RDK_Center_Clear();
             RDK_Center_Enable(1);
-            RDK_Center_SendLocate(UART8_Color(debug_route_batch, 0),
-                                  UART8_Color(debug_route_batch, 1),
-                                  UART8_Color(debug_route_batch, 2));
+            {
+                uint8_t c1 = UART8_Color(debug_route_batch, 0);
+                uint8_t c2 = UART8_Color(debug_route_batch, 1);
+                uint8_t c3 = UART8_Color(debug_route_batch, 2);
+                if (c1 >= 1 && c1 <= 6 && c2 >= 1 && c2 <= 6 && c3 >= 1 && c3 <= 6 &&
+                    c1 != c2 && c1 != c3 && c2 != c3)
+                {
+                    RDK_Center_SendLocate(c1, c2, c3);
+                    debug_rdk_center_sent = 1;
+                }
+            }
         }
         if (debug_leg_load())
         {
@@ -1148,6 +1164,8 @@ static void debug_route_start(uint8_t selection)
     debug_first_raw_reached = (uint8_t)(selection == 2);
     if (selection != 2) debug_qr_scan_done = 0;
     debug_qr_scan_active = 0;
+    debug_rdk_center_active = 0;
+    debug_rdk_center_sent = 0;
     RDK_Center_Clear();
     RDK_Center_Enable(0);
     debug_qr_scan_dir = 1;
@@ -1323,6 +1341,20 @@ void MotorTask(void *pvParameters)
         ZbeeCmd c;
 
         RDK_Center_Poll();
+        if (debug_rdk_center_active && !debug_rdk_center_sent &&
+            (xTaskGetTickCount() - debug_rdk_retry_tick) >= pdMS_TO_TICKS(1000))
+        {
+            uint8_t c1 = UART8_Color(debug_route_batch, 0);
+            uint8_t c2 = UART8_Color(debug_route_batch, 1);
+            uint8_t c3 = UART8_Color(debug_route_batch, 2);
+            if (c1 >= 1 && c1 <= 6 && c2 >= 1 && c2 <= 6 && c3 >= 1 && c3 <= 6 &&
+                c1 != c2 && c1 != c3 && c2 != c3)
+            {
+                RDK_Center_SendLocate(c1, c2, c3);
+                debug_rdk_center_sent = 1;
+            }
+            debug_rdk_retry_tick = xTaskGetTickCount();
+        }
 
         if (cmd_get(&c))
         {

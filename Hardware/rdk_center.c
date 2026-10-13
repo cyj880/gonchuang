@@ -1,21 +1,14 @@
 #include "rdk_center.h"
 
-#include "FreeRTOS.h"
-#include "task.h"
-
 #define RDK_HEAD       0x66u
 #define RDK_CMD_LOCATE 0x0Au
 #define RDK_CMD_CENTER 0x01u
 #define RDK_TAIL       0x77u
-#define RDK_RETRY_MS   1000u
 
 static volatile uint8_t  rdk_enabled;
 static volatile uint8_t  rdk_valid;
 static volatile uint16_t rdk_x;
 static volatile uint16_t rdk_y;
-static uint8_t locate_color[3];
-static uint8_t locate_pending;
-static TickType_t locate_last_tick;
 static uint8_t rx_state;
 static uint8_t rx_buf[7];
 static uint8_t rx_index;
@@ -88,12 +81,14 @@ void RDK_Center_IRQHandler(void)
             rx_buf[rx_index++] = byte;
             if (rx_index >= sizeof(rx_buf))
             {
-                if (rx_buf[6] == RDK_TAIL && rx_buf[2] <= 6 && rx_buf[3] <= 4 &&
-                    rx_buf[4] <= 6 && rx_buf[5] <= 4)
+                if (rx_buf[6] == RDK_TAIL && rx_buf[1] == RDK_CMD_CENTER)
                 {
                     rdk_x = (uint16_t)(((uint16_t)rx_buf[2] << 8) | rx_buf[3]);
                     rdk_y = (uint16_t)(((uint16_t)rx_buf[4] << 8) | rx_buf[5]);
-                    if (rdk_x < 640 && rdk_y < 480) rdk_valid = 1;
+                    if (rdk_x < 640 && rdk_y < 480)
+                    {
+                        rdk_valid = 1;
+                    }
                 }
                 rx_state = 0;
                 rx_index = 0;
@@ -120,19 +115,11 @@ void RDK_Center_Clear(void)
     rdk_valid = 0;
     rdk_x = 0;
     rdk_y = 0;
-    locate_pending = 0;
-    locate_last_tick = 0;
-    locate_color[0] = locate_color[1] = locate_color[2] = 0;
 }
 
 void RDK_Center_SendLocate(uint8_t c1, uint8_t c2, uint8_t c3)
 {
     uint8_t sum;
-    locate_pending = 1;
-    locate_last_tick = xTaskGetTickCount();
-    locate_color[0] = c1;
-    locate_color[1] = c2;
-    locate_color[2] = c3;
     if (!colors_valid(c1, c2, c3)) return;
     sum = (uint8_t)(RDK_CMD_LOCATE + c1 + c2 + c3);
     rdk_tx_byte(RDK_HEAD); rdk_tx_byte(RDK_CMD_LOCATE);
@@ -141,8 +128,6 @@ void RDK_Center_SendLocate(uint8_t c1, uint8_t c2, uint8_t c3)
 
 void RDK_Center_Poll(void)
 {
-    if (locate_pending && (xTaskGetTickCount() - locate_last_tick) >= pdMS_TO_TICKS(RDK_RETRY_MS))
-        RDK_Center_SendLocate(locate_color[0], locate_color[1], locate_color[2]);
 }
 
 uint8_t RDK_CenterValid(void) { return rdk_valid; }
