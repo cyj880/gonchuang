@@ -23,11 +23,16 @@ typedef struct
 static OdomCh        odom_ch;
 static OdomData_t    s_odom;
 static volatile uint8_t s_reset_req = 0;
+static volatile uint8_t s_encoder_read_enabled = 1;
+static volatile uint8_t s_encoder_read_busy = 0;
+static volatile uint8_t s_encoder_pause_ack = 0;
+static volatile uint32_t s_encoder_sequence = 0;
 
 /* 编码器轮询任务，yaw更新不依赖编码器在线状态。 */
 void OdomTask(void *pvParameters)
 {
     TickType_t last_tick = 0;
+    uint8_t read_claimed;
     (void)pvParameters;
 
     for (;;)
@@ -36,6 +41,20 @@ void OdomTask(void *pvParameters)
         taskENTER_CRITICAL();
         s_odom.yaw_deg = IMU_GetYaw();   /*按陀螺仪开关取当前源(轮趣/BNO085)*/
         taskEXIT_CRITICAL();
+
+        /*Claim a read atomically so pause can wait for any in-flight transaction.*/
+        taskENTER_CRITICAL();
+        read_claimed = s_encoder_read_enabled;
+        if (read_claimed)
+            s_encoder_read_busy = 1;
+        else
+            s_encoder_pause_ack = 1;
+        taskEXIT_CRITICAL();
+        if (!read_claimed)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
 
         /*原点复位请求在下次有效读数时生效*/
         if (s_reset_req)
@@ -63,21 +82,25 @@ void OdomTask(void *pvParameters)
                 int32_t d_cnt = pos - c->last;          /*有符号差值: 反转自然为负*/
                 float d_mm = (float)d_cnt * ODOM_MM_PER_COUNT;
 
-                if (!c->have) { d_cnt = 0; d_mm = 0.0f; c->have = 1; }
-                if (c->zero_pend) { d_cnt = 0; d_mm = 0.0f; c->zero_pend = 0; }
-
-                c->last = pos;
-                c->miss = 0;
-
                 taskENTER_CRITICAL();
-                s_odom.enc_pos[ODOM_POS_AXIS]  = pos;
-                c->cnt_acc          += d_cnt;
-                s_odom.dist_mm[ODOM_POS_AXIS] += (int32_t)d_mm;
-                s_odom.turns[ODOM_POS_AXIS]    = c->cnt_acc / (int32_t)ODOM_COUNTS_PER_REV;
-                s_odom.online[ODOM_POS_AXIS]   = 1;
-                if (dt_s > 0.001f) s_odom.speed_mm_s[ODOM_POS_AXIS] = d_mm / dt_s;
-                taskEXIT_CRITICAL();
+                if (s_encoder_read_enabled)
+                {
+                    if (!c->have) { d_cnt = 0; d_mm = 0.0f; c->have = 1; }
+                    if (c->zero_pend) { d_cnt = 0; d_mm = 0.0f; c->zero_pend = 0; }
 
+                    c->last = pos;
+                    c->miss = 0;
+                    s_odom.enc_pos[ODOM_POS_AXIS]  = pos;
+                    c->cnt_acc          += d_cnt;
+                    s_odom.dist_mm[ODOM_POS_AXIS] += (int32_t)d_mm;
+                    s_odom.turns[ODOM_POS_AXIS]    = c->cnt_acc / (int32_t)ODOM_COUNTS_PER_REV;
+                    s_odom.online[ODOM_POS_AXIS]   = 1;
+                    if (dt_s > 0.001f) s_odom.speed_mm_s[ODOM_POS_AXIS] = d_mm / dt_s;
+                    s_encoder_sequence++;
+                }
+                s_encoder_read_busy = 0;
+                if (!s_encoder_read_enabled) s_encoder_pause_ack = 1;
+                taskEXIT_CRITICAL();
                 last_tick = now;
             }
             else
@@ -89,6 +112,10 @@ void OdomTask(void *pvParameters)
                     s_odom.online[ODOM_POS_AXIS] = 0;
                     taskEXIT_CRITICAL();
                 }
+                taskENTER_CRITICAL();
+                s_encoder_read_busy = 0;
+                if (!s_encoder_read_enabled) s_encoder_pause_ack = 1;
+                taskEXIT_CRITICAL();
             }
         }
 
@@ -113,4 +140,39 @@ void odometry_get(OdomData_t *out)
 void odometry_reset(void)
 {
     s_reset_req = 1;
+}
+
+uint32_t odometry_pause_encoder_read(OdomData_t *snapshot)
+{
+    uint32_t sequence;
+    taskENTER_CRITICAL();
+    s_encoder_read_enabled = 0;
+    s_encoder_pause_ack = (uint8_t)!s_encoder_read_busy;
+    taskEXIT_CRITICAL();
+
+    while (!s_encoder_pause_ack)
+        vTaskDelay(pdMS_TO_TICKS(1));
+
+    taskENTER_CRITICAL();
+    if (snapshot != 0) *snapshot = s_odom;
+    sequence = s_encoder_sequence;
+    taskEXIT_CRITICAL();
+    return sequence;
+}
+
+void odometry_resume_encoder_read(void)
+{
+    taskENTER_CRITICAL();
+    s_encoder_read_enabled = 1;
+    s_encoder_pause_ack = 0;
+    taskEXIT_CRITICAL();
+}
+
+uint32_t odometry_encoder_sequence(void)
+{
+    uint32_t sequence;
+    taskENTER_CRITICAL();
+    sequence = s_encoder_sequence;
+    taskEXIT_CRITICAL();
+    return sequence;
 }

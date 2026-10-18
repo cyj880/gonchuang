@@ -10,7 +10,7 @@
   *   car_move()            -> 四轮速度直控（一次下发四轮）
   *   car_move_distance_x/y()-> 四轮位置模式 + Emm_V5_Synchronous_motion() 同步起步
   *
-  * 硬件：CAN2 —— PB12 = CAN2_RX、PB13 = CAN2_TX，500Kbps
+  * 硬件：CAN2 —— PB12 = CAN2_RX、PB13 = CAN2_TX，1Mbps
   *       初始化由 Hardware/board.c 的 board_init() 完成（main.c 中调用）
   *
   * 注意：本文件的所有发送都是阻塞式（can_SendCmd 内部等 TX 完成，最长约 20ms/帧），
@@ -75,6 +75,8 @@ void Motor_MovePulses(const int32_t pulse[MOTOR_NUM]);
 
 /* 立即停止四轮 */
 void Motor_Stop(void);
+/* 视觉靠近完成后，机械夹取完成时调用；当前仅预留接口，不触发机械动作。 */
+void Motor_RDK_GrabDone(void);
 
 /* 使能(true)/失能(false)四轮 */
 void Motor_Enable(bool state);

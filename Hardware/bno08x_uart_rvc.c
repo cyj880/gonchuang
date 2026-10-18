@@ -123,6 +123,7 @@ void USART6_IRQHandler(void)
                     bno08x_data.ax    = (rvc_buf[10] << 8) | rvc_buf[9];
                     bno08x_data.ay    = (rvc_buf[12] << 8) | rvc_buf[11];
                     bno08x_data.az    = (rvc_buf[14] << 8) | rvc_buf[13];
+                    IMU_NotifyUpdateFromISR();
                 }
                 rvc_state = 0;                   /*回找头态, 下一帧自动对齐*/
             }

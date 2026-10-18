@@ -2,6 +2,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include <math.h>
+#include <stdlib.h>
 #include "Emm_V5.h"
 #include "route_rx.h"
 #include "pid.h"
@@ -9,6 +10,7 @@
 #include "lunqu_imu.h"
 #include "uart8.h"
 #include "Buzzer.h"
+#include "rdk_center.h"
 
 /**
   * 四路 Emm_V5 步进闭环电机控制任务（CAN2，1Mbps）
@@ -290,6 +292,21 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define POS_APPROACH_RPM    12       /* 直行末段速度上限，缩短等待 */
 #define POS_QR_SLOW_RPM     5        /* 扫码搜索速度保持5RPM */
 
+/* 原料区视觉靠近：此阶段完全不使用里程计，只用实时圆心误差驱动ZDT速度模式。 */
+#define RDK_CENTER_TARGET_X      320
+#define RDK_CENTER_TARGET_Y      240
+#define RDK_CENTER_TOL_PX        10
+#define RDK_CENTER_KP_RPM_PX     0.35f
+#define RDK_CENTER_MIN_RPM       6
+#define RDK_CENTER_MAX_RPM       40
+#define RDK_CENTER_TIMEOUT_MS    60000u
+#define RDK_CENTER_RESUME_MS      1000u
+#define RDK_CENTER_STALE_MS      300u
+#define RDK_CENTER_X_SIGN        1       /*画面x误差 -> 车体vx，反向时改为-1*/
+#define RDK_CENTER_Y_SIGN        1       /*画面y误差 -> 车体vy，反向时改为-1*/
+#define RDK_CENTER_SLEW_RPM_S    180.0f  /*视觉速度每秒最大变化，防止突然推车*/
+#define RDK_CENTER_RAW_YAW       90.0f   /*原料区作业航向*/
+
 #define POS_OUT_MAX_RPM     160      /* 直线巡航位置PID输出限幅(RPM) */
 #define POS_START_RPM       10       /* 更柔和的直线起步速度上限(RPM) */
 #define POS_FINAL_RPM       4.0f    /*最后约12mm平滑降到4RPM，避免长时间爬行*/
@@ -297,8 +314,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define POS_DECEL_SLEW_RPM_S 80.0f  /*正常接近目标时限制减速斜率，避免轮速突降抖动*/
 #define POS_START_RAMP_MS   1200u     /* 延长起步平滑爬升，降低打滑 */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
-#define POS_PROGRESS_MS     1000u   /* 持续未向目标靠近时停车(反馈不变/方向错误) */
-#define POS_PROGRESS_COUNTS 1000.0f /* 每次确认进度需至少靠近约1.5mm */
+#define POS_PROGRESS_MS     3000u   /* 加重后允许较长时间低速建立运动，再判定无进度 */
+#define POS_PROGRESS_COUNTS 500.0f  /* 允许较小的有效反馈增量，避免低速被误判 */
 
 #define POS_PID_KP          0.0005f  /* 误差(编码值) -> RPM */
 #define POS_PID_KI          0.0003f
@@ -362,7 +379,11 @@ typedef enum
     PHASE_DONE = 3,
     PHASE_TURN = 4,
     PHASE_SLOW = 5,
-    PHASE_HOME = 7
+    PHASE_HOME = 7,
+    PHASE_RDK_CENTER = 8,
+    PHASE_RDK_RESUME = 9,
+    PHASE_RDK_GRAB_WAIT = 10,
+    PHASE_RDK_RETURN = 11
 } TaskPhase;
 
 /* 新任务可启动判定: 空闲 或 已完成停车。
@@ -599,6 +620,8 @@ static float        turn_yaw_last = 0.0f;
 static uint32_t     turn_timeout_ms = TURN_TIMEOUT_MS;
 static int          turn_w_last = 0;   /*转向限斜率基准*/
 static uint8_t      turn_settle_ticks = 0; /*到位停车稳定确认计数*/
+static uint32_t     turn_imu_start_sequence = 0;
+static uint8_t      turn_imu_updated = 0;
 static TickType_t   posrun_start = 0;  /*本步骤起始时刻*/
 static float        yaw_hold = 0.0f;   /*本步航向保持目标: 每步启动时刻的车头朝向(相对零点±180)*/
 static float        pos_initial_error = 0.0f;
@@ -628,15 +651,39 @@ static uint8_t      debug_pause_next = 0;   /*1下一点对/2转向后/3操作�
 static TickType_t   debug_pause_until = 0;
 static uint8_t      debug_qr_scan_active = 0;
 static uint8_t      debug_qr_scan_done = 0; /*成功后跳过后续找码；新一轮第一批重置*/
+static uint8_t      debug_rdk_center_active = 0;
+static uint8_t      debug_rdk_center_sent = 0;
+static TickType_t   debug_rdk_retry_tick = 0;
+static TickType_t   debug_rdk_center_start_tick = 0;
+static uint8_t       debug_rdk_center_settle_count = 0;
+static float         debug_rdk_center_yaw = 0.0f;
+static uint32_t      debug_rdk_center_last_seq = 0;
+static float         debug_rdk_center_vx = 0.0f;
+static float         debug_rdk_center_vy = 0.0f;
+static volatile uint8_t debug_rdk_pos_active = 0;
+static volatile int32_t debug_rdk_pos_hold = 0;
+static int32_t        debug_rdk_pos_raw = 0;
+static uint32_t       debug_rdk_pos_sequence = 0;
+static TickType_t     debug_rdk_resume_start_tick = 0;
+static uint8_t        debug_rdk_resume_action = 0; /*0中止,2no next,3回原pos*/
+static volatile uint8_t debug_rdk_grab_done = 0;
 static int8_t       debug_qr_scan_dir = 1;
 static uint16_t     debug_qr_scan_seq = 0;
 #define DEBUG_QR_SCAN_COUNTS 300000  /*到站后沿原方向低速找码，最多约458mm*/
 static void task_step_done(void);
 static void turn_run_start(float start_yaw, float delta, uint8_t accumulate);
+static uint8_t debug_leg_load(void);
+static void debug_leg_start(void);
+static void debug_rdk_center_return_done(void);
 
 uint8_t Motor_NoNext(void)
 {
     return no_next_alarm;
+}
+
+void Motor_RDK_GrabDone(void)
+{
+    debug_rdk_grab_done = 1;
 }
 
 typedef enum { POS_RUNNING, POS_REACHED, POS_FAILED } PosRunState;
@@ -758,6 +805,7 @@ static void debug_route_release(void)
 
 static void pos_run_abort(void)
 {
+    uint8_t resume_rdk_pos = debug_rdk_pos_active;
     array_mode = 0;
     debug_route_release();
     debug_route_active = 0;
@@ -766,9 +814,24 @@ static void pos_run_abort(void)
     debug_pause_active = 0;
     debug_pause_next = 0;
     debug_qr_scan_active = 0;
+    if (debug_rdk_center_active || debug_rdk_center_sent)
+        RDK_Center_SendIdle();
+    debug_rdk_center_active = 0;
+    debug_rdk_center_sent = 0;
+    debug_rdk_center_settle_count = 0;
+    debug_rdk_center_vx = 0.0f;
+    debug_rdk_center_vy = 0.0f;
+    if (debug_rdk_pos_active)
+    {
+        odometry_resume_encoder_read();
+        debug_rdk_resume_start_tick = xTaskGetTickCount();
+        debug_rdk_resume_action = 0;
+    }
+    RDK_Center_Clear();
+    RDK_Center_Enable(0);
     debug_turn_pos_active = 0;
     leg1_next_valid = 0;
-    phase = PHASE_IDLE;
+    phase = resume_rdk_pos ? PHASE_RDK_RESUME : PHASE_IDLE;
     Motor_Stop();
 }
 
@@ -803,7 +866,42 @@ static void debug_point_pause_start(uint8_t next_step, uint32_t duration_ms)
 static void debug_no_next_start(void)
 {
     no_next_alarm = 1;
+    if (debug_rdk_center_active || debug_rdk_pos_active)
+    {
+        Motor_Stop();
+        if (debug_rdk_center_active || debug_rdk_center_sent)
+            RDK_Center_SendIdle();
+        debug_rdk_center_active = 0;
+        debug_rdk_center_sent = 0;
+        debug_rdk_center_settle_count = 0;
+        debug_rdk_center_vx = 0.0f;
+        debug_rdk_center_vy = 0.0f;
+        RDK_Center_Clear();
+        RDK_Center_Enable(0);
+        if (debug_rdk_pos_active)
+        {
+            odometry_resume_encoder_read();
+            debug_rdk_resume_start_tick = xTaskGetTickCount();
+            debug_rdk_resume_action = 2;
+            phase = PHASE_RDK_RESUME;
+            debug_point_pause_start(0, 5000);
+            return;
+        }
+    }
     debug_point_pause_start(0, 5000);
+}
+
+static void debug_rdk_center_return_done(void)
+{
+    Motor_Stop();
+    debug_rdk_pos_active = 0;
+    if (debug_leg_load())
+    {
+        if (debug_route_leg.station) debug_leg_start();
+        else debug_point_pause_start(1, 500);
+    }
+    else
+        debug_no_next_start();
 }
 
 static void debug_qr_scan_found(void)
@@ -848,6 +946,202 @@ static void debug_qr_scan_start(void)
     phase = PHASE_SLOW;
 }
 
+static int rdk_center_axis_speed(float error)
+{
+    float speed = fabsf(error) * RDK_CENTER_KP_RPM_PX;
+    if (speed < (float)RDK_CENTER_MIN_RPM) speed = (float)RDK_CENTER_MIN_RPM;
+    if (speed > (float)RDK_CENTER_MAX_RPM) speed = (float)RDK_CENTER_MAX_RPM;
+    return (error >= 0.0f) ? (int)(speed + 0.5f) : -(int)(speed + 0.5f);
+}
+
+static float rdk_center_slew(float current, float target)
+{
+    float step = RDK_CENTER_SLEW_RPM_S * 0.01f;
+    if (target > current + step) return current + step;
+    if (target < current - step) return current - step;
+    return target;
+}
+
+static void debug_rdk_center_found(void)
+{
+    Motor_Stop();
+    RDK_Center_SendIdle();
+    RDK_Center_Clear();
+    RDK_Center_Enable(0);
+    debug_rdk_center_active = 0;
+    debug_rdk_center_sent = 0;
+    debug_rdk_center_settle_count = 0;
+    debug_rdk_center_vx = 0.0f;
+    debug_rdk_center_vy = 0.0f;
+    debug_rdk_grab_done = 0;
+    phase = PHASE_RDK_GRAB_WAIT;
+}
+
+static void debug_rdk_return_start(const OdomData_t *o)
+{
+    pos_target = debug_rdk_pos_raw;
+    pos_run_start(o->enc_pos[ODOM_POS_AXIS]);
+    yaw_hold = debug_rdk_center_yaw;
+    PID_Init(&PosPID);
+    PosPID.Kp = POS_PID_KP;  PosPID.Ki = POS_PID_KI;  PosPID.Kd = POS_PID_KD;
+    PosPID.ErrorIntMax = POS_ERR_INT_MAX;  PosPID.ErrorIntMin = -POS_ERR_INT_MAX;
+    PosPID.OutMax = POS_OUT_MAX_RPM;  PosPID.OutMin = -POS_OUT_MAX_RPM;
+    PID_Init(&YawPID);
+    line_yaw_reset();
+    YawPID.Kp = YAW_PID_KP;  YawPID.Ki = YAW_PID_KI;  YawPID.Kd = YAW_PID_KD;
+    YawPID.ErrorIntMax = YAW_ERR_INT_MAX;  YawPID.ErrorIntMin = -YAW_ERR_INT_MAX;
+    YawPID.OutMax = YAW_OUT_MAX_RPM;  YawPID.OutMin = -YAW_OUT_MAX_RPM;
+    phase = PHASE_RDK_RETURN;
+}
+
+static void debug_rdk_center_resume_run(void)
+{
+    OdomData_t o;
+    if (odometry_encoder_sequence() == debug_rdk_pos_sequence)
+    {
+        if ((xTaskGetTickCount() - debug_rdk_resume_start_tick) >=
+            pdMS_TO_TICKS(RDK_CENTER_RESUME_MS))
+        {
+            if (debug_rdk_resume_action == 3)
+            {
+                debug_rdk_resume_action = 2;
+                debug_no_next_start();
+            }
+            else if (debug_rdk_resume_action == 2)
+            {
+                debug_rdk_pos_active = 0;
+                debug_rdk_resume_action = 0;
+                phase = PHASE_DONE;
+            }
+            else
+            {
+                debug_rdk_pos_active = 0;
+                debug_rdk_resume_action = 0;
+                phase = PHASE_IDLE;
+            }
+        }
+        return;
+    }
+    odometry_get(&o);
+    if (debug_rdk_resume_action == 2)
+    {
+        debug_pos_offset += debug_rdk_pos_raw - o.enc_pos[ODOM_POS_AXIS];
+        debug_rdk_pos_active = 0;
+        debug_rdk_resume_action = 0;
+        debug_point_pause_start(0, 5000);
+        return;
+    }
+    if (debug_rdk_resume_action == 3)
+    {
+        debug_rdk_resume_action = 0;
+        debug_rdk_return_start(&o);
+    }
+    else
+    {
+        debug_rdk_pos_active = 0;
+        debug_rdk_resume_action = 0;
+        phase = (debug_route_active && no_next_alarm) ? PHASE_DONE : PHASE_IDLE;
+    }
+}
+
+static void debug_rdk_center_start(void)
+{
+    uint8_t c1 = UART8_Color(debug_route_batch, 0);
+    uint8_t c2 = UART8_Color(debug_route_batch, 1);
+    uint8_t c3 = UART8_Color(debug_route_batch, 2);
+
+    Motor_Stop();
+    RDK_Center_Clear();
+    RDK_Center_Enable(1);
+    debug_rdk_center_active = 1;
+    debug_rdk_center_sent = 0;
+    debug_rdk_retry_tick = xTaskGetTickCount();
+    debug_rdk_center_start_tick = debug_rdk_retry_tick;
+    debug_rdk_center_last_seq = RDK_CenterSequence();
+    debug_rdk_center_settle_count = 0;
+    debug_rdk_center_vx = 0.0f;
+    debug_rdk_center_vy = 0.0f;
+    {
+        OdomData_t o;
+        debug_rdk_pos_sequence = odometry_pause_encoder_read(&o);
+        debug_rdk_pos_raw = o.enc_pos[ODOM_POS_AXIS];
+        debug_rdk_pos_hold = debug_rdk_pos_raw + debug_pos_offset;
+        debug_rdk_pos_active = 1;
+    }
+    debug_rdk_center_yaw = yaw_abs360_to_signed(RDK_CENTER_RAW_YAW);
+    line_yaw_reset();
+    phase = PHASE_RDK_CENTER;
+    if (c1 >= 1 && c1 <= 6 && c2 >= 1 && c2 <= 6 && c3 >= 1 && c3 <= 6 &&
+        c1 != c2 && c1 != c3 && c2 != c3)
+    {
+        RDK_Center_SendLocate(c1, c2, c3);
+        debug_rdk_center_sent = 1;
+    }
+}
+
+static void debug_rdk_center_run(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    uint32_t age = RDK_CenterAgeMs();
+    uint32_t sequence;
+    int error_x, error_y;
+    int vx, vy, w, translation;
+    uint8_t in_tol;
+
+    if ((now - debug_rdk_center_start_tick) >= pdMS_TO_TICKS(RDK_CENTER_TIMEOUT_MS))
+    {
+        debug_no_next_start();
+        return;
+    }
+    if (!RDK_CenterValid() || age > RDK_CENTER_STALE_MS)
+    {
+        if (debug_rdk_center_vx != 0.0f || debug_rdk_center_vy != 0.0f)
+            Motor_Stop();
+        debug_rdk_center_vx = 0.0f;
+        debug_rdk_center_vy = 0.0f;
+        debug_rdk_center_settle_count = 0;
+        return;
+    }
+
+    error_x = (int)RDK_CenterX() - RDK_CENTER_TARGET_X;
+    error_y = (int)RDK_CenterY() - RDK_CENTER_TARGET_Y;
+    in_tol = (uint8_t)(abs(error_x) <= RDK_CENTER_TOL_PX &&
+                       abs(error_y) <= RDK_CENTER_TOL_PX);
+    sequence = RDK_CenterSequence();
+    if (sequence != debug_rdk_center_last_seq)
+    {
+        debug_rdk_center_last_seq = sequence;
+        if (in_tol)
+        {
+            if (++debug_rdk_center_settle_count >= 5)
+            {
+                debug_rdk_center_found();
+                return;
+            }
+        }
+        else
+            debug_rdk_center_settle_count = 0;
+    }
+    if (in_tol)
+    {
+        Motor_Stop();
+        debug_rdk_center_vx = 0.0f;
+        debug_rdk_center_vy = 0.0f;
+        return;
+    }
+
+    vx = rdk_center_axis_speed((float)(RDK_CENTER_X_SIGN * error_x));
+    vy = rdk_center_axis_speed((float)(RDK_CENTER_Y_SIGN * error_y));
+    if (abs(error_x) <= RDK_CENTER_TOL_PX) vx = 0;
+    if (abs(error_y) <= RDK_CENTER_TOL_PX) vy = 0;
+    debug_rdk_center_vx = rdk_center_slew(debug_rdk_center_vx, (float)vx);
+    debug_rdk_center_vy = rdk_center_slew(debug_rdk_center_vy, (float)vy);
+    translation = (int)fmaxf(fabsf(debug_rdk_center_vx), fabsf(debug_rdk_center_vy));
+    w = line_yaw_output(debug_rdk_center_yaw, translation > 0 ? translation : 1);
+    Motor_Move(line_rpm_round(debug_rdk_center_vx),
+               line_rpm_round(debug_rdk_center_vy), w);
+}
+
 static void debug_turn_start(float target_yaw)
 {
     if (debug_route_active)
@@ -860,6 +1154,20 @@ static void debug_turn_start(float target_yaw)
     }
     float now_yaw = IMU_GetYaw();
     turn_run_start(now_yaw, turn_angdiff(yaw_abs360_to_signed(target_yaw), now_yaw), 0);
+}
+
+static void debug_turn_relative_start(float delta, uint16_t planned_heading)
+{
+    if (debug_route_active)
+    {
+        OdomData_t o;
+        odometry_get(&o);
+        debug_turn_pos_raw = o.enc_pos[ODOM_POS_AXIS];
+        debug_turn_pos_hold = debug_turn_pos_raw + debug_pos_offset;
+        debug_turn_pos_active = 1;
+    }
+    debug_goal_heading = planned_heading;
+    turn_run_start(IMU_GetYaw(), delta, 0);
 }
 
 /*转弯结束后抵消里程计1在原地转向期间产生的计数。
@@ -1068,7 +1376,11 @@ static void debug_leg_start(void)
     if (debug_route_leg.station)
     {
         debug_route_step = 7;
-        if (debug_goal_heading != debug_route_heading ||
+        if ((debug_route_leg.action == CMD_ACT_CW || debug_route_leg.action == CMD_ACT_CCW) &&
+            debug_goal_heading != debug_route_heading)
+            debug_turn_relative_start((debug_route_leg.action == CMD_ACT_CW) ? 90.0f : -90.0f,
+                                      debug_goal_heading);
+        else if (debug_goal_heading != debug_route_heading ||
             fabsf(turn_angdiff(yaw_abs360_to_signed((float)debug_goal_heading),
                               IMU_GetYaw())) > TURN_TOL_DEG)
             debug_turn_start((float)debug_goal_heading);
@@ -1082,7 +1394,8 @@ static void debug_leg_start(void)
         (debug_route_leg.action == CMD_ACT_CW || debug_route_leg.action == CMD_ACT_CCW))
     {
         debug_route_step = 6;
-        debug_turn_start((float)debug_goal_heading);
+        debug_turn_relative_start((debug_route_leg.action == CMD_ACT_CW) ? 90.0f : -90.0f,
+                                  debug_goal_heading);
     }
     else
         debug_motion_start();
@@ -1117,7 +1430,11 @@ static void debug_motion_done(void)
     else
     {
         if (debug_rules[debug_rule_index].to == RP_RAW)
+        {
             debug_first_raw_reached = 1;
+            debug_rdk_center_start();
+            return; /*视觉闭环完成前不加载原料区后续路段。*/
+        }
         if (debug_leg_load())
         {
             if (debug_route_leg.station) debug_leg_start();
@@ -1138,6 +1455,14 @@ static void debug_route_start(uint8_t selection)
     debug_first_raw_reached = (uint8_t)(selection == 2);
     if (selection != 2) debug_qr_scan_done = 0;
     debug_qr_scan_active = 0;
+    RDK_Center_SendIdle();
+    debug_rdk_center_active = 0;
+    debug_rdk_center_sent = 0;
+    debug_rdk_center_settle_count = 0;
+    debug_rdk_center_vx = 0.0f;
+    debug_rdk_center_vy = 0.0f;
+    RDK_Center_Clear();
+    RDK_Center_Enable(0);
     debug_qr_scan_dir = 1;
     debug_route_heading = 0;                         /*两启停区车头均朝下，出发yaw=0*/
     if (selection == 2 || debug_route_batch == 1) debug_pos_offset = 0;
@@ -1163,6 +1488,8 @@ int32_t Motor_RoutePos(int32_t encoder_pos)
 {
     if (debug_turn_pos_active)
         return debug_turn_pos_hold;
+    if (debug_rdk_pos_active)
+        return debug_rdk_pos_hold;
     return encoder_pos + debug_pos_offset;
 }
 
@@ -1183,6 +1510,8 @@ static void turn_run_start(float start_yaw, float delta, uint8_t accumulate)
     TurnPID.OutMax = TURN_OUT_MAX_RPM;  TurnPID.OutMin = -TURN_OUT_MAX_RPM;
     turn_w_last = 0;
     turn_settle_ticks = 0;
+    turn_imu_start_sequence = IMU_UpdateSequence();
+    turn_imu_updated = 0;
     Motor_Enable(true);
     phase = PHASE_TURN;
 }
@@ -1309,6 +1638,22 @@ void MotorTask(void *pvParameters)
     for (;;)
     {
         ZbeeCmd c;
+
+        RDK_Center_Poll();
+        if (debug_rdk_center_active && !debug_rdk_center_sent &&
+            (xTaskGetTickCount() - debug_rdk_retry_tick) >= pdMS_TO_TICKS(1000))
+        {
+            uint8_t c1 = UART8_Color(debug_route_batch, 0);
+            uint8_t c2 = UART8_Color(debug_route_batch, 1);
+            uint8_t c3 = UART8_Color(debug_route_batch, 2);
+            if (c1 >= 1 && c1 <= 6 && c2 >= 1 && c2 <= 6 && c3 >= 1 && c3 <= 6 &&
+                c1 != c2 && c1 != c3 && c2 != c3)
+            {
+                RDK_Center_SendLocate(c1, c2, c3);
+                debug_rdk_center_sent = 1;
+            }
+            debug_rdk_retry_tick = xTaskGetTickCount();
+        }
 
         if (cmd_get(&c))
         {
@@ -1485,8 +1830,25 @@ void MotorTask(void *pvParameters)
                 debug_pause_active = 0;
                 debug_pause_next = 0;
                 debug_qr_scan_active = 0;
+                if (debug_rdk_center_active || debug_rdk_center_sent)
+                    RDK_Center_SendIdle();
+                debug_rdk_center_active = 0;
+                debug_rdk_center_sent = 0;
+                debug_rdk_center_settle_count = 0;
+                debug_rdk_center_vx = 0.0f;
+                debug_rdk_center_vy = 0.0f;
+                RDK_Center_Clear();
+                RDK_Center_Enable(0);
+                if (debug_rdk_pos_active)
+                {
+                    odometry_resume_encoder_read();
+                    debug_rdk_resume_start_tick = xTaskGetTickCount();
+                    debug_rdk_resume_action = 0;
+                    phase = PHASE_RDK_RESUME;
+                }
+                else
+                    phase = PHASE_IDLE;
                 debug_turn_pos_active = 0;
-                phase = PHASE_IDLE;
                 leg1_next_valid = 0;
                 turn_w_last = 0;
                 Motor_Stop();                              /* 中止: 立即停车 */
@@ -1547,8 +1909,71 @@ void MotorTask(void *pvParameters)
                     debug_route_release();
                     debug_route_active = 0;
                     debug_route_step = 0;
-                    phase = PHASE_DONE;
+                    phase = debug_rdk_pos_active ? PHASE_RDK_RESUME : PHASE_DONE;
                 }
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        /*---- 原料区视觉靠近：不读取里程计，只按RDK实时圆心做速度闭环 ----*/
+        if (phase == PHASE_RDK_CENTER)
+        {
+            debug_rdk_center_run();
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        if (phase == PHASE_RDK_GRAB_WAIT)
+        {
+            Motor_Stop();
+            if (debug_rdk_grab_done)
+            {
+                debug_rdk_grab_done = 0;
+                odometry_resume_encoder_read();
+                debug_rdk_resume_start_tick = xTaskGetTickCount();
+                debug_rdk_resume_action = 3;
+                phase = PHASE_RDK_RESUME;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        if (phase == PHASE_RDK_RESUME)
+        {
+            debug_rdk_center_resume_run();
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        if (phase == PHASE_RDK_RETURN)
+        {
+            OdomData_t o;
+            float err, aerr, out;
+            PosRunState state;
+            odometry_get(&o);
+            err = (float)pos_target - (float)o.enc_pos[ODOM_POS_AXIS];
+            aerr = fabsf(err);
+            state = pos_run_check(o.enc_pos[ODOM_POS_AXIS], o.online[ODOM_POS_AXIS]);
+            if (state == POS_REACHED)
+            {
+                if (!pos_finish_soft(o.enc_pos[ODOM_POS_AXIS]))
+                {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
+                debug_rdk_center_return_done();
+            }
+            else if (state == POS_FAILED)
+                pos_run_abort();
+            else
+            {
+                PosPID.Target = (float)pos_target;
+                PosPID.Actual = (float)o.enc_pos[ODOM_POS_AXIS];
+                PID_Update(&PosPID);
+                out = pos_speed_limit(PosPID.Out, aerr);
+                Motor_Move(0, (int)out,
+                           line_yaw_output(yaw_hold, (int)out));
             }
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
@@ -1649,6 +2074,9 @@ void MotorTask(void *pvParameters)
             float turn_min_rpm;
             float turn_speed_cap;
 
+            if (IMU_UpdateSequence() != turn_imu_start_sequence)
+                turn_imu_updated = 1;
+
             if (turn_accumulate)
             {
                 float current_yaw = IMU_GetYaw();
@@ -1702,7 +2130,7 @@ void MotorTask(void *pvParameters)
                 turn_w_last = 0;
                 pos_run_abort();                     /*所有转向区间均适用超时停车*/
             }
-            else if (aerr <= (float)TURN_TOL_DEG)
+            else if (turn_imu_updated && aerr <= (float)TURN_TOL_DEG)
             {
                 turn_w_last = 0;
                 if (turn_settle_ticks == 0)
