@@ -49,7 +49,7 @@
 #define MOTOR_TASK_AUTO_DEMO     0
 
 /* 路线扫码调试开关：0=原到站停鸣500ms后继续；1=启用缓行找码 */
-#define MOTOR_ROUTE_QR_SCAN_ENABLE 1
+#define MOTOR_ROUTE_QR_SCAN_ENABLE 0
 
 /* ==================== 对外接口 ==================== */
 
