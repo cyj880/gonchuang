@@ -9,9 +9,12 @@ void RDK_Center_IRQHandler(void);
 void RDK_Center_Enable(uint8_t enable);
 void RDK_Center_Clear(void);
 void RDK_Center_SendLocate(uint8_t c1, uint8_t c2, uint8_t c3);
+void RDK_Center_SendIdle(void);
 void RDK_Center_Poll(void);
 uint8_t RDK_CenterValid(void);
-uint16_t RDK_CenterX(void);
-uint16_t RDK_CenterY(void);
+int16_t RDK_CenterX(void);
+int16_t RDK_CenterY(void);
+uint32_t RDK_CenterAgeMs(void);
+uint32_t RDK_CenterSequence(void);
 
 #endif

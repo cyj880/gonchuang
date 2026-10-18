@@ -1,14 +1,19 @@
 #include "rdk_center.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 #define RDK_HEAD       0x66u
 #define RDK_CMD_LOCATE 0x0Au
 #define RDK_CMD_CENTER 0x01u
+#define RDK_CMD_IDLE   0x0Bu
 #define RDK_TAIL       0x77u
 
 static volatile uint8_t  rdk_enabled;
 static volatile uint8_t  rdk_valid;
-static volatile uint16_t rdk_x;
-static volatile uint16_t rdk_y;
+static volatile int16_t rdk_x;
+static volatile int16_t rdk_y;
+static volatile TickType_t rdk_last_tick;
+static volatile uint32_t rdk_sequence;
 static uint8_t rx_state;
 static uint8_t rx_buf[7];
 static uint8_t rx_index;
@@ -83,11 +88,18 @@ void RDK_Center_IRQHandler(void)
             {
                 if (rx_buf[6] == RDK_TAIL && rx_buf[1] == RDK_CMD_CENTER)
                 {
-                    rdk_x = (uint16_t)(((uint16_t)rx_buf[2] << 8) | rx_buf[3]);
-                    rdk_y = (uint16_t)(((uint16_t)rx_buf[4] << 8) | rx_buf[5]);
-                    if (rdk_x < 640 && rdk_y < 480)
+                    rdk_x = (int16_t)(((uint16_t)rx_buf[2] << 8) | rx_buf[3]);
+                    rdk_y = (int16_t)(((uint16_t)rx_buf[4] << 8) | rx_buf[5]);
+                    if (rdk_x >= 0 && rdk_x < 640 && rdk_y >= 0 && rdk_y < 480)
                     {
                         rdk_valid = 1;
+                        rdk_last_tick = xTaskGetTickCountFromISR();
+                        rdk_sequence++;
+                    }
+                    else
+                    {
+                        rdk_valid = 0;
+                        rdk_last_tick = 0;
                     }
                 }
                 rx_state = 0;
@@ -115,6 +127,8 @@ void RDK_Center_Clear(void)
     rdk_valid = 0;
     rdk_x = 0;
     rdk_y = 0;
+    rdk_last_tick = 0;
+    rdk_sequence = 0;
 }
 
 void RDK_Center_SendLocate(uint8_t c1, uint8_t c2, uint8_t c3)
@@ -126,13 +140,32 @@ void RDK_Center_SendLocate(uint8_t c1, uint8_t c2, uint8_t c3)
     rdk_tx_byte(c1); rdk_tx_byte(c2); rdk_tx_byte(c3); rdk_tx_byte(sum); rdk_tx_byte(RDK_TAIL);
 }
 
+/* 66 0B 00 0B 77: 通知RDK退出本次转盘定位并回到idle。 */
+void RDK_Center_SendIdle(void)
+{
+    rdk_tx_byte(RDK_HEAD);
+    rdk_tx_byte(RDK_CMD_IDLE);
+    rdk_tx_byte(0x00u);
+    rdk_tx_byte(RDK_CMD_IDLE);
+    rdk_tx_byte(RDK_TAIL);
+}
+
 void RDK_Center_Poll(void)
 {
 }
 
 uint8_t RDK_CenterValid(void) { return rdk_valid; }
-uint16_t RDK_CenterX(void) { return rdk_x; }
-uint16_t RDK_CenterY(void) { return rdk_y; }
+int16_t RDK_CenterX(void) { return rdk_x; }
+int16_t RDK_CenterY(void) { return rdk_y; }
+uint32_t RDK_CenterAgeMs(void)
+{
+    TickType_t now;
+    TickType_t last = rdk_last_tick;
+    if (!rdk_valid || last == 0) return 0xFFFFFFFFu;
+    now = xTaskGetTickCount();
+    return (uint32_t)((now - last) * 1000u / configTICK_RATE_HZ);
+}
+uint32_t RDK_CenterSequence(void) { return rdk_sequence; }
 
 void USART3_IRQHandler(void)
 {

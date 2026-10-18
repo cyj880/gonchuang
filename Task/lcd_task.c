@@ -66,7 +66,7 @@ static void lcd_odom_center_line(void)
 {
     LCD_SetColor(RDK_CenterValid() ? LCD_GREEN : LCD_LGRAY);
     if (RDK_CenterValid())
-        LCD_Printf(0, 122, LCD_6X8, "RDK C:%3u,%3u", (unsigned)RDK_CenterX(), (unsigned)RDK_CenterY());
+        LCD_Printf(0, 122, LCD_6X8, "RDK C:%4d,%4d", (int)RDK_CenterX(), (int)RDK_CenterY());
     else
         LCD_Printf(0, 122, LCD_6X8, "RDK C:--,--     ");
 }

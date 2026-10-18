@@ -37,6 +37,8 @@ void Lunq_RxByte(uint8_t b);      /* USART6中断里调用: 逐字节接收+帧�
 void Lunq_SetZero(void);          /* 重新记零点: 当前朝向=0°(key_task PB2调用) */
 float IMU_GetYaw(void);           /* 闭环统一入口: 相对零点±180(连续) */
 float IMU_GetYawAbs360(void);     /* LCD显示: 相对零点0~360 */
+void IMU_NotifyUpdateFromISR(void); /*有效陀螺仪帧到达时调用*/
+uint32_t IMU_UpdateSequence(void);  /*有效陀螺仪帧序号*/
 void IMU_SetZero(void);           /* PB2统一入口: 轮趣记零点, BNO085空操作 */
 
 #endif /* __LUNQU_IMU_H */
