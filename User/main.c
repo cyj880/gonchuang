@@ -95,7 +95,7 @@ int main(void)
     xTaskCreate(Servo_Task, "Servo", 256, NULL, 2, NULL);  /*优先级3(高于RS485忙等): 20ms拍不被调度抖动拉长*/ /* 270°转盘对位:15/135/255°三工位循环,每3s一步;去程三次缓动,255→15回程五次缓动(加速度连续) */
     /* RouteTask 已并入 LCD_Task（收帧回传 + 坐标/任务码两页轮显），不再单独创建 */
     xTaskCreate(KeyTask, "Key", 256, NULL, 2, NULL);   /* PB2按键：松开翻转红色LED */
-    xTaskCreate(MotorTask, "Motor", 1024, NULL, 3, NULL); /* 四轮 Emm_V5 电机（CAN2） */
+    xTaskCreate(MotorTask, "Motor", 1024, NULL, 2, NULL); /* 四轮 Emm_V5 电机（CAN2） */
     xTaskCreate(OdomTask, "Odom", 1024, NULL, 3, NULL);  /* RS485里程计1(站号1)，与Motor同为优先级3 */
     xTaskCreate(LCD_Task, "LCD", 1024, NULL, 1, NULL);    /* TFT-LCD 显示（SPI1+DMA） */
 //    xTaskCreate(UART8_ReportTask, "TLink", 256, NULL, 2, NULL); /* 摄像头链路：任务码一变就转发给显示屏，

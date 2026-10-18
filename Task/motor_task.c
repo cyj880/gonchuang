@@ -314,8 +314,8 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define POS_DECEL_SLEW_RPM_S 80.0f  /*正常接近目标时限制减速斜率，避免轮速突降抖动*/
 #define POS_START_RAMP_MS   1200u     /* 延长起步平滑爬升，降低打滑 */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
-#define POS_PROGRESS_MS     3000u   /* 加重后允许较长时间低速建立运动，再判定无进度 */
-#define POS_PROGRESS_COUNTS 500.0f  /* 允许较小的有效反馈增量，避免低速被误判 */
+#define POS_PROGRESS_MS     1000u   /* 持续未向目标靠近时停车(反馈不变/方向错误) */
+#define POS_PROGRESS_COUNTS 1000.0f /* 每次确认进度需至少靠近约1.5mm */
 
 #define POS_PID_KP          0.0005f  /* 误差(编码值) -> RPM */
 #define POS_PID_KI          0.0003f
@@ -620,8 +620,6 @@ static float        turn_yaw_last = 0.0f;
 static uint32_t     turn_timeout_ms = TURN_TIMEOUT_MS;
 static int          turn_w_last = 0;   /*转向限斜率基准*/
 static uint8_t      turn_settle_ticks = 0; /*到位停车稳定确认计数*/
-static uint32_t     turn_imu_start_sequence = 0;
-static uint8_t      turn_imu_updated = 0;
 static TickType_t   posrun_start = 0;  /*本步骤起始时刻*/
 static float        yaw_hold = 0.0f;   /*本步航向保持目标: 每步启动时刻的车头朝向(相对零点±180)*/
 static float        pos_initial_error = 0.0f;
@@ -1156,20 +1154,6 @@ static void debug_turn_start(float target_yaw)
     turn_run_start(now_yaw, turn_angdiff(yaw_abs360_to_signed(target_yaw), now_yaw), 0);
 }
 
-static void debug_turn_relative_start(float delta, uint16_t planned_heading)
-{
-    if (debug_route_active)
-    {
-        OdomData_t o;
-        odometry_get(&o);
-        debug_turn_pos_raw = o.enc_pos[ODOM_POS_AXIS];
-        debug_turn_pos_hold = debug_turn_pos_raw + debug_pos_offset;
-        debug_turn_pos_active = 1;
-    }
-    debug_goal_heading = planned_heading;
-    turn_run_start(IMU_GetYaw(), delta, 0);
-}
-
 /*转弯结束后抵消里程计1在原地转向期间产生的计数。
   编码器原始pos只读，路线坐标通过offset完成等效清零。*/
 static void debug_turn_pos_commit(void)
@@ -1376,11 +1360,7 @@ static void debug_leg_start(void)
     if (debug_route_leg.station)
     {
         debug_route_step = 7;
-        if ((debug_route_leg.action == CMD_ACT_CW || debug_route_leg.action == CMD_ACT_CCW) &&
-            debug_goal_heading != debug_route_heading)
-            debug_turn_relative_start((debug_route_leg.action == CMD_ACT_CW) ? 90.0f : -90.0f,
-                                      debug_goal_heading);
-        else if (debug_goal_heading != debug_route_heading ||
+        if (debug_goal_heading != debug_route_heading ||
             fabsf(turn_angdiff(yaw_abs360_to_signed((float)debug_goal_heading),
                               IMU_GetYaw())) > TURN_TOL_DEG)
             debug_turn_start((float)debug_goal_heading);
@@ -1394,8 +1374,7 @@ static void debug_leg_start(void)
         (debug_route_leg.action == CMD_ACT_CW || debug_route_leg.action == CMD_ACT_CCW))
     {
         debug_route_step = 6;
-        debug_turn_relative_start((debug_route_leg.action == CMD_ACT_CW) ? 90.0f : -90.0f,
-                                  debug_goal_heading);
+        debug_turn_start((float)debug_goal_heading);
     }
     else
         debug_motion_start();
@@ -1510,8 +1489,6 @@ static void turn_run_start(float start_yaw, float delta, uint8_t accumulate)
     TurnPID.OutMax = TURN_OUT_MAX_RPM;  TurnPID.OutMin = -TURN_OUT_MAX_RPM;
     turn_w_last = 0;
     turn_settle_ticks = 0;
-    turn_imu_start_sequence = IMU_UpdateSequence();
-    turn_imu_updated = 0;
     Motor_Enable(true);
     phase = PHASE_TURN;
 }
@@ -2074,9 +2051,6 @@ void MotorTask(void *pvParameters)
             float turn_min_rpm;
             float turn_speed_cap;
 
-            if (IMU_UpdateSequence() != turn_imu_start_sequence)
-                turn_imu_updated = 1;
-
             if (turn_accumulate)
             {
                 float current_yaw = IMU_GetYaw();
@@ -2130,7 +2104,7 @@ void MotorTask(void *pvParameters)
                 turn_w_last = 0;
                 pos_run_abort();                     /*所有转向区间均适用超时停车*/
             }
-            else if (turn_imu_updated && aerr <= (float)TURN_TOL_DEG)
+            else if (aerr <= (float)TURN_TOL_DEG)
             {
                 turn_w_last = 0;
                 if (turn_settle_ticks == 0)
