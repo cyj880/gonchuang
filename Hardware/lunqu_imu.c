@@ -27,7 +27,6 @@ LunquData_t lunqu_data;
 static float    lq_yaw_zero_deg = 0.0f;
 static uint8_t  lq_zero_done = 0;
 static float    lq_yaw_raw_deg = 0.0f;
-static volatile uint32_t imu_update_sequence = 0;
 
 /* ---- 例程同款缓冲与标志 ---- */
 static uint8_t Fd_data[64];
@@ -165,7 +164,6 @@ void Lunq_RxByte(uint8_t Usart_Receive)
                 }
                 lunqu_data.yaw       = LqNorm180(lq_yaw_raw_deg - lq_yaw_zero_deg);
                 lunqu_data.yaw_abs360 = LqNorm360(lq_yaw_raw_deg - lq_yaw_zero_deg);
-                IMU_NotifyUpdateFromISR();
             }
         }
         memset(Fd_data, 0, 64);
@@ -203,14 +201,4 @@ float IMU_GetYawAbs360(void)
     if (lunqu_RunFlag)  return LqNorm360_pub(lunqu_data.yaw);
     if (Bno085_RunFlag) return LqNorm360_pub(bno08x_data.yaw);
     return 0.0f;
-}
-
-void IMU_NotifyUpdateFromISR(void)
-{
-    imu_update_sequence++;
-}
-
-uint32_t IMU_UpdateSequence(void)
-{
-    return imu_update_sequence;
 }

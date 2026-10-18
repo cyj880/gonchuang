@@ -18,7 +18,6 @@
 #include "Encoder_RS485.h"
 #include "odom_task.h"
 #include "lunqu_imu.h"
-#include "rdk_center.h"
 
 
 /* ---- 陀螺仪选择开关: 两陀螺仪物理共用USART6/PG9, 同一时刻只插一个; 改后重新上电, 只能一个为1 ---- */
@@ -43,7 +42,7 @@ uint8_t lunqu_RunFlag  = 1;    /*1=轮趣FDI FDILink@921600*/
  *            任务码 UART8_GetCode()/UART8_Color()/UART8_Ring()/UART8_StackRing()/UART8_NewCode()
  *            链路   UART8_CamHasTarget()/UART8_CamFrames()
  *            上报   UART8_GrabOk()/UART8_PlaceOk()/UART8_LoadInc()/UART8_SetLoad()
-  *   4. 四轮电机   —— CAN2（PB12=RX/PB13=TX，1Mbps）驱动 4 路 Emm_V5 闭环步进，
+  *   4. 四轮电机   —— CAN2（PB12=RX/PB13=TX，500Kbps）驱动 4 路 Emm_V5 闭环步进，
   *          一次调用下发四轮速度并同步起步（Task/motor_task.c）
  *   5. TFT-LCD    —— 1.8寸 ST7735S（硬件SPI1+DMA2_Stream3，5.25MHz）：PB3=SCK / PA7=SDA /
  *          PB9=DC / PB0=RES / PA6=CS / PI2=BL（背光），驱动见 Hardware/LCD.c
@@ -52,7 +51,7 @@ uint8_t lunqu_RunFlag  = 1;    /*1=轮趣FDI FDILink@921600*/
  *          ★ main.c 必须调用 LCD_Init()（曾因该调用丢失导致"背光常亮+整屏纯白"）
  *   6. 编码器里程计 —— 欧艾迪 RS485 绝对值编码器（OID-R3806D-17S1S，17bit单圈，Modbus-RTU）：
  *          编码器 白(485A)/绿(485B) -> RS485收发模块 -> USART2（PD5=TX / PD6=RX，蓝牙口）；
- *          模块 DE+RE 短接 -> PA4（方向控制：高=发送，低=接收）。115200 轮询读"虚拟多圈位置"
+ *          模块 DE+RE 短接 -> PA4（方向控制：高=发送，低=接收）。9600 轮询读"虚拟多圈位置"
  *          （32位，掉电归零，无累计误差），Task/odom_task.c 解算里程；
  *          仅保留站号1里程计，不再轮询站号2；标定见 odom_task.c 顶部
   *
@@ -76,32 +75,31 @@ int main(void)
     Servo_Init();			/* 180°舵机: PA1(TIM5_CH2) */
     Servo270_Init();        /* 270°舵机: PA0(TIM5_CH1, 蓝排针丝印TIM2_CH1), 须在Servo_Init()后 */
 	LCD_Init();
-    board_init();           /* CAN2 初始化：PB12=RX / PB13=TX，1Mbps，供 4 路 Emm_V5 电机使用 */
+    board_init();           /* CAN2 初始化：PB12=RX / PB13=TX，500Kbps，供 4 路 Emm_V5 电机使用 */
     UART7_ZigBee_Init(115200); /* 上位机坐标串口：PE7=RX收坐标帧 / PE8=TX回传网页(命令字02帧)，收发双向 */   //ZigBee链路：接收电脑发送的坐标，并回传给网页端显示
     UART8_Init(115200);     /* 摄像头(PE0) + 任务码显示屏(PE1)，见 Hardware/uart8.c */
     UART8_LinkInit();       /* 摄像头帧解析 + 任务码解析 + 上报变量初始化 */
     if (lunqu_RunFlag)        Lunqu_Init(921600);   /*轮趣FDI惯导: PG9=RX, FDILink@921600*/
     else if (Bno085_RunFlag)  BNO08X_Init(115200);  /*BNO085: PG9=RX, RVC@115200*/
     route_rx_init();        /* UART7发送互斥锁: ACK帧(电机任务)与02回传帧(LCD任务)防交错 */
-    Encoder_RS485_Init();   /* RS485绝对值编码器: USART2(PD5=TX/PD6=RX) + PA4方向脚, Modbus轮询站号1 */                           
-    RDK_Center_Init(115200); /* RDK圆心链路: USART3(PD8=TX/PD9=RX) */
+    Encoder_RS485_Init();   /* RS485绝对值编码器: USART2(PD5=TX/PD6=RX) + PA4方向脚, Modbus轮询站号1 */
 
     /* 上电提示音：蜂鸣器（PH6, TIM12_CH1, 2700Hz）鸣叫1s后关闭。
        此处调度器尚未启动，SysTick 空闲，可安全使用阻塞式 Delay_ms */
     Delay_Init(168);        /* SYSCLK=168MHz，SysTick HCLK/8 计时 */
-	Buzzer_Init();                              
+	Buzzer_Init();
 
 //    xTaskCreate(LED_FlowTask, "LED_Flow", 256, NULL, 2, NULL);
     xTaskCreate(Servo_Task, "Servo", 256, NULL, 2, NULL);  /*优先级3(高于RS485忙等): 20ms拍不被调度抖动拉长*/ /* 270°转盘对位:15/135/255°三工位循环,每3s一步;去程三次缓动,255→15回程五次缓动(加速度连续) */
     /* RouteTask 已并入 LCD_Task（收帧回传 + 坐标/任务码两页轮显），不再单独创建 */
     xTaskCreate(KeyTask, "Key", 256, NULL, 2, NULL);   /* PB2按键：松开翻转红色LED */
-    xTaskCreate(MotorTask, "Motor", 1024, NULL, 3, NULL); /* 四轮 Emm_V5 电机（CAN2） */
+    xTaskCreate(MotorTask, "Motor", 512, NULL, 2, NULL); /* 四轮 Emm_V5 电机（CAN2） */
     xTaskCreate(OdomTask, "Odom", 1024, NULL, 3, NULL);  /* RS485里程计1(站号1)，与Motor同为优先级3 */
     xTaskCreate(LCD_Task, "LCD", 1024, NULL, 1, NULL);    /* TFT-LCD 显示（SPI1+DMA） */
-//    xTaskCreate(UART8_ReportTask, "TLink", 256, NULL, 2, NULL); /* 摄像头链路：任务码一变就转发给显示屏，
-//                                                                  搬运信息一变也转发（不做周期心跳）
-//                                                                  不需要自动转发可以不创建这个任务，
-//                                                                  改在需要的地方直接调 UART8_SendTaskCode()/UART8_SendStat() */
+    xTaskCreate(UART8_ReportTask, "TLink", 256, NULL, 2, NULL); /* 摄像头链路：任务码一变就转发给显示屏，
+                                                                  搬运信息一变也转发（不做周期心跳）
+                                                                  不需要自动转发可以不创建这个任务，
+                                                                  改在需要的地方直接调 UART8_SendTaskCode()/UART8_SendStat() */
 
     vTaskStartScheduler();
 

@@ -21,8 +21,5 @@ typedef struct
 void OdomTask(void *pvParameters);
 void odometry_get(OdomData_t *out); /*整包快照，临界区保护*/
 void odometry_reset(void);         /*里程原点复位，不修改原始编码值*/
-uint32_t odometry_pause_encoder_read(OdomData_t *snapshot); /*停读并原子保存位置*/
-void odometry_resume_encoder_read(void);
-uint32_t odometry_encoder_sequence(void);
 
 #endif /* __ODOM_TASK_H */
