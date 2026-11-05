@@ -7,6 +7,7 @@
 #include "motor_task.h"
 #include "lunqu_imu.h"
 #include "rdk_center.h"
+#include "ring_align.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -64,11 +65,87 @@ static void lcd_odom_cam_line(void)
 
 static void lcd_odom_center_line(void)
 {
+    RDK_CenterDiagnostics d;
+    RDK_Center_GetDiagnostics(&d);
     LCD_SetColor(RDK_CenterValid() ? LCD_GREEN : LCD_LGRAY);
-    if (RDK_CenterValid())
-        LCD_Printf(0, 122, LCD_6X8, "RDK C:%4d,%4d", (int)RDK_CenterX(), (int)RDK_CenterY());
+    if (RDK_Ring_Active())
+    {
+        RDK_RingResult result;
+        char line[22];
+        uint8_t i;
+        RDK_Ring_GetResult(&result);
+        LCD_Printf(0, 76, LCD_6X8, "%-21s", RingAlign_State());
+        {
+            int16_t before, after;
+            if (RingAlign_TestYaw(&before, &after))
+            {
+                LCD_Printf(0, 64, LCD_6X8, "Y:%+6d > %+6d    ", (int)before, (int)after);
+            }
+        }
+        LCD_SetColor(result.fresh ? LCD_GREEN : LCD_YELLOW);
+        if (!result.fresh)
+            snprintf(line, sizeof(line), "RING %s", result.sequence ? "STALE" : "WAIT");
+        else if (!result.count)
+            snprintf(line, sizeof(line), "R:0 NONE Y:--");
+        else if (!result.yaw_valid)
+            snprintf(line, sizeof(line), "R:%u Y:--", (unsigned)result.count);
+        else
+        {
+            int yaw = result.yaw_cdeg < 0 ? -(int)result.yaw_cdeg : result.yaw_cdeg;
+            snprintf(line, sizeof(line), "R:%u Y:%c%d.%02d", (unsigned)result.count,
+                     result.yaw_cdeg < 0 ? '-' : '+', yaw / 100, yaw % 100);
+        }
+        LCD_Printf(0, 86, LCD_6X8, "%-21s", line);
+        for (i = 0; i < 3; i++)
+        {
+            if (i < result.count)
+                snprintf(line, sizeof(line), "ID%u:%3u,%3u", (unsigned)result.points[i].id,
+                         (unsigned)result.points[i].x, (unsigned)result.points[i].y);
+            else
+                snprintf(line, sizeof(line), "R%u:--,--", (unsigned)i + 1);
+            LCD_Printf(0, 98 + 12 * i, LCD_6X8, "%-21s", line);
+        }
+    }
+    else if (RDK_Stack_Active())
+    {
+        /* 码垛对位页: 状态机阶段 + 0x14帧内容, 便于判断卡在哪一步 */
+        RDK_StackResult st;
+        char line[22];
+        RDK_Stack_GetResult(&st);
+        LCD_Printf(0, 76, LCD_6X8, "%-21s", RingAlign_State());
+        LCD_SetColor(st.fresh ? LCD_GREEN : LCD_YELLOW);
+        if (!st.fresh)
+            snprintf(line, sizeof(line), "STK %s", st.sequence ? "STALE" : "WAIT");
+        else if (!st.flags)
+            snprintf(line, sizeof(line), "STK FLAGS=0 SEEK"); /*RDK没看到工位*/
+        else
+        {
+            int yaw = st.yaw_cdeg < 0 ? -st.yaw_cdeg : st.yaw_cdeg;
+            snprintf(line, sizeof(line), "S:%3u,%3u Y:%c%d.%02d",
+                     (unsigned)st.x, (unsigned)st.y,
+                     st.yaw_cdeg < 0 ? '-' : '+', yaw / 100, yaw % 100);
+        }
+        LCD_Printf(0, 86, LCD_6X8, "%-21s", line);
+        {
+            uint8_t tap[8], i;
+            char hex[20];
+            RDK_Center_LastBytes(tap);
+            for (i = 0; i < 7u; i++)
+                snprintf(&hex[i * 2], sizeof(hex) - i * 2, "%02X", tap[i]);
+            LCD_Printf(0, 98, LCD_6X8, "RAW %-15s", hex);
+        }
+    }
+    else if (RDK_CenterValid())
+        LCD_Printf(0, 122, LCD_6X8, "RDK C:%4d,%4d      ", (int)RDK_CenterX(), (int)RDK_CenterY());
     else
-        LCD_Printf(0, 122, LCD_6X8, "RDK C:--,--     ");
+        LCD_Printf(0, 122, LCD_6X8, "RDK C:--,--          ");
+    LCD_SetColor(LCD_LGRAY);
+    LCD_Printf(0, 134, LCD_6X8, "B:%05lu F:%05lu      ",
+               (unsigned long)(d.rx_bytes % 100000u),
+               (unsigned long)(d.valid_frames % 100000u));
+    LCD_Printf(0, 146, LCD_6X8, "G:%u E:%04lu O:%04lu  ",
+               (unsigned)d.enabled, (unsigned long)(d.errors % 10000u),
+               (unsigned long)(d.overruns % 10000u));
 }
 
 static void lcd_draw_odom(void)
@@ -96,9 +173,13 @@ static void lcd_draw_odom(void)
     LCD_SetColor(LCD_WHITE);
     LCD_Printf(0, 76, LCD_6X8, "yaw %-6d", (int)IMU_GetYawAbs360());   /*0~360, 零点=上电/按PB2*/
 
-    lcd_odom_cam_line();            /*MaixCam 坐标*/
-    LCD_SetColor(LCD_WHITE);
-    LCD_Printf(0, 110, LCD_6X8, "pos:%-11ld", (long)Motor_RoutePos(o.enc_pos[ODOM_POS_AXIS]));
+    if (!RDK_Ring_Active())
+    {
+        LCD_Printf(0, 86, LCD_6X8, "                     ");
+        lcd_odom_cam_line();
+        LCD_SetColor(LCD_WHITE);
+        LCD_Printf(0, 110, LCD_6X8, "pos:%-17ld", (long)Motor_RoutePos(o.enc_pos[ODOM_POS_AXIS]));
+    }
     lcd_odom_center_line();
 }
 
@@ -119,9 +200,13 @@ static void lcd_update_odom(void)
     LCD_Printf(0, 52, LCD_6X8, "E1:%-3s", o.online[0] ? "ON" : "OFF");
     lcd_odom_cmd_line();
     LCD_Printf(0, 76, LCD_6X8, "yaw %-6d", (int)IMU_GetYawAbs360());   /*0~360, 零点=上电/按PB2*/
-    lcd_odom_cam_line();            /*MaixCam 坐标*/
-    LCD_SetColor(LCD_WHITE);
-    LCD_Printf(0, 110, LCD_6X8, "pos:%-11ld", (long)Motor_RoutePos(o.enc_pos[ODOM_POS_AXIS]));
+    if (!RDK_Ring_Active())
+    {
+        LCD_Printf(0, 86, LCD_6X8, "                     ");
+        lcd_odom_cam_line();
+        LCD_SetColor(LCD_WHITE);
+        LCD_Printf(0, 110, LCD_6X8, "pos:%-17ld", (long)Motor_RoutePos(o.enc_pos[ODOM_POS_AXIS]));
+    }
     lcd_odom_center_line();
 }
 

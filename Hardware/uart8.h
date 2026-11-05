@@ -27,7 +27,8 @@
   *   组3 = 第二批三件物料的颜色与搬运顺序
   *   组4 = 第二批物料在粗加工区的圆环号
   *   第二批在暂存区只能码垛在同色的第一批物料上
-  *   颜色编号：红1 黄2 蓝3 绿4 黑5 浅蓝6；环号 1~6
+  *   颜色编号：红1 黄2 蓝3 绿4 黑5 浅蓝6；放置位置1~3（非六级评分环）
+  *   解析层仍接受全部数字1~6；站点放料入口另校验本批环号为1/2/3排列、三色互异
   *   ★ 从二维码内容里只取数字，集满 12 位即算一帧，分隔符无所谓
   *     （'+'、空格、逗号，甚至完全没有分隔符都能解析）
   *
@@ -74,6 +75,7 @@ void UART8_SendString(const char *str);
 /* ---------------- 初始化与接收 ---------------- */
 void     UART8_LinkInit(void);           /* 解析器与统计清零，初始化后调一次 */
 void     UART8_RxByte(uint8_t ch);       /* ★ UART8 接收中断里逐字节调用 */
+uint8_t  UART8_InjectTask(const uint8_t *digits); /* 网页0x1B注入12位任务码('1'~'6'), 1=合法并发布 */
 
 /* ---------------- 任务码查询 ---------------- */
 uint8_t  UART8_Valid(void);
@@ -87,6 +89,16 @@ uint8_t  UART8_Ring(uint8_t batch, uint8_t idx);          /* 粗加工区环号 
 uint8_t  UART8_StoreRing(uint8_t idx);                    /* 第一批暂存区环号（与粗加工区同环号） */
 int8_t   UART8_StackRing(uint8_t idx);                    /* 第二批第 idx 件码垛到哪个环；-1 = 没同色底座 */
 const char* UART8_ColorName(uint8_t color);               /* "RED"/"YEL"/"BLU"/"GRN"/"BLK"/"LBL" */
+
+/* ---- 物料顺序链(第k次夹取, k=0基) ----
+ *   夹取颜色 color[批][k] → 车上槽位 k(A/B/C) → 粗加工区环号 ring[批][k]
+ *   → 第一轮暂存区同环号(ring[批][k]) → 第二批码垛环 = 同色第一批环号(StackRing)
+ * 车上槽位的取放点(270°舵机角): A=0°, B=120°, C=240°;
+ * 原料区每块入槽后舵机转120/240/0°，将下一空槽送到取放点（本次机械位置减30°）。 */
+const char* UART8_SlotName(uint8_t pick);                 /* pick 0~2 -> "A"/"B"/"C" */
+/* 环号反查: 返回本批放在该环的块序号(=车上槽位0~2), 0xFF=本批没有块放这个环。
+   用于按机构实际可达顺序放环时, 算出每次该取哪个槽/什么颜色。 */
+uint8_t UART8_PickOfRing(uint8_t batch, uint8_t ring);    /* batch 1~2, ring 1~6 */
 
 /* ---------------- 摄像头链路状态（画面里有没有码） ---------------- */
 uint8_t  UART8_CamHasTarget(void);       /* 1 = 300ms 内收到过有效帧(画面里有码) */

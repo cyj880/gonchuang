@@ -11,3 +11,5 @@ build_check.log
 # Keil 个人视图缓存
 *.uvguix.*
 *.bak
+*.bak_*
+*.log

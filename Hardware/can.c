@@ -1,4 +1,6 @@
 #include "can.h"
+#include "lift_zdt.h"
+#include "belt_zdt.h"
 
 /**********************************************************
 ***	ZDT_X57步进闭环控制例程
@@ -23,6 +25,8 @@ void CAN2_RX0_IRQHandler(void)
 	
 	// 一帧数据接收完成，置位帧标志位
 	can.rxFrameFlag = true;
+	Lift_ZDT_OnCanRx(&can.CAN_RxMsg);
+	Belt_ZDT_OnCanRx(&can.CAN_RxMsg);
 }
 
 /**

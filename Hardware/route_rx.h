@@ -87,6 +87,17 @@
 #define CMD_RUNALL       0x12    /* 上位机 -> 车端：一键执行任务步骤数组 */
 #define CMD_DEBUG_RUN    0x13    /* 上位机 -> 车端：启动已上传的调试路线 */
 /*13帧: AA 55 | 13 | SELECT | SUM | 0D 0A；1第一批/2第二批/3两批连续*/
+#define CMD_RDK_CENTER   0x14    /* UART7: AA 55 14 X Y SUM 0D 0A，X/Y=01/00/FF */
+#define CMD_RING_ALIGN   0x15    /* UART7: AA55 15 OP VALUE SUM 0D0A */
+#define CMD_ARM_ANGLE    0x16    /* UART7: AA55 16 ANGLE_L ANGLE_H SUM 0D0A */
+#define CMD_LIFT_POS     0x17    /* UART7: AA55 17 P0 P1 P2 P3 SUM 0D0A，uint32小端 */
+#define CMD_SERVO_ANGLE  0x18    /* UART7: AA55 18 A1L A1H A2L A2H SUM 0D0A，两个uint16小端 */
+#define CMD_BELT_POS     0x19    /* UART7: AA55 19 P0 P1 P2 P3 SUM 0D0A，0~10000，0上电/1400抓取/7050中心 */
+#define CMD_GRAB_SEQ     0x1A    /* UART7: AA55 1A M SUM 0D0A，M:00=按当前序号自动 01~03=固定第几块 */
+#define CMD_TASK_INJECT  0x1B    /* UART7: AA55 1B D0..D5 SUM 0D0A，12位任务码压缩6字节(D_i=digit[2i]<<4|digit[2i+1], 每半字节1~6) */
+#define CMD_STACK_ALIGN  0x1D    /* UART7: AA55 1D SUM 0D0A, 启动码垛对位(0x14单中心点闭环) */
+#define CMD_PLACE_SEQ    0x1C    /* UART7: AA55 1C S SUM 0D0A，1首轮粗加工/2次轮粗加工/3首轮暂存/4次轮暂存，直接放三块 */
+/* 14调试帧方向：1正向、0禁用、-1反向，至少启用一轴；短帧AA 55 14 14 0D 0A使用默认方向。 */
 
 
 /* ---- 动作指令帧(上位机 -> 车端, 7字节): AA 55 | 04 | BATCH | CODE | SUM | 0D 0A ----

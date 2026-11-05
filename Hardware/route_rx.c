@@ -1,8 +1,11 @@
-#include "route_rx.h"
+﻿#include "route_rx.h"
 #include "uart7.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
+#include "arm_m2006.h"
+#include "lift_zdt.h"
+#include "belt_zdt.h"
 
 /* ================= 帧接收状态机（串口中断里逐字节喂入） =================
    路线段帧：AA 55 | 01/03 | BATCH | N | X1L X1H Y1L Y1H | ... | SUM | 0D 0A
@@ -154,7 +157,17 @@ void route_rx_byte(uint8_t ch)
         else if (ch == CMD_PULSE)  { rx_p_idx = 0; rx_p_len = 5; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_GO) { rx_p_idx = 0; rx_p_len = 5; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_ADV) { rx_p_idx = 0; rx_p_len = 8; rx_state = RX_P_DATA; }
-        else if (ch == CMD_POS_ABORT || ch == CMD_RUNALL) rx_state = RX_SUM;   /*无载荷, 累加和=命令字本身*/
+        else if (ch == CMD_RDK_CENTER) { rx_p_idx = 0; rx_p_len = 2; rx_state = RX_P_DATA; }
+        else if (ch == CMD_RING_ALIGN) { rx_p_idx = 0; rx_p_len = 2; rx_state = RX_P_DATA; }
+        else if (ch == CMD_ARM_ANGLE) { rx_p_idx = 0; rx_p_len = 2; rx_state = RX_P_DATA; }
+        else if (ch == CMD_LIFT_POS) { rx_p_idx = 0; rx_p_len = 4; rx_state = RX_P_DATA; }
+        else if (ch == CMD_SERVO_ANGLE) { rx_p_idx = 0; rx_p_len = 4; rx_state = RX_P_DATA; }
+        else if (ch == CMD_BELT_POS) { rx_p_idx = 0; rx_p_len = 4; rx_state = RX_P_DATA; }
+        else if (ch == CMD_GRAB_SEQ) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
+        else if (ch == CMD_TASK_INJECT) { rx_p_idx = 0; rx_p_len = 6; rx_state = RX_P_DATA; }
+        else if (ch == CMD_PLACE_SEQ) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
+        else if (ch == CMD_POS_ABORT || ch == CMD_RUNALL || ch == CMD_STACK_ALIGN)
+            rx_state = RX_SUM;                     /*无载荷, 累加和=命令字本身*/
         else if (ch == CMD_DEBUG_RUN) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_CHAIN)  { rx_p_idx = 0; rx_p_len = 9; rx_state = RX_P_DATA; }
         else                       rx_state = RX_H1;
@@ -190,6 +203,50 @@ void route_rx_byte(uint8_t ch)
 
     /* 03/05帧载荷: 字节0(方向/子命令) + 4字节参数(小端) 共5字节, 字节0合法性即时校验 */
     case RX_P_DATA:
+        if (rx_cmd == CMD_LIFT_POS || rx_cmd == CMD_SERVO_ANGLE ||
+            rx_cmd == CMD_BELT_POS)
+        {
+            rx_p_bytes[rx_p_idx++] = ch;
+            rx_sum_calc += ch;
+            if (rx_p_idx == 4) rx_state = RX_SUM;
+            break;
+        }
+        if (rx_cmd == CMD_ARM_ANGLE)
+        {
+            rx_p_bytes[rx_p_idx++] = ch;
+            rx_sum_calc += ch;
+            if (rx_p_idx == 2) rx_state = RX_SUM;
+            break;
+        }
+        if (rx_cmd == CMD_RING_ALIGN)
+        {
+            if ((rx_p_idx == 0 && ch > 4) ||
+                (rx_p_idx == 1 && ch != 0 && ch != 1 && ch != 0xFF))
+            { rx_state = RX_H1; break; }
+            rx_p_bytes[rx_p_idx++] = ch;
+            rx_sum_calc += ch;
+            if (rx_p_idx == 2) rx_state = RX_SUM;
+            break;
+        }
+        if (rx_cmd == CMD_RDK_CENTER)
+        {
+            /* 短帧的首字节为校验和14，不与合法方向00/01/FF冲突。 */
+            if (rx_p_idx == 0 && ch == CMD_RDK_CENTER)
+            {
+                rx_p_len = 0;
+                rx_state = RX_T1;
+                break;
+            }
+            if (ch != 0 && ch != 1 && ch != 0xFF)
+            {
+                rx_state = RX_H1;
+                break;
+            }
+            rx_p_bytes[rx_p_idx++] = ch;
+            rx_sum_calc += ch;
+            if (rx_p_idx >= rx_p_len) rx_state = RX_SUM;
+            break;
+        }
         if (rx_p_idx == 0)
         {
             uint8_t bmax = 0;
@@ -197,10 +254,14 @@ void route_rx_byte(uint8_t ch)
             else if (rx_cmd == CMD_POS_GO) bmax = 7;              /*子命令 0=直线 1=右前45° 2=左转 3=右转 4=左前45° 5=缓行扫码 6=二维码校准 7=回右上角*/
             else if (rx_cmd == CMD_POS_ADV) bmax = 5;              /*0直线/1右前/2绝对yaw/3左转/4右转/5右后*/
             else if (rx_cmd == CMD_DEBUG_RUN) bmax = 3;            /*1批次1/2批次2/3两批连续*/
+            else if (rx_cmd == CMD_GRAB_SEQ) bmax = 3;             /*0=按当前序号 1~3=固定第几块*/
+            else if (rx_cmd == CMD_PLACE_SEQ) bmax = 4;            /*1首轮粗加工/2次轮粗加工/3首轮暂存/4次轮暂存*/
+            else if (rx_cmd == CMD_TASK_INJECT) bmax = 0xFF;       /*任务码压缩字节, 半字节校验在应用层*/
             else if (rx_cmd == CMD_CHAIN)  bmax = 4;              /*方向: 仅1=右前 4=左前合法(见下)*/
             else { rx_state = RX_H1; break; }
             if (rx_cmd == CMD_CHAIN && ch != 1 && ch != 4) { rx_state = RX_H1; break; }
-            if (rx_cmd == CMD_DEBUG_RUN && ch < 1) { rx_state = RX_H1; break; }
+            if ((rx_cmd == CMD_DEBUG_RUN || rx_cmd == CMD_PLACE_SEQ) && ch < 1)
+            { rx_state = RX_H1; break; }
             if (ch > bmax) { rx_state = RX_H1; break; }
             rx_p_dir = ch;                 /*复用: 03存方向, 05存子命令*/
         }
@@ -222,7 +283,11 @@ void route_rx_byte(uint8_t ch)
         {
             if (rx_cmd == CMD_PULSE || rx_cmd == CMD_POS_GO || rx_cmd == CMD_POS_ADV ||
                 rx_cmd == CMD_CHAIN || rx_cmd == CMD_POS_ABORT || rx_cmd == CMD_RUNALL ||
-                rx_cmd == CMD_DEBUG_RUN)
+                rx_cmd == CMD_STACK_ALIGN ||
+                rx_cmd == CMD_DEBUG_RUN || rx_cmd == CMD_RDK_CENTER || rx_cmd == CMD_RING_ALIGN ||
+                rx_cmd == CMD_ARM_ANGLE || rx_cmd == CMD_LIFT_POS ||
+                rx_cmd == CMD_SERVO_ANGLE || rx_cmd == CMD_BELT_POS ||
+                rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_TASK_INJECT || rx_cmd == CMD_PLACE_SEQ)
             {
                 /* 位置命令在帧尾通过后再提交（见 RX_T2） */
                 rx_state = RX_T1;
@@ -274,6 +339,26 @@ void route_rx_byte(uint8_t ch)
                     g_cmd.ready  = 1;                    /*最后置位, MotorTask取走*/
                 }
             }
+            else if (rx_cmd == CMD_BELT_POS)
+            {
+                /* P=绝对坐标0~10000：上电位0、抓取1400、中心7050。 */
+                int32_t sv = (int32_t)((uint32_t)rx_p_bytes[0] |
+                               ((uint32_t)rx_p_bytes[1] << 8) |
+                               ((uint32_t)rx_p_bytes[2] << 16) |
+                               ((uint32_t)rx_p_bytes[3] << 24));
+                if (sv >= 0 && sv <= (int32_t)BELT_POS_MAX_PUL)
+                {
+                    g_cmd.type = CMD_BELT_POS;
+                    g_cmd.param = (uint32_t)sv;          /*uint32对齐写, 原子*/
+                    g_cmd.dir = 0;
+                    g_cmd.sub = 0;
+                    g_cmd.flags = 0;
+                    g_cmd.param2 = 0;
+                    g_cmd.yaw_target = 0;
+                    if (g_cmd.cnt < 255) g_cmd.cnt++;
+                    g_cmd.ready = 1;                     /*最后置位, MotorTask取走*/
+                }
+            }
             else if (rx_cmd == CMD_POS_GO)
             {
                 g_cmd.type   = CMD_POS_GO;
@@ -313,6 +398,12 @@ void route_rx_byte(uint8_t ch)
             else if (rx_cmd == CMD_POS_ABORT)
             {
                 g_cmd.type   = CMD_POS_ABORT;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready  = 1;
+            }
+            else if (rx_cmd == CMD_STACK_ALIGN)
+            {
+                g_cmd.type   = CMD_STACK_ALIGN;
                 if (g_cmd.cnt < 255) g_cmd.cnt++;
                 g_cmd.ready  = 1;
             }
@@ -398,6 +489,112 @@ void route_rx_byte(uint8_t ch)
                 g_cmd.flags  = 0;
                 if (g_cmd.cnt < 255) g_cmd.cnt++;
                 g_cmd.ready  = 1;
+            }
+            else if (rx_cmd == CMD_ARM_ANGLE)
+            {
+                int16_t degrees = (int16_t)((uint16_t)rx_p_bytes[0] |
+                                             ((uint16_t)rx_p_bytes[1] << 8));
+                if (degrees < ARM_M2006_MIN_TARGET_DEG || degrees > ARM_M2006_MAX_TARGET_DEG)
+                { rx_state = RX_H1; break; }
+                g_cmd.type = CMD_ARM_ANGLE;
+                g_cmd.param = (uint32_t)(int32_t)degrees;
+                g_cmd.dir = g_cmd.sub = g_cmd.flags = 0;
+                g_cmd.param2 = 0;
+                g_cmd.yaw_target = 0;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready = 1;
+            }
+            else if (rx_cmd == CMD_RING_ALIGN)
+            {
+                uint8_t op = rx_p_bytes[0], value = rx_p_bytes[1];
+                if ((op == 0 && value != 0) || ((op == 1 || op == 3) && value == 0) || (op == 4 && value != 0))
+                { rx_state = RX_H1; break; }
+                g_cmd.type = CMD_RING_ALIGN;
+                g_cmd.sub = op;
+                g_cmd.dir = value;
+                g_cmd.flags = 0;
+                g_cmd.param = g_cmd.param2 = 0;
+                g_cmd.yaw_target = 0;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready = 1;
+            }
+            else if (rx_cmd == CMD_SERVO_ANGLE)
+            {
+                uint16_t a180 = (uint16_t)(rx_p_bytes[0] |
+                                ((uint16_t)rx_p_bytes[1] << 8));
+                uint16_t a270 = (uint16_t)(rx_p_bytes[2] |
+                                ((uint16_t)rx_p_bytes[3] << 8));
+                if (a180 > 180u || a270 > 270u)
+                { rx_state = RX_H1; break; }
+                g_cmd.type = CMD_SERVO_ANGLE;
+                g_cmd.param = a180;             /*180°舵机角度*/
+                g_cmd.param2 = a270;            /*270°舵机角度*/
+                g_cmd.dir = g_cmd.sub = g_cmd.flags = 0;
+                g_cmd.yaw_target = 0;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready = 1;
+            }
+            else if (rx_cmd == CMD_LIFT_POS)
+            {
+                uint32_t pul = (uint32_t)rx_p_bytes[0] |
+                               ((uint32_t)rx_p_bytes[1] << 8) |
+                               ((uint32_t)rx_p_bytes[2] << 16) |
+                               ((uint32_t)rx_p_bytes[3] << 24);
+                if (pul > LIFT_POS_MAX_PUL)
+                { rx_state = RX_H1; break; }
+                g_cmd.type = CMD_LIFT_POS;
+                g_cmd.param = pul;
+                g_cmd.dir = g_cmd.sub = g_cmd.flags = 0;
+                g_cmd.param2 = 0;
+                g_cmd.yaw_target = 0;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready = 1;
+            }
+            else if (rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_PLACE_SEQ)
+            {
+                g_cmd.type = rx_cmd;
+                g_cmd.param = rx_p_dir;                  /*1A块序选择 / 1C站点选择*/
+                g_cmd.dir = 0;
+                g_cmd.sub = 0;
+                g_cmd.flags = 0;
+                g_cmd.param2 = 0;
+                g_cmd.yaw_target = 0;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready = 1;
+            }
+            else if (rx_cmd == CMD_TASK_INJECT)
+            {
+                g_cmd.type = CMD_TASK_INJECT;
+                /* 通用载荷接收将首字节放rx_p_dir，其余5字节放rx_p_bytes[0..4]。 */
+                g_cmd.param = ((uint32_t)rx_p_dir << 24) |
+                              ((uint32_t)rx_p_bytes[0] << 16) |
+                              ((uint32_t)rx_p_bytes[1] << 8)  |
+                              (uint32_t)rx_p_bytes[2];
+                g_cmd.param2 = ((uint32_t)rx_p_bytes[3] << 8) |
+                               (uint32_t)rx_p_bytes[4];
+                g_cmd.dir = 0;
+                g_cmd.sub = 0;
+                g_cmd.flags = 0;
+                g_cmd.yaw_target = 0;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready = 1;
+            }
+            else if (rx_cmd == CMD_RDK_CENTER)
+            {
+                if (rx_p_len == 2 && rx_p_bytes[0] == 0 && rx_p_bytes[1] == 0)
+                {
+                    rx_state = RX_H1;              /*两个轴均禁用时不启动*/
+                    break;
+                }
+                g_cmd.type = CMD_RDK_CENTER;
+                g_cmd.dir = (rx_p_len == 2) ? rx_p_bytes[0] : 0;
+                g_cmd.sub = (rx_p_len == 2) ? rx_p_bytes[1] : 0;
+                g_cmd.flags = (rx_p_len == 2) ? 1 : 0;
+                g_cmd.param = 0;
+                g_cmd.param2 = 0;
+                g_cmd.yaw_target = 0;
+                if (g_cmd.cnt < 255) g_cmd.cnt++;
+                g_cmd.ready = 1;
             }
             else if (rx_cmd == CMD_RUNALL)
             {
@@ -692,11 +889,65 @@ void cmd_tx_ack(const ZbeeCmd *c)
         break;
     case CMD_POS_ABORT:
     case CMD_RUNALL:
-        plen = 0;                    /*06中止/12连跑帧无载荷*/
+    case CMD_STACK_ALIGN:
+        plen = 0;                    /*06中止/12连跑/1C码垛对位帧无载荷*/
+        break;
+    case CMD_RING_ALIGN:
+        pl[0] = c->sub;
+        pl[1] = c->dir;
+        plen = 2;
+        break;
+    case CMD_ARM_ANGLE:
+        pl[0] = (uint8_t)(p & 0xFF);
+        pl[1] = (uint8_t)((p >> 8) & 0xFF);
+        plen = 2;
+        break;
+    case CMD_LIFT_POS:
+        pl[0] = (uint8_t)(p & 0xFF);
+        pl[1] = (uint8_t)((p >> 8) & 0xFF);
+        pl[2] = (uint8_t)((p >> 16) & 0xFF);
+        pl[3] = (uint8_t)((p >> 24) & 0xFF);
+        plen = 4;
+        break;
+    case CMD_SERVO_ANGLE:
+        pl[0] = (uint8_t)(p & 0xFF);
+        pl[1] = (uint8_t)((p >> 8) & 0xFF);
+        pl[2] = (uint8_t)(c->param2 & 0xFF);
+        pl[3] = (uint8_t)((c->param2 >> 8) & 0xFF);
+        plen = 4;
+        break;
+    case CMD_BELT_POS:
+        pl[0] = (uint8_t)(p & 0xFF);
+        pl[1] = (uint8_t)((p >> 8) & 0xFF);
+        pl[2] = (uint8_t)((p >> 16) & 0xFF);
+        pl[3] = (uint8_t)((p >> 24) & 0xFF);
+        plen = 4;
+        break;
+    case CMD_RDK_CENTER:
+        if (c->flags & 1)
+        {
+            pl[0] = c->dir;
+            pl[1] = c->sub;
+            plen = 2;
+        }
         break;
     case CMD_DEBUG_RUN:
         pl[0] = (uint8_t)(p & 0xFF); /*13=启动调试路线, 载荷为批次*/
         plen = 1;
+        break;
+    case CMD_GRAB_SEQ:
+    case CMD_PLACE_SEQ:
+        pl[0] = (uint8_t)(p & 0xFF); /*1A块序选择 / 1C站点选择*/
+        plen = 1;
+        break;
+    case CMD_TASK_INJECT:
+        pl[0] = (uint8_t)(p >> 24);
+        pl[1] = (uint8_t)(p >> 16);
+        pl[2] = (uint8_t)(p >> 8);
+        pl[3] = (uint8_t)p;
+        pl[4] = (uint8_t)(c->param2 >> 8);
+        pl[5] = (uint8_t)c->param2;
+        plen = 6;
         break;
     default:
         return;

@@ -1044,6 +1044,36 @@
               <FileType>5</FileType>
               <FilePath>.\Hardware\rdk_center.h</FilePath>
             </File>
+            <File>
+              <FileName>arm_m2006.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Hardware\arm_m2006.c</FilePath>
+            </File>
+            <File>
+              <FileName>arm_m2006.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Hardware\arm_m2006.h</FilePath>
+            </File>
+            <File>
+              <FileName>lift_zdt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Hardware\lift_zdt.c</FilePath>
+            </File>
+            <File>
+              <FileName>lift_zdt.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Hardware\lift_zdt.h</FilePath>
+            </File>
+            <File>
+              <FileName>belt_zdt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Hardware\belt_zdt.c</FilePath>
+            </File>
+            <File>
+              <FileName>belt_zdt.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Hardware\belt_zdt.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -1083,6 +1113,16 @@
               <FileName>motor_task.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\Task\motor_task.c</FilePath>
+            </File>
+            <File>
+              <FileName>ring_align.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Task\ring_align.c</FilePath>
+            </File>
+            <File>
+              <FileName>ring_align.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Task\ring_align.h</FilePath>
             </File>
             <File>
               <FileName>motor_task.h</FileName>

@@ -52,7 +52,7 @@ void Servo_Init(void)
     TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
     TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
     TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
-    TIM_OCInitStructure.TIM_Pulse = 1500;                        //上电默认90°（1.5ms）
+    TIM_OCInitStructure.TIM_Pulse = 1611;                        //上电默认100°（500+2000*100/180≈1611us）
     TIM_OC2Init(TIM5, &TIM_OCInitStructure);                     //TIM5通道2
 
     /*TIM使能（TIM5通用定时器，无需TIM1那种MOE主输出）*/
@@ -109,14 +109,14 @@ void Servo270_Init(void)
     GPIO_InitStructure.GPIO_PuPd  = GPIO_PuPd_NOPULL;
     GPIO_Init(GPIOA, &GPIO_InitStructure);
 
-    /*输出比较通道1：PWM1模式，上电默认15°（三工位转盘的盘1工位，脉宽≈611us）*/
+    /*输出比较通道1：PWM1模式，上电默认30°（≈722us）并保持。*/
     TIM_OCStructInit(&TIM_OCInitStructure);
     TIM_OCInitStructure.TIM_OCMode      = TIM_OCMode_PWM1;
     TIM_OCInitStructure.TIM_OCPolarity  = TIM_OCPolarity_High;
     TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
     TIM_OCInitStructure.TIM_Pulse       = (uint16_t)(SERVO270_PULSE_MIN +
                                           (SERVO270_PULSE_MAX - SERVO270_PULSE_MIN) *
-                                          (15.0f / SERVO270_RANGE));
+                                          (SERVO270_STARTUP_DEG / SERVO270_RANGE));
     TIM_OC1Init(TIM5, &TIM_OCInitStructure);                     //TIM5通道1
 }
 

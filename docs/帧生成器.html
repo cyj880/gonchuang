@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>物流小车 串口帧生成器 V3</title>
+<title>物流小车 串口帧生成器 V6 · RM电机调试</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: "Microsoft YaHei", sans-serif; }
   body { background: #1a1d24; color: #e0e4ea; padding: 16px; max-width: 900px; margin: 0 auto; }
@@ -47,10 +47,22 @@
 </head>
 <body>
 
-<h1>物流小车 串口帧生成器</h1>
+<h1>物流小车 串口帧生成器 V6</h1>
 <div class="sub">UART7 · ZigBee · 115200-8-N-1 · 帧格式 AA 55 | CMD | 载荷 | SUM | 0D 0A · SUM=(CMD+载荷)累加和低8位</div>
+<div class="sub">2026-11-03 更新 · 放置三个物块(1C) · 任务码注入(1B) · 支持串口直发及06中止</div>
 
 <div class="card">
+  <div class="row">
+    <button class="btn" id="serConn" style="padding:8px 16px;font-size:14px">连接串口</button>
+    <button class="mode-btn" id="serDisc">断开</button>
+    <button class="btn warn" id="serAbort" style="padding:8px 16px;font-size:14px">立即中止(06)</button>
+    <label style="min-width:auto">波特率</label>
+    <select id="serBaud" style="width:120px">
+      <option>9600</option><option>57600</option><option selected>115200</option>
+      <option>230400</option><option>460800</option><option>921600</option>
+    </select>
+    <span class="conv" id="serStatus">未连接</span>
+  </div>
   <div class="modes" id="modes"></div>
   <div class="params" id="params"></div>
   <div class="row" style="margin-top:6px">
@@ -60,9 +72,17 @@
   <div class="hexout" id="hexout">— 点击"生成帧" —</div>
   <div class="row" style="margin-top:8px">
     <button class="btn" id="copy" style="background:#2e7d32">复制 HEX</button>
+    <button class="btn" id="txGen" style="background:#2e7d32">发送此帧</button>
     <span class="copyok" id="copyok"></span>
   </div>
   <div class="bytes" id="bytes"></div>
+  <div class="row" style="margin-top:10px">
+    <input id="serHex" placeholder="手动HEX: AA 55 1A 00 1A 0D 0A" style="flex:1;min-width:220px;font-family:Consolas,monospace">
+    <button class="mode-btn" id="serTxHex">发送HEX</button>
+    <button class="mini" id="serClear">清空接收</button>
+  </div>
+  <pre id="serLog" style="font-family:Consolas,monospace;font-size:12px;line-height:1.7;background:#10131a;border:1px solid #2d3342;border-radius:8px;padding:10px;height:170px;overflow-y:auto;color:#9fa8b2;white-space:pre-wrap;word-break:break-all">— 未连接 —</pre>
+  <div class="hint">串口需 Chrome/Edge 打开本页；配合逐飞无线套件(笔记本插USB端)或USB-TTL直连UART7。接收按 AA 55…0D 0A 整帧解析显示，非帧字节按杂散显示；连接后上方生成的任何帧都可用"发送此帧"直发。</div>
 </div>
 
 <div class="card">
@@ -81,6 +101,18 @@ const MODES = [
   { id:'home',    name:'回右上角(05/07)',  sub:7 },
   { id:'tl90',    name:'原地左转/目标yaw', sub:2 },
   { id:'tr90',    name:'原地右转/目标yaw', sub:3 },
+  { id:'rdk',     name:'转盘定位调试(14)', cmd:0x14 },
+  { id:'ringyaw', name:'校准Yaw(15)', cmd:0x15 },
+  { id:'ringalign', name:'圆环位置校准(15)', cmd:0x15 },
+  { id:'armangle', name:'RM电机角度调试(16)', cmd:0x16 },
+  { id:'liftpos',  name:'丝杆位置调试(17)',  cmd:0x17 },
+  { id:'servo',    name:'舵机角度调试(18)',  cmd:0x18 },
+  { id:'belt',     name:'同步带位置调试(19)', cmd:0x19 },
+  { id:'grabseq',  name:'统一夹取触发(1A)',  cmd:0x1A },
+  { id:'placeseq', name:'放置三个物块(1C)', cmd:0x1C },
+  { id:'taskinject', name:'任务码注入(1B)',  cmd:0x1B },
+  { id:'stackalign', name:'码垛对位(1D)',    cmd:0x1D },
+  { id:'qrsim',    name:'模拟二维码(UART8)' },
   { id:'abort',   name:'中止(06)',         cmd:0x06 },
   { id:'runall',  name:'一键任务数组(0x12)', cmd:0x12 },
   { id:'pulse',   name:'脉冲定距(0x10)',     cmd:0x10 },
@@ -113,7 +145,16 @@ function buildFrame(cmd, payload) {
   return bytes;
 }
 function toHex(bytes) { return bytes.map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' '); }
-function num(id) { return parseInt(el(id).value, 10); }
+function num(id) {
+  const text = el(id).value.trim(), n = Number(text);
+  return text !== '' && Number.isInteger(n) ? n : NaN;
+}
+function invalidateFrame() {
+  lastBytes = null;
+  el('hexout').textContent = '— 参数已改变，请重新生成帧 —';
+  el('bytes').innerHTML = '';
+  el('copyok').textContent = '';
+}
 const COUNTS_PER_MM = 655.36;   // 131072 / 200mm
 
 /* ---------------- 参数区渲染 ---------------- */
@@ -138,6 +179,7 @@ function render() {
 
   let h = '';
   if (cur === 'chain') {
+    legDir = 1;
     h = `<div class="row"><label>45°方向</label>
          <div class="dirsel">
            <button class="mode-btn active" id="dir_fr" onclick="setDir(1)">右前45°(启停区一)</button>
@@ -159,6 +201,7 @@ function render() {
     h = posInput('p1', '缓行目标', 650000) +
         `<div class="hint">6RPM缓行+扫到二维码即进校准段; 走到目标兜底停</div>`;
   } else if (cur === 'home') {
+    homeZone = 1;
     h = `<div class="row"><label>出发启停区</label>
          <div class="dirsel">
            <button class="mode-btn active" id="z1" onclick="setZone(1)">启停区一(右前去程)</button>
@@ -179,10 +222,63 @@ function render() {
         ${PULSE_DIRS.map(d=>`<option value="${d[0]}">${d[0]} ${d[1]}</option>`).join('')}</select></div>
         <div class="row"><label>脉冲数(1~1000000)</label><input type="number" id="pn" value="10000"></div>
         <div class="hint">纯开环位置模式, 四轮同步走完自停</div>`;
+  } else if (cur === 'ringyaw') {
+    h = `<div class="row"><label>Yaw校正方向</label><select id="ringSign">
+           <option value="1">+1 正Yaw使用正旋转</option><option value="-1" selected>-1 正Yaw使用负旋转</option></select></div>
+         <div class="hint">一帧启动，只旋转摆正至Yaw±0.5°，不平移。需新鲜完整三环及有效Yaw。正负表示电机输出关系；若Yaw绝对值变大，发06停车，换方向重新生成。连续5个新结果合格后停车，完成后自动停车、恢复编码器读取、退出识别返回相机，并鸣叫500ms。无需先发启动/测试/确认帧。</div>`;
+  } else if (cur === 'ringalign') {
+    h = `<div class="hint">一帧启动，只调位置：缺1/2时按固定编号找环；只有1或1+2后退，只有3或2+3前进，身份不明停车。三环齐全后同时调整平均X到320±3、平均Y到240±3像素，不旋转、也不要求Yaw合格；X合格而Y超差（或反之）时只修正未合格轴，两轴同时进入容差且连续5个新结果合格才完成。完成后自动停车、恢复编码器读取、退出识别返回相机，并鸣叫500ms。移动速度整体下调：找环3RPM、居中约2～20RPM（进入约6px内线性降速爬行）；编码器暂停，300ms断流停车，60s超时，06退出并恢复相机。</div>`;
+    h += `<div class="hint">路线站点放料：两轮粗加工及两轮暂存均先下发RM190°、同步带7040、180°舵机48°，不等待机构到位即启动视觉，机构动作与对位并行。两轮粗加工区及第一轮暂存使用三环模式1，第二轮暂存自动发送码垛模式5，按单中心点XY及视觉Yaw对位后，按扫码物料顺序取A/B/C槽(0°/120°/240°，不等待舵机)。同步带1400、RM107°、丝杆86000同时启动，全到位后180°舵机按main.c配置角度夹紧(400ms)；再单独将丝杆抬到40000，确认到位后，先让同步带到目标环位置，到位后再同时启动RM和丝杆，两者都到位后先稳定等待800ms再开始松爪。目标同步带/RM/丝杆：环1=5410/431°/222000，环2=7128/319°/222000，环3=8782/446°/222000（第二轮暂存三环丝杆均改为150000，按第二批顺序叠到同色第一批所在环）。到位后先稳定等待800ms，180°舵机用400ms从main.c配置的夹紧角度向松开方向平滑张开20°，再直接到main.c配置的完全松开角度张开并等待400ms，先丝杆回50000，再同步带到1400，均等到位后再取下一块。第三块同样收起后停车，不自动续路。每个运动阶段最长10s，任务码无效/颜色重复/环号不是1~3的排列则no next。独立15帧仅视觉校准，不放料；06中止。</div>`;
+  } else if (cur === 'armangle') {
+    h = `<div class="row"><label for="armDeg">目标角度(0~500°)</label><input type="number" id="armDeg" value="120" min="0" max="500" step="1"></div>
+         <div class="hint">RM M2006/P36夹爪电机绝对目标角度，以上电首次有效反馈位置为0°，不是累加角度。CAN1、C610 ID1。仅车端空闲或已完成时接受；发送后底盘保持停车，电机到位保持。重复设定直接改目标。发送06立即停止电机电流。角度为整数0~500，不允许负角度（机械上负方向会堵转）。</div>`;
+  } else if (cur === 'liftpos') {
+    h = `<div class="row"><label for="liftPul">目标绝对脉冲(0~255100)</label><input type="number" id="liftPul" value="65536" min="0" max="255100" step="1"></div>
+         <div class="hint">丝杆张大头电机(CAN2地址6)位置模式，数值=离开回零位(最高点)的向下行程：0=回到最高点，255100=最低点，65536脉冲=电机轴1圈。实车已核对：正数值向下延伸，越小越靠近最高点。速度固定3000RPM，到位自动保持。重复发送直接替换目标；发送06立即停车。要求车端空闲且无路线/停顿/圆环流程，发送时底盘保持停车。</div>`;
+  } else if (cur === 'servo') {
+    h = `<div class="row"><label for="srv180">180°舵机角度(0~180°)</label><input type="number" id="srv180" value="100" min="0" max="180" step="1"></div>
+         <div class="row"><label for="srv270">270°舵机角度(0~270°)</label><input type="number" id="srv270" value="0" min="0" max="270" step="1"></div>
+         <div class="hint">一次帧同时设置两个舵机：180°舵机=PA1(TIM5_CH2)，270°舵机=PA0(TIM5_CH1)。角度为绝对值，直接跳变不走缓动；180°舵机上电默认100°保持（路线到原料区、同步带到位后自动转到48°张开（不等待）；夹取夹紧105°），270°舵机上电默认30°保持，路线到原料区时自动转到0°（本次机械位置减30°）。要求车端空闲且无路线/停顿/圆环流程，发送时底盘保持停车。发送06不改变舵机角度（PWM保持当前值）。</div>`;
+  } else if (cur === 'belt') {
+    h = `<div class="row"><label for="beltPul">目标坐标(0~10000)</label><input type="number" id="beltPul" value="1400" min="0" max="10000" step="1"></div>
+         <div class="hint">同步带CAN2地址5，绝对坐标：上电位0、抓取位1400、中心7050；仅中心标定改为7050，其余坐标不偏移。上电不自动回零。坐标增大为CW，减小为CCW；7050→1400返回5650脉冲(约96.3°)。21120脉冲=一圈。发送绝对目标，电机自行决定运动方向；方向映射由固件BELT_POS_POSITIVE_DIR统一控制命令和回读。电机端300RPM、加速度200。要求空闲且无路线/停顿/圆环流程；06立即停车。</div>`;
+  } else if (cur === 'grabseq') {
+    h = `<div class="row"><label>块序选择</label><select id="grabMode">
+           <option value="0">00 按当前序号自动递增</option>
+           <option value="1">01 固定第1块(270°舵机120°)</option>
+           <option value="2">02 固定第2块(270°舵机240°)</option>
+           <option value="3">03 固定第3块(270°舵机0°)</option></select></div>
+         <div class="hint">手动触发统一夹取序列：180°舵机105°(夹紧)→丝杆20000→同步带1400与RM107°同时启动→两者都到位后丝杆78000→180°舵机48°(张开，等待400ms)→同步带7040(原料位)、270°舵机按块序120/240/0°、RM285°、丝杆84000同时启动。270°舵机不等待到位，只等待同步带、RM和丝杆到位。失败进no next。仅车端空闲且无路线/停顿/圆环时接受，执行完直接停车结束(不等夹取通知、不回程)。00模式按当前序号连续执行剩余块，01~03固定块序只执行指定块。<b>2026-11-03: 已注入任务码(1B)时，发送后先给RDK发颜色帧并等其触发帧 AA 55 11 00 11 0D 0A(30s超时no next)才夹取，连续块间同样等；未注入任务码则直接夹取(纯动作调试)。</b></div>`;
+  } else if (cur === 'placeseq') {
+    h = `<div class="row"><label for="placeSource">放料任务</label><select id="placeSource">
+           <option value="1">第一轮粗加工（任务码第1/2组）</option>
+           <option value="2">第二轮粗加工（任务码第3/4组）</option>
+           <option value="3">第一轮暂存（任务码第1/2组）</option>
+           <option value="4">第二轮暂存（按同色第一批环号，丝杆150000）</option></select></div>
+         <div class="hint">先用“任务码注入(1B)”生成并发送任务码，收到原样回显后，再选择本模式生成并发送放料帧。也可使用已扫码的任务码。车体应已对位、A/B/C槽按本批扫码顺序装好物料；发送后直接取放三块，不启动视觉、不等待RDK触发。真实路线第二轮暂存会先自动发送模式5并完成码垛对位；网页单独测试可先发1D对位，再发1C/04放料。</div>
+         <div class="hint">按A/B/C槽依次发270°舵机0°/120°/240°，不等待；同步带1400、RM107°、丝杆86000同时启动，全到位后夹爪按main.c配置角度夹紧400ms；再单独将丝杆抬到40000，确认到位后继续。按扫码对应环号先移动同步带，确认到位后再同时启动RM和丝杆：环1=5410/431°/222000，环2=7128/319°/222000，环3=8782/446°/222000（第二轮暂存三环丝杆均改为150000，按第二批顺序叠到同色第一批所在环）；到位后先稳定等待800ms，夹爪用400ms从main.c配置的夹紧角度向松开方向平滑张开20°，再直接到main.c配置的完全松开角度张开并等待400ms。每块先丝杆回50000，再同步带到1400；第三块收起后停车，RM保持最后目标。</div>
+         <div class="hint">仅空闲且无路线/视觉流程时接受，接受后原样回显1C帧；缺任务码、颜色重复或目标环不是1/2/3排列则不执行、不回显并报no next。运行中重复发送不重启；10s到位超时停止三轴。可随时点击“立即中止(06)”。</div>`;
+  } else if (cur === 'taskinject') {
+    h = `<div class="row"><label for="taskText">任务码(4组3位)</label><input type="text" id="taskText" value="156+123+516+231" maxlength="20" style="flex:1"></div>
+         <div class="hint">把任务码经UART7注入STM32，<b>等效扫码</b>(不用接UART8/MaixCam)。格式4组3位数字、每位1~6(红1黄2蓝3绿4黑5浅蓝6)：组1=第一批颜色、组2=第一批环号、组3=第二批颜色、组4=第二批环号。12位压缩成6字节发送(每字节装两位数字)，注入成功STM32原样回ACK，含非法数字不回显。<b>注入后发"统一夹取触发(1A)"：STM32先给RDK发颜色帧→等RDK触发帧 AA 55 11 00 11 0D 0A(物体静止时RDK持续发送，30s超时no next)→收到才夹取，连续夹取每块衔接都等RDK。</b>未注入任务码时发1A则直接夹取(纯动作调试)。</div>`;
+  } else if (cur === 'stackalign') {
+    h = `<div class="hint">启动码垛对位：车给RDK发模式5（AA 55 10 01 05 16 0D 0A），RDK持续回 <b>AA 55 14 07 FLAGS U(2) V(2) YAW(2) CK 0D 0A</b>(单中心点帧)。STM32把中心点闭环到图像(320,240)±3px、工位角±0.5°，优先校准XY，XY合格后修正视觉Yaw；位置偏离时再修XY，直到XY和Yaw同时合格（图像Y→vx、图像X→vy）。FLAGS=0(RDK没看到工位)时停车原地等。独立1D完成后停车蜂鸣，不自动放料；可另发1C第二轮暂存（AA 55 1C 04 20 0D 0A）。真实路线第二轮暂存到站自动发模式5，对位完成后自动按同色环号放三块，丝杆150000。60s超时no next。仅车端空闲且无路线/停顿/圆环/码垛流程时接受。</div>`;
+  } else if (cur === 'qrsim') {
+    h = `<div class="row"><label for="qrText">任务码原文</label><input type="text" id="qrText" value="156+123+516+231" maxlength="64" style="flex:1"></div>
+         <div class="hint">模拟MaixCam扫码：把任务码原文按摄像头帧格式 AA 55 LEN 内容 SUM 打包(无帧尾，SUM=(LEN+内容字节)&0xFF)。使用方法：断开MaixCam，USB-TTL接到STM32的UART8 PE0(摄像头TX接线点)，115200-8N1，用串口助手HEX发送本帧即等效扫到该二维码。任务码应为4组3位数字、数字1~6(红1黄2蓝3绿4黑5浅蓝6)，不符合会收到但被标记非法。</div>`;
+  } else if (cur === 'rdk') {
+    h = `<div class="row"><label for="rdkX">车体 X 左右（RDK Y）</label><select id="rdkX" onchange="el('gen').click()">
+           <option value="1" selected>1 正向</option><option value="0">0 不工作</option><option value="-1">-1 反向</option>
+         </select></div>
+         <div class="row"><label for="rdkY">车体 Y 前后（RDK X）</label><select id="rdkY" onchange="el('gen').click()">
+           <option value="1">1 正向</option><option value="0">0 不工作</option><option value="-1" selected>-1 反向</option>
+         </select></div>
+         <div class="hint">上电后直接发给 STM32 UART7，无需跑路线。保持当前航向，自动进入转盘模式；到位停车并返回相机模式，随即恢复里程计并结束，不驱动夹爪(伸出动作在路线到站流程的识别之前)。RDK Y−240 控制左右，RDK X−320 控制前后。1/-1 设置车体轴速度与对应图像误差的同向/反向关系；0 关闭该轴平移和到位判断。至少启用一轴。定位中修改方向：先发送中止 AA 55 06 06 0D 0A，等 LCD 的 G 变为 0、里程计读数恢复后，再发新的14帧；运行中直接发送14帧会被忽略。</div>`;
   } else if (cur === 'abort') {
     h = `<div class="hint">任意阶段发此帧立即停车回空闲</div>`;
   }
   el('params').innerHTML = h;
+  invalidateFrame();
   el('err').textContent = '';
   el('hexout').textContent = '— 点击"生成帧" —';
   el('bytes').innerHTML = '';
@@ -190,12 +286,14 @@ function render() {
 }
 let legDir = 1;   // 1=右前(区一) 4=左前(区二)
 function setDir(d) {
+  invalidateFrame();
   legDir = d;
   el('dir_fr').className = 'mode-btn ' + (d===1?'active':'');
   el('dir_fl').className = 'mode-btn ' + (d===4?'active':'');
 }
 let homeZone = 1; // 1=区一 2=区二
 function setZone(z) {
+  invalidateFrame();
   homeZone = z;
   el('z1').className = 'mode-btn ' + (z===1?'active':'');
   el('z2').className = 'mode-btn ' + (z===2?'active':'');
@@ -204,10 +302,12 @@ function setZone(z) {
   el('p1_c').textContent = '≈ ' + ((z===1?200000:1250000)/COUNTS_PER_MM).toFixed(0) + ' mm';
 }
 function toggleYaw() {
+  invalidateFrame();
   const row = el('yawRow');
   if (row) row.style.display = el('yawMode').value === 'target' ? 'flex' : 'none';
 }
 function toggleTurnMode() {
+  invalidateFrame();
   const abs = el('turnMode').value === 'abs';
   const label = el('turnAngleLabel');
   const input = el('ang');
@@ -241,17 +341,107 @@ function pick(id) { cur = id; render(); }
 
 /* ---------------- 生成 ---------------- */
 let lastBytes = null;
+el('params').addEventListener('input', invalidateFrame);
 el('gen').onclick = () => {
   el('err').textContent = '';
+  el('copyok').textContent = '';
   let cmd, payload, desc = '';
+  let customBytes = null, customExpl = '';
 
   try {
     if (cur === 'chain') {
       cmd = 0x07;
       const a = num('diag_end'), b = num('line_tgt');
-      if (isNaN(a) || isNaN(b)) throw '请填写两个位置值';
+      if (isNaN(a) || isNaN(b) || a < -2147483648 || a > 2147483647 ||
+          b < -2147483648 || b > 2147483647) throw '两个位置须为 int32 范围内的整数';
       payload = [legDir, ...i32le(a), ...i32le(b)];
       desc = `一键链: ${legDir===1?'右前':'左前'}45°到${a} → 直线到${b}`;
+    } else if (cur === 'ringyaw' || cur === 'ringalign') {
+      cmd = 0x15;
+      const yawOnly = cur === 'ringyaw';
+      const sign = yawOnly ? num('ringSign') : 0;
+      if (yawOnly && ![-1,1].includes(sign)) throw 'Yaw方向必须为+1或-1';
+      payload = [yawOnly ? 3 : 4, sign & 255];
+      desc = yawOnly ? `仅校准Yaw±0.5°，方向${sign}；06退出` : '圆环位置校准：平均X 320±3、平均Y 240±3；06退出';
+    } else if (cur === 'armangle') {
+      cmd = 0x16;
+      const degrees = num('armDeg');
+      if (isNaN(degrees) || degrees < 0 || degrees > 500) throw '目标角度须为 0~500° 的整数';
+      payload = i16le(degrees);
+      desc = `RM M2006绝对角度目标 ${degrees}°；上电零点，不累加`;
+    } else if (cur === 'liftpos') {
+      cmd = 0x17;
+      const p = num('liftPul');
+      if (isNaN(p) || p < 0 || p > 255100) throw '目标脉冲须为 0~255100 的整数';
+      payload = i32le(p);
+      desc = `丝杆下行 ${p} 脉冲(≈${(p/65536).toFixed(2)}圈, 0=最高点), 3000RPM`;
+    } else if (cur === 'servo') {
+      cmd = 0x18;
+      const a1 = num('srv180'), a2 = num('srv270');
+      if (isNaN(a1) || a1 < 0 || a1 > 180) throw '180°舵机角度须为 0~180 的整数';
+      if (isNaN(a2) || a2 < 0 || a2 > 270) throw '270°舵机角度须为 0~270 的整数';
+      payload = [...i16le(a1), ...i16le(a2)];
+      desc = `舵机角度: 180°舵机 ${a1}°, 270°舵机 ${a2}°`;
+    } else if (cur === 'belt') {
+      cmd = 0x19;
+      const p = num('beltPul');
+      if (!Number.isInteger(p) || p < 0 || p > 10000) throw '目标坐标须为 0~10000 的整数(0上电/1400抓取/7050中心)';
+      payload = i32le(p);
+      desc = `同步带绝对坐标 ${p} 脉冲(从上电位约${(p/21120*360).toFixed(1)}°，中心7050)`;
+    } else if (cur === 'grabseq') {
+      cmd = 0x1A;
+      const m = Number(el('grabMode').value);
+      if (!(m >= 0 && m <= 3)) throw '块序选择无效';
+      payload = [m];
+      desc = `手动统一夹取触发: ${m === 0 ? '按当前序号自动递增' : '固定第' + m + '块'}`;
+    } else if (cur === 'placeseq') {
+      cmd = 0x1C;
+      const source = Number(el('placeSource').value);
+      if (![1, 2, 3, 4].includes(source)) throw '放料任务选择无效';
+      payload = [source];
+      const names = ['第一轮粗加工', '第二轮粗加工', '第一轮暂存', '第二轮暂存'];
+      desc = `独立放置三个物块：${names[source - 1]}；直接取放，收起后停车`;
+    } else if (cur === 'taskinject') {
+      cmd = 0x1B;
+      const raw = el('taskText').value.replace(/[^0-9]/g, '');
+      if (raw.length !== 12) throw '任务码须为4组3位数字(共12位)';
+      const d = raw.split('').map(Number);
+      for (const v of d) if (v < 1 || v > 6) throw '每位数字须为1~6';
+      payload = [];
+      for (let i = 0; i < 6; i++) payload.push((d[2*i] << 4) | d[2*i+1]);
+      desc = `注入任务码 ${raw.match(/.{3}/g).join('+')}`;
+    } else if (cur === 'stackalign') {
+      cmd = 0x1D;
+      payload = [];
+      desc = '启动码垛对位(单中心点闭环)';
+    } else if (cur === 'qrsim') {
+      const text = el('qrText').value;
+      if (text === '') throw '任务码内容不能为空';
+      const cbytes = [];
+      for (let i = 0; i < text.length; i++) {
+        const c = text.charCodeAt(i);
+        if (c > 127) throw '内容含非ASCII字符，无法按摄像头帧发送';
+        cbytes.push(c);
+      }
+      if (cbytes.length > 64) throw '内容超过64字节(摄像头帧上限)';
+      let qsum = cbytes.length;
+      cbytes.forEach(b => qsum += b);
+      cmd = null;
+      customBytes = [0xAA, 0x55, cbytes.length, ...cbytes, qsum & 255];
+      const digits = (text.match(/\d/g) || []).join('');
+      const warn = (digits.length === 12 && /^[1-6]+$/.test(digits)) ?
+                   '' : ' ⚠ 非12位有效任务码(数字须1~6)，STM32会标记为非法';
+      desc = `模拟扫码${warn}: "${text}"`;
+      customExpl = ` &nbsp; <b>[0]</b>AA &nbsp; <b>[1]</b>55 &nbsp; <b>[2]</b>LEN=${cbytes.length}` +
+        cbytes.map((b, i) => ` &nbsp; <b>[${i + 3}]</b>0x${b.toString(16).padStart(2, '0').toUpperCase()}`).join('') +
+        ` &nbsp; <b>[${3 + cbytes.length}]</b>SUM=0x${(qsum & 255).toString(16).padStart(2, '0').toUpperCase()} (无帧尾)`;
+    } else if (cur === 'rdk') {
+      cmd = 0x14;
+      const x = num('rdkX'), y = num('rdkY');
+      if (![-1,0,1].includes(x) || ![-1,0,1].includes(y)) throw '方向只能选择 1、0、-1';
+      if (x === 0 && y === 0) throw '至少启用一个轴，不能同时选择 0';
+      payload = [x & 255, y & 255];
+      desc = `转盘定位: X=${x}${x===0?'(关闭)':''}, Y=${y}${y===0?'(关闭)':''}；到位回相机结束,不动夹爪`;
     } else if (cur === 'abort') {
       cmd = 0x06; payload = [];
       desc = '中止一切';
@@ -300,12 +490,18 @@ el('gen').onclick = () => {
       cmd = 0x05;
       const m = MODES.find(x => x.id === cur);
       const v = num('p1');
-      if (isNaN(v)) throw '请填写位置值';
+      if (isNaN(v) || v < -2147483648 || v > 2147483647) throw '位置须为 int32 范围内的整数';
       payload = [m.sub, ...i32le(v)];
       const zoneNote = cur==='home' ? `(${homeZone===1?'区一':'区二'}右上角)` : '';
       desc = `${m.name}${zoneNote} 到 ${v}`;
     }
 
+    if (cmd === null) {  // 模拟二维码: 摄像头帧格式, 无0D 0A帧尾
+      lastBytes = customBytes;
+      el('hexout').textContent = toHex(lastBytes);
+      el('bytes').innerHTML = `<b>${desc}</b><br>` + customExpl;
+      addHist(desc, toHex(lastBytes));
+    } else {
     lastBytes = buildFrame(cmd, payload);
     el('hexout').textContent = toHex(lastBytes);
     // 字节解释
@@ -321,6 +517,7 @@ el('gen').onclick = () => {
     expl += ` &nbsp; <b>[${si+1}][${si+2}]</b>0D 0A 帧尾`;
     el('bytes').innerHTML = `<b>${desc}</b><br>` + expl;
     addHist(desc, toHex(lastBytes));
+    }
   } catch (e) {
     lastBytes = null;
     el('hexout').textContent = '—';
@@ -329,17 +526,133 @@ el('gen').onclick = () => {
   }
 };
 
-el('copy').onclick = () => {
+el('copy').onclick = async () => {
   if (!lastBytes) return;
-  navigator.clipboard.writeText(toHex(lastBytes)).then(
-    () => { el('copyok').textContent = '已复制 ✓'; setTimeout(()=>el('copyok').textContent='',1500); },
-    () => {  // file:// 下剪贴板可能受限, 提供选中兜底
-      const r = document.createRange(); r.selectNodeContents(el('hexout'));
-      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
-      el('copyok').textContent = '已全选, Ctrl+C 复制';
-    });
+  await copyHex(toHex(lastBytes), el('hexout'));
 };
 
+async function copyHex(hex, target) {
+  try {
+    await navigator.clipboard.writeText(hex);
+    el('copyok').textContent = '已复制 ✓';
+    setTimeout(()=>el('copyok').textContent='',1500);
+  } catch (e) {  // file:// 下 API 缺失或权限受限时仍可手动复制
+    const r = document.createRange(); r.selectNodeContents(target);
+    const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+    el('copyok').textContent = '已全选, Ctrl+C 复制';
+  }
+}
+
+/* ---------------- 串口助手 (Web Serial, Chrome/Edge) ---------------- */
+let serialPort = null, serialReader = null, serialReading = false;
+let rxBuf = [];
+
+function serLogLine(text, color) {
+  const log = el('serLog');
+  if (log.textContent.indexOf('未连接') === 0 || log.textContent.indexOf('—') === 0) log.textContent = '';
+  const node = document.createElement('div');
+  const t = new Date();
+  const ts = t.getHours().toString().padStart(2,'0') + ':' +
+             t.getMinutes().toString().padStart(2,'0') + ':' +
+             t.getSeconds().toString().padStart(2,'0');
+  node.textContent = ts + '  ' + text;
+  if (color) node.style.color = color;
+  log.appendChild(node);
+  while (log.childNodes.length > 300) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+}
+function hexs(bytes) {
+  return bytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+}
+async function serialSendBytes(bytes, label) {
+  if (!serialPort) { serLogLine('未连接，无法发送: ' + label, '#ef9a9a'); return; }
+  try {
+    const w = serialPort.writable.getWriter();
+    await w.write(new Uint8Array(bytes));
+    w.releaseLock();
+    serLogLine('TX ' + bytes.length + 'B: ' + hexs(bytes) + (label ? '  ' + label : ''));
+  } catch (e) { serLogLine('发送失败: ' + e, '#ef9a9a'); }
+}
+async function serialPump() {
+  while (serialPort && serialPort.readable && serialReading) {
+    serialReader = serialPort.readable.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await serialReader.read();
+        if (value) rxFeed(Array.from(value));
+        if (done) break;
+      }
+    } catch (e) { if (serialReading) serLogLine('接收错误: ' + e, '#ef9a9a'); }
+    finally { try { serialReader.releaseLock(); } catch (e) {} }
+    if (!serialReading) break;
+  }
+  if (!serialReading && serialPort) { try { await serialPort.close(); } catch (e) {} }
+}
+function rxFeed(bytes) {
+  let guard = 0;
+  while (rxBuf.length > 0 && guard++ < 60) {
+    let i = 0;
+    while (i + 1 < rxBuf.length && !(rxBuf[i] === 0xAA && rxBuf[i + 1] === 0x55)) i++;
+    if (i > 0) rxBuf.splice(0, i);                     /* 丢帧头前杂散 */
+    if (rxBuf.length < 4) return;                      /* 等更多字节 */
+    let end = -1;
+    for (let k = 4; k + 1 < rxBuf.length && k <= 40; k++) {
+      if (rxBuf[k] === 0x0D && rxBuf[k + 1] === 0x0A) { end = k + 1; break; }
+    }
+    if (end < 0) {
+      if (rxBuf.length > 40) serLogLine('RX 未识别' + rxBuf.length + 'B: ' + hexs(rxBuf));
+      return;                                          /* 帧未收全, 等待 */
+    }
+    const f = rxBuf.splice(0, end + 1);
+    serLogLine('RX ' + f.length + 'B: ' + hexs(f));
+  }
+  if (rxBuf.length) { serLogLine('RX 缓冲溢出丢弃' + rxBuf.length + 'B'); rxBuf = []; }
+}
+el('serConn').onclick = async () => {
+  try {
+    if (serialPort && serialReading) { el('serStatus').textContent = '已连接(勿重复连接)'; return; }
+    if (!('serial' in navigator)) {
+      el('serStatus').textContent = '浏览器不支持Web Serial';
+      serLogLine('需要 Chrome/Edge 打开本页才能使用串口', '#ef9a9a');
+      return;
+    }
+    serialPort = await navigator.serial.requestPort();
+    await serialPort.open({ baudRate: Number(el('serBaud').value) });
+    serialReading = true;
+    el('serStatus').textContent = '已连接 @' + el('serBaud').value;
+    serLogLine('串口已连接 @' + el('serBaud').value);
+    serialPump();
+  } catch (e) {
+    el('serStatus').textContent = '未连接';
+    if (e.name !== 'NotFoundError') serLogLine('连接失败: ' + e, '#ef9a9a');
+  }
+};
+el('serDisc').onclick = async () => {
+  serialReading = false;
+  try { if (serialReader) await serialReader.cancel(); } catch (e) {}
+  try { if (serialPort) await serialPort.close(); } catch (e) {}
+  serialPort = null;
+  el('serStatus').textContent = '未连接';
+  serLogLine('串口已断开');
+};
+el('serTxHex').onclick = async () => {
+  const t = el('serHex').value.replace(/[^0-9a-fA-F]/g, '');
+  if (t.length === 0 || t.length % 2 !== 0) {
+    serLogLine('HEX格式错误(需偶数个十六进制字符)', '#ef9a9a');
+    return;
+  }
+  const bytes = [];
+  for (let i = 0; i < t.length; i += 2) bytes.push(parseInt(t.substr(i, 2), 16));
+  await serialSendBytes(bytes, '手动HEX');
+};
+el('serAbort').onclick = async () => { await serialSendBytes(buildFrame(0x06, []), '中止(06)'); };
+el('serClear').onclick = () => { rxBuf = []; el('serLog').textContent = ''; };
+el('txGen').onclick = async () => {
+  if (!lastBytes) { el('copyok').textContent = '请先生成帧'; return; }
+  await serialSendBytes(lastBytes, '面板帧');
+};
+
+/* ---------------- 历史 ---------------- */
 /* ---------------- 历史 ---------------- */
 let hist = [];
 function addHist(desc, hex) {
@@ -349,9 +662,7 @@ function addHist(desc, hex) {
     `<tr><td>${h.desc}</td><td>${h.hex}</td><td><button class="mini" onclick="copyAt(${i})">复制</button></td></tr>`).join('');
 }
 function copyAt(i) {
-  navigator.clipboard.writeText(hist[i].hex).then(() => {
-    el('copyok').textContent = '已复制历史 ✓'; setTimeout(()=>el('copyok').textContent='',1500);
-  });
+  return copyHex(hist[i].hex, el('hist').rows[i].cells[1]);
 }
 
 render();

@@ -161,6 +161,19 @@ static void Code_Publish(void)
     if (!same) g_link.changed = 1;              /* 只有内容变了才算"新码" */
 }
 
+/* 网页0x1B注入任务码(模拟扫码): 12个ASCII '1'~'6'。
+   合法=1并按摄像头同款逻辑发布; 含0/7/8/9等=0, g_link不变。 */
+uint8_t UART8_InjectTask(const uint8_t *digits)
+{
+    uint8_t i;
+
+    for (i = 0; i < TASK_LINK_DIGITS; i++)
+        if (digits[i] < '1' || digits[i] > '6') return 0;
+    for (i = 0; i < TASK_LINK_DIGITS; i++) rx_dig[i] = digits[i];
+    Code_Publish();
+    return 1;
+}
+
 /* 只累计数字：其它可见字符当分隔符忽略，控制字符清空候选 */
 static void Code_Feed(uint8_t ch)
 {
@@ -380,6 +393,32 @@ const char* UART8_ColorName(uint8_t color)
     case 6: return "LBL";       /* 浅蓝 Light Blue */
     default: return "--";
     }
+}
+
+/* 车上三工位转盘槽位名: 第pick次(0基)夹取的块放在pick号槽。
+   槽位放置点(270°舵机角): A=0°, B=120°, C=240°; 放置完成后转 to 120/240/0°。 */
+const char* UART8_SlotName(uint8_t pick)
+{
+    switch (pick)
+    {
+    case 0: return "A";
+    case 1: return "B";
+    case 2: return "C";
+    default: return "-";
+    }
+}
+
+/* 环号反查: 返回本批放在该环的块序号(=车上槽位), 0xFF=本批没有块放该环。 */
+uint8_t UART8_PickOfRing(uint8_t batch, uint8_t ring)
+{
+    uint8_t k;
+
+    if (batch < 1u || batch > 2u || ring < 1u || ring > 6u) return 0xFFu;
+    for (k = 0; k < 3; k++)
+    {
+        if (g_link.ring[batch - 1][k] == ring) return k;
+    }
+    return 0xFFu;
 }
 
 /* ==================================================================

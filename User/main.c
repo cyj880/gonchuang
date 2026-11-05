@@ -19,11 +19,28 @@
 #include "odom_task.h"
 #include "lunqu_imu.h"
 #include "rdk_center.h"
+#include "arm_m2006.h"
+#include "lift_zdt.h"
+#include "belt_zdt.h"
+
+/* ---- 放料夹爪角度调节（180°舵机，单位：度，范围0~180；修改后重新编译烧录）----
+   两轮粗加工、第一轮暂存及网页1C放料共用；原料区1A抓取角度独立。
+   当前角度越大夹得越紧：夹紧力度不足可适当增大，松不开可适当减小松开角度。
+   放料到位后先稳定等待800ms，松爪从夹紧角度向松开方向缓动20°（400ms），再快速到松开角度并等400ms。 */
+#define PLACE_CLAW_CLOSE_DEG  109.5f  /* 夹紧物料的角度 */
+#define PLACE_CLAW_OPEN_DEG    48.0f  /* 完全松开物料的角度 */
+
+/* 导出给motor_task.c使用，只需修改上方两个#define。 */
+const float g_place_claw_close_deg = PLACE_CLAW_CLOSE_DEG;
+const float g_place_claw_open_deg  = PLACE_CLAW_OPEN_DEG;
 
 
 /* ---- 陀螺仪选择开关: 两陀螺仪物理共用USART6/PG9, 同一时刻只插一个; 改后重新上电, 只能一个为1 ---- */
 uint8_t Bno085_RunFlag = 0;    /*1=BNO085 RVC@115200*/
 uint8_t lunqu_RunFlag  = 1;    /*1=轮趣FDI FDILink@921600*/
+/* 丝杆(张大头ID6)上电自动回零开关: 1=开机阻塞回零,失败卡死不开机; 0=跳过回零直接开机
+   (跳过后丝杆位置未知,执行升降/定位动作前需先手动回零或重新置零) */
+uint8_t Lift_AutoHome_RunFlag = 1;
 /**
   * STM32F427IIH（大疆 RoboMaster A 板）+ FreeRTOS V11.1.0
   * 任务函数放在 Task/ 文件夹（led_task.c、servo_task.c、 motor_task.c、lcd_task.c），
@@ -61,6 +78,9 @@ uint8_t lunqu_RunFlag  = 1;    /*1=轮趣FDI FDILink@921600*/
   * 不要再在 it.c 中定义这三个同名函数。
   */
 
+/* Keil Watch: 0=success; other values are LiftHomeResult_t errors. */
+volatile LiftHomeResult_t g_lift_home_result = LIFT_HOME_NOT_READY;
+
 int main(void)
 {
     /* ★中断优先级分组必须最先设置（4位抢占）！
@@ -77,6 +97,7 @@ int main(void)
     Servo270_Init();        /* 270°舵机: PA0(TIM5_CH1, 蓝排针丝印TIM2_CH1), 须在Servo_Init()后 */
 	LCD_Init();
     board_init();           /* CAN2 初始化：PB12=RX / PB13=TX，1Mbps，供 4 路 Emm_V5 电机使用 */
+    Arm_M2006_Init();       /* 夹爪伸出电机：CAN1 PD0/PD1，C610 ID1，首次反馈记为0度 */
     UART7_ZigBee_Init(115200); /* 上位机坐标串口：PE7=RX收坐标帧 / PE8=TX回传网页(命令字02帧)，收发双向 */   //ZigBee链路：接收电脑发送的坐标，并回传给网页端显示
     UART8_Init(115200);     /* 摄像头(PE0) + 任务码显示屏(PE1)，见 Hardware/uart8.c */
     UART8_LinkInit();       /* 摄像头帧解析 + 任务码解析 + 上报变量初始化 */
@@ -91,17 +112,61 @@ int main(void)
     Delay_Init(168);        /* SYSCLK=168MHz，SysTick HCLK/8 计时 */
 	Buzzer_Init();                              
 
+    /* 丝杆地址6：Lift_AutoHome_RunFlag=1 时 CW向上碰撞回零，确认当前位置清零后才创建任务；
+       =0 时跳过回零，直接创建任务开机。 */
+    if (Lift_AutoHome_RunFlag)
+    {
+        LCD_Clear();
+        LCD_ShowString(0, 0, "Lift CW homing", LCD_8X16);
+        LCD_ShowString(0, 20, "CAN2 ID:6", LCD_8X16);
+        g_lift_home_result = Lift_ZDT_HomeBeforeScheduler(LIFT_ZDT_ADDR);
+        if (g_lift_home_result != LIFT_HOME_OK)
+        {
+            LCD_SetColor(LCD_RED);
+            LCD_ShowString(0, 40, "Home failed:", LCD_8X16);
+            LCD_ShowNum(104, 40, (uint32_t)g_lift_home_result, 1, LCD_8X16);
+            LCD_ShowString(0, 60, "CMD:", LCD_8X16);
+            LCD_ShowHexNum(40, 60, g_lift_home_diag.command, 2, LCD_8X16);
+            LCD_ShowString(0, 80, "RET:", LCD_8X16);
+            LCD_ShowHexNum(40, 80, g_lift_home_diag.reply, 2, LCD_8X16);
+            LCD_ShowString(0, 100, "LEN:", LCD_8X16);
+            LCD_ShowNum(40, 100, g_lift_home_diag.length, 1, LCD_8X16);
+            LCD_ShowString(0, 120, "ORG:", LCD_8X16);
+            LCD_ShowHexNum(40, 120, g_lift_home_diag.origin_flags, 2, LCD_8X16);
+            LCD_ShowString(0, 140, "MOT:", LCD_8X16);
+            LCD_ShowHexNum(40, 140, g_lift_home_diag.motor_flags, 2, LCD_8X16);
+            LED_Green_Off();
+            /* 回零失败时已尝试退出回零并急停，禁止启动调度器。 */
+            for (;;)
+            {
+                LED_Red_Toggle();
+                Delay_ms(250);
+            }
+        }
+        LCD_ShowString(0, 40, "Lift zero OK", LCD_8X16);
+    }
+    else
+    {
+        LCD_Clear();
+        LCD_ShowString(0, 0, "Lift home off", LCD_8X16);
+    }
+
+    /* 同步带(地址5)不自动回零: 零点由上电时机构所在位置决定, 手动校准。 */
+
+
 //    xTaskCreate(LED_FlowTask, "LED_Flow", 256, NULL, 2, NULL);
-    xTaskCreate(Servo_Task, "Servo", 256, NULL, 2, NULL);  /*优先级3(高于RS485忙等): 20ms拍不被调度抖动拉长*/ /* 270°转盘对位:15/135/255°三工位循环,每3s一步;去程三次缓动,255→15回程五次缓动(加速度连续) */
+    /* 270°舵机上电由 Servo270_Init() 直接输出30°(≈722us)并保持，不再创建轮转任务；
+       路线到原料区时由 MotorTask 转到0°工位；需恢复三工位循环时取消下行注释即可 */
+//    xTaskCreate(Servo_Task, "Servo", 256, NULL, 2, NULL);  /*优先级3(高于RS485忙等): 20ms拍不被调度抖动拉长*/ /* 270°转盘对位:0/120/240°三工位循环,每3s一步;去程三次缓动,240→0回程五次缓动(加速度连续) */
     /* RouteTask 已并入 LCD_Task（收帧回传 + 坐标/任务码两页轮显），不再单独创建 */
     xTaskCreate(KeyTask, "Key", 256, NULL, 2, NULL);   /* PB2按键：松开翻转红色LED */
     xTaskCreate(MotorTask, "Motor", 1024, NULL, 2, NULL); /* 四轮 Emm_V5 电机（CAN2） */
+    xTaskCreate(Arm_M2006_Task, "Arm2006", 256, NULL, 3, NULL); /* 100Hz夹爪位置/速度双环 */
     xTaskCreate(OdomTask, "Odom", 1024, NULL, 3, NULL);  /* RS485里程计1(站号1)，与Motor同为优先级3 */
     xTaskCreate(LCD_Task, "LCD", 1024, NULL, 1, NULL);    /* TFT-LCD 显示（SPI1+DMA） */
-//    xTaskCreate(UART8_ReportTask, "TLink", 256, NULL, 2, NULL); /* 摄像头链路：任务码一变就转发给显示屏，
-//                                                                  搬运信息一变也转发（不做周期心跳）
-//                                                                  不需要自动转发可以不创建这个任务，
-//                                                                  改在需要的地方直接调 UART8_SendTaskCode()/UART8_SendStat() */
+//    UART8_ReportTask 不在此创建：由 MotorTask 在到扫码区开始找码时动态创建
+//    (qr_report_handle)，扫码成功后删除——开关见 motor_task.h 的
+//    MOTOR_ROUTE_QR_SCAN_ENABLE（调试阶段为0，到扫码区不会创建）。
 
     vTaskStartScheduler();
 

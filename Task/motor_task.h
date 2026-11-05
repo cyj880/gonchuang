@@ -48,10 +48,16 @@
        ZigBee(UART7) 收到的脉冲定距命令（串口助手调车 + 里程计标定）        */
 #define MOTOR_TASK_AUTO_DEMO     0
 
-/* 路线扫码调试开关：0=原到站停鸣500ms后继续；1=启用缓行找码 */
+/* 路线扫码调试开关：0=原到站停鸣500ms后继续(调试阶段)；1=启用缓行找码。
+   打开扫码后：到扫码区自动创建UART8转发任务(向显示屏转发任务码)，
+   扫码成功即删除该任务；开关为0时两者都不会发生。 */
 #define MOTOR_ROUTE_QR_SCAN_ENABLE 0
 
 /* ==================== 对外接口 ==================== */
+
+/* 放料夹爪角度：在User/main.c顶部的PLACE_CLAW_CLOSE_DEG/OPEN_DEG修改。 */
+extern const float g_place_claw_close_deg;
+extern const float g_place_claw_open_deg;
 
 /* 四轮速度直控：s1~s4 为带符号转速(RPM)，正负即方向，自动查表定方向位并限幅。
    一次调用把四个电机全下发了；s1~s4 对应例程的 speed[1]~speed[4] */
