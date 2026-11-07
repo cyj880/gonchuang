@@ -11,8 +11,8 @@
 #define BELT_POS_CENTER_PUL        7050   /* 当前中心标定位 */
 #define BELT_POS_GRAB_PUL          1400   /* 原抓取坐标-5600 */
 #define BELT_POS_POSITIVE_DIR      0u     /* 正绝对目标的dir字节: 0=CW；非本次运动方向 */
-#define BELT_POS_SPEED_RPM         300u   /* 电机端转速 */
-#define BELT_POS_ACC               200u
+#define BELT_POS_SPEED_RPM         1200u   /* 电机端转速，RPM */
+#define BELT_POS_ACC               200u   /* 驱动器加速度档位 */
 void Belt_ZDT_OnCanRx(const volatile CanRxMsg *frame); /* CAN2 RX中断里调用 */
 
 /* 位置模式到位回传(驱动器Response=Other时): 发命令前Clear, 等待中Get。 */

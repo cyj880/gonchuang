@@ -52,7 +52,7 @@ void Servo_Init(void)
     TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
     TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
     TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
-    TIM_OCInitStructure.TIM_Pulse = 1611;                        //上电默认100°（500+2000*100/180≈1611us）
+    TIM_OCInitStructure.TIM_Pulse = 1667;                        //上电默认105°（500+2000*105/180≈1667us）
     TIM_OC2Init(TIM5, &TIM_OCInitStructure);                     //TIM5通道2
 
     /*TIM使能（TIM5通用定时器，无需TIM1那种MOE主输出）*/
