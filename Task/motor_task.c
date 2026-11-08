@@ -315,16 +315,16 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define RDK_CENTER_RAW_YAW       90.0f   /*原料区作业航向*/
 #define RDK_RAW_ARM_PRE_DEG      455     /*原料区到站先伸夹爪角度,到位后再识别转盘*/
 #define RDK_RAW_ARM_GRAB_DEG     285     /*对位完成后RM电机预定位角度*/
-#define RDK_RAW_LIFT_POS         84000u  /*对位完成后丝杆绝对目标脉冲(下行,3000RPM)*/
+#define RDK_RAW_LIFT_POS         84000u  /*对位完成后丝杆绝对目标脉冲(下行,6000RPM)*/
 #define RDK_RAW_FINISH_ARM_DEG   107     /*第三块装车后RM收起角度*/
 #define RDK_RAW_FINISH_LIFT_POS  50000u  /*第三块装车后丝杆收起高度，确认到位再结束/回程*/
 #define RDK_RAW_BELT_POS         7040 /*原料区专用到站/收尾位置，不改变圆环站点中心*/
-#define RDK_RAW_CLAW_CLOSE_DEG  109.0f   /*原料区统一夹紧角度；路线和独立1A共用*/
-#define RDK_RAW_SERVO180_DEG     70.0f   /*原料区统一张开角度：到站、每块入槽及第三块收尾共用*/
+#define RDK_RAW_CLAW_CLOSE_DEG   79.0f   /*原料区统一夹紧角度；路线和独立1A共用(2026-11-08机械-30°, 原109°)*/
+#define RDK_RAW_SERVO180_DEG     40.0f   /*原料区统一张开角度：到站、每块入槽及第三块收尾共用(机械-30°, 原70°)*/
 #define RDK_RAW_BELT_WAIT_MS     5000u   /*同步带到位确认超时,超时后放行并照常转舵机*/
 #define RING_STN_ARM_DEG         190     /*圆环站点(粗加工/暂存)到站预定位: RM电机角度*/
 #define RING_STN_BELT_POS        7040 /*两轮粗加工/两轮暂存共用到站位置，独立于中心标定*/
-#define RING_STN_SERVO180_DEG    48.0f   /*圆环站点到站预定位: 180°舵机角度(张开)*/
+#define RING_STN_SERVO180_DEG    18.0f   /*圆环站点到站预定位: 180°舵机角度(张开)(机械-30°, 原48°)*/
 #define GRAB_SERVO_DWELL_MS      400u    /*统一夹取序列: 舵机步进后驻留时间*/
 #define GRAB_REACHED_WAIT_MS     2000u   /*统一夹取序列: 等到位回传超时(超时回读兜底)*/
 #define GRAB_TRIG_TIMEOUT_MS     30000u  /*等RDK触发帧超时(超时no next, 不死等)*/
@@ -2445,7 +2445,7 @@ void MotorTask(void *pvParameters)
                 }
                 break;
 
-            case CMD_LIFT_POS:                   /*0x17: 丝杆绝对位置调试(张大头FD,3000RPM)*/
+            case CMD_LIFT_POS:                   /*0x17: 丝杆绝对位置调试(张大头FD,6000RPM)*/
                 if (!PHASE_CAN_START(phase) || debug_route_active || debug_pause_active ||
                     RDK_Ring_Active())
                     break;

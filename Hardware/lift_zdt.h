@@ -6,10 +6,10 @@
 /* CAN2, 1 Mbps. Chassis motors already occupy addresses 1..4.
  * Set this to the lift driver's actual address before flashing. */
 #define LIFT_ZDT_ADDR              6u
-#define LIFT_HOME_SPEED_RPM        50u    /*回零转速放慢, 减小碰撞冲击(2026-11-01)*/
-#define LIFT_HOME_TIMEOUT_MS       30000u
+#define LIFT_HOME_SPEED_RPM        30u    /*回零转速50→30: 碰撞时挤进螺纹的行程减半, 减轻顶紧拧死(2026-11-08)*/
+#define LIFT_HOME_TIMEOUT_MS       60000u /*30→60s: 回零降速后全程更久(从50000处回零约31s), 超时必须跟着放大(2026-11-08)*/
 #define LIFT_STALL_SPEED_RPM       10u
-#define LIFT_STALL_CURRENT_MA      400u   /*碰撞检测电流减半: 更早判停, 顶得更轻*/
+#define LIFT_STALL_CURRENT_MA      250u   /*400→250: 更早判停顶得更轻, 防碰撞后拧紧; 若未到顶就误判堵转(回零failed)回调到300-350(2026-11-08)*/
 #define LIFT_STALL_TIME_MS         100u
 /* 位置读回单位=驱动器细分脉冲(手册默认16细分=3200脉冲/转)；允许编码器抖动。 */
 #define LIFT_ZERO_TOLERANCE        16u
@@ -17,10 +17,14 @@
 /* UART7 0x17 调试帧：张大头位置模式(0xFD)绝对目标。clk为无符号幅值，方向由dir
    字节给出：绝对目标=±clk。帧值=离开回零位(最高点)的下行行程(0=最高、255100=最低)；
    实车方向反了改 LIFT_POS_DOWN_DIR。 */
-/* 手册5.3.12(Emm固件0xFD)：速度字段上限0x0BB8=3000RPM；加速度0-255档，
- * 每(256-acc)*50us加减1RPM → acc=255即50us/RPM(20000RPM/s)，为曲线加减速最快档；
- * acc=0为不加减速直接启动。竖直丝杆负荷重，若触发堵转保护(屏显Protect!)先降档。 */
-#define LIFT_POS_SPEED_RPM         3000u
+/* 手册5.3.12(Emm固件0xFD)：速度字段文档标注0000-0BB8=0-3000RPM，X42S标称Emm固件
+ * 空载最高6000RPM+(狂暴模式无速度限幅)。2026-11-07提到6000RPM实测后，
+ * 2026-11-08按要求回落5000RPM；若驱动器拒绝(返回E2/EE)或电机不动，
+ * 说明固件不接受>0BB8字段值，改回3000。
+ * 加速度0-255档，每(256-acc)*50us加减1RPM → acc=255即50us/RPM(20000RPM/s)，
+ * 为曲线加减速最快档；acc=0为不加减速直接启动。竖直丝杆负荷重，高速更易
+ * 触发堵转保护(屏显Protect!)，先降档再降速。 */
+#define LIFT_POS_SPEED_RPM         5000u
 #define LIFT_POS_ACC               255u
 #define LIFT_POS_MAX_PUL           255100u /* 全行程下行脉冲上限；坐标0=回零最高点 */
 #define LIFT_POS_DOWN_DIR          1u      /* 下行dir字节: 0=CW(向上) 1=CCW(向下) */

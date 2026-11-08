@@ -27,8 +27,8 @@
    两轮粗加工、第一轮暂存及网页1C放料共用；原料区1A抓取角度独立。
    当前角度越大夹得越紧：夹紧力度不足可适当增大，松不开可适当减小松开角度。
    放料到位后先稳定等待800ms，直接到松开角度并等400ms。 */
-#define PLACE_CLAW_CLOSE_DEG  109.5f  /* 夹紧物料的角度 */
-#define PLACE_CLAW_OPEN_DEG    48.0f  /* 完全松开物料的角度 */
+#define PLACE_CLAW_CLOSE_DEG   79.5f  /* 夹紧物料的角度(2026-11-08机械-30°, 原109.5°) */
+#define PLACE_CLAW_OPEN_DEG    18.0f  /* 完全松开物料的角度(机械-30°, 原48°) */
 
 /* 导出给motor_task.c使用，只需修改上方两个#define。 */
 const float g_place_claw_close_deg = PLACE_CLAW_CLOSE_DEG;
