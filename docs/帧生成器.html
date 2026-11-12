@@ -234,7 +234,7 @@ function render() {
          <div class="hint">RM M2006/P36夹爪电机绝对目标角度，以上电首次有效反馈位置为0°，不是累加角度。CAN1、C610 ID1。仅车端空闲或已完成时接受；发送后底盘保持停车，电机到位保持。重复设定直接改目标。发送06立即停止电机电流。角度为整数0~500，不允许负角度（机械上负方向会堵转）。</div>`;
   } else if (cur === 'liftpos') {
     h = `<div class="row"><label for="liftPul">目标绝对脉冲(0~255100)</label><input type="number" id="liftPul" value="65536" min="0" max="255100" step="1"></div>
-         <div class="hint">丝杆张大头电机(CAN2地址6)位置模式，数值=离开回零位(最高点)的向下行程：0=回到最高点，255100=最低点，65536脉冲=电机轴1圈。实车已核对：正数值向下延伸，越小越靠近最高点。速度固定5000RPM，到位自动保持。重复发送直接替换目标；发送06立即停车。要求车端空闲且无路线/停顿/圆环流程，发送时底盘保持停车。</div>`;
+         <div class="hint">丝杆张大头电机(CAN2地址6)位置模式，数值=离开回零位(最高点)的向下行程：0=回到最高点，255100=最低点，65536脉冲=电机轴1圈。实车已核对：正数值向下延伸，越小越靠近最高点。速度固定3000RPM，到位自动保持。重复发送直接替换目标；发送06立即停车。要求车端空闲且无路线/停顿/圆环流程，发送时底盘保持停车。</div>`;
   } else if (cur === 'servo') {
     h = `<div class="row"><label for="srv180">180°舵机角度(0~180°)</label><input type="number" id="srv180" value="100" min="0" max="180" step="1"></div>
          <div class="row"><label for="srv270">270°舵机角度(0~270°)</label><input type="number" id="srv270" value="0" min="0" max="270" step="1"></div>
@@ -375,7 +375,7 @@ el('gen').onclick = () => {
       const p = num('liftPul');
       if (isNaN(p) || p < 0 || p > 255100) throw '目标脉冲须为 0~255100 的整数';
       payload = i32le(p);
-      desc = `丝杆下行 ${p} 脉冲(≈${(p/65536).toFixed(2)}圈, 0=最高点), 5000RPM`;
+      desc = `丝杆下行 ${p} 脉冲(≈${(p/65536).toFixed(2)}圈, 0=最高点), 3000RPM`;
     } else if (cur === 'servo') {
       cmd = 0x18;
       const a1 = num('srv180'), a2 = num('srv270');

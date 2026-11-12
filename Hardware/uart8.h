@@ -59,8 +59,8 @@ typedef struct
 /* 本端要上报的搬运信息 */
 typedef struct
 {
-    uint8_t grab;       /* 抓取正确次数 0~6 */
-    uint8_t place;      /* 放置正确次数 0~6 */
+    uint8_t grab;       /* 抓取正确次数 0~12（原料区夹取6 + 粗加工取回6） */
+    uint8_t place;      /* 放置正确次数 0~12（粗加工6 + 暂存6） */
     uint8_t load;       /* 当前车载（已夹取）物料数量 0~3 */
 } TaskLinkStat;
 

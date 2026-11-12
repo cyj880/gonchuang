@@ -292,7 +292,7 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
    整定: 先 Kp(0.0005起, 太慢加大/振荡减小), 再 Ki(消除稳态误差), Kd 默认关闭
    (里程计约35ms刷新一次位置, 微分对量化噪声敏感)。 */
 #define POS_TOL_COUNTS      5000     /* 到位容差(编码值): 目标±5000, 进入即停车 */
-#define POS_DECEL_COUNTS    400000   /* 距目标约662mm开始渐进减速，降低末段制动负担 */
+#define POS_DECEL_COUNTS    360000   /* 距目标约549mm渐进减速：原400000缩短10%，末段精定位不变 */
 #define POS_QR_SLOW_COUNTS  12000    /* 最后约18mm进入低速平滑收尾 */
 #define POS_APPROACH_RPM    12       /* 直行末段速度上限，缩短等待 */
 #define POS_QR_SLOW_RPM     5        /* 扫码搜索速度保持5RPM */
@@ -315,7 +315,7 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define RDK_CENTER_RAW_YAW       90.0f   /*原料区作业航向*/
 #define RDK_RAW_ARM_PRE_DEG      455     /*原料区到站先伸夹爪角度,到位后再识别转盘*/
 #define RDK_RAW_ARM_GRAB_DEG     285     /*对位完成后RM电机预定位角度*/
-#define RDK_RAW_LIFT_POS         84000u  /*对位完成后丝杆绝对目标脉冲(下行,6000RPM)*/
+#define RDK_RAW_LIFT_POS         84000u  /*对位完成后丝杆绝对目标脉冲；速度共用LIFT_POS_SPEED_RPM*/
 #define RDK_RAW_FINISH_ARM_DEG   107     /*第三块装车后RM收起角度*/
 #define RDK_RAW_FINISH_LIFT_POS  50000u  /*第三块装车后丝杆收起高度，确认到位再结束/回程*/
 #define RDK_RAW_BELT_POS         7040 /*原料区专用到站/收尾位置，不改变圆环站点中心*/
@@ -338,7 +338,7 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define POS_FINAL_RPM       4.0f    /*最后约12mm平滑降到4RPM，避免长时间爬行*/
 #define POS_FINISH_MS       150u    /*仅低速正常到位用150ms收尾；故障/超目标仍立即停*/
 #define POS_DECEL_SLEW_RPM_S 180.0f /*正常接近目标时限制减速斜率，避免轮速突降抖动；
-                                        不得低于空间限速曲线所需斜率(约136RPM/s峰值)，
+                                        缩短减速区后需复核实际制动能力，
                                         否则减速带内压不住速度，到位仍高速→立即停车*/
 #define POS_START_RAMP_MS   1200u     /* 延长起步平滑爬升，降低打滑 */
 #define POS_RUN_TIMEOUT_MS  30000u   /* 位置闭环最长运行时间, 超时自动停车 */
@@ -1070,11 +1070,9 @@ static void debug_qr_scan_found(void)
 {
     debug_qr_scan_active = 0;
     debug_qr_scan_done = 1;
-    if (qr_report_handle != NULL)
-    {
-        vTaskDelete(qr_report_handle);   /*扫码成功, 转发任务删除, 鸣叫后继续路线*/
-        qr_report_handle = NULL;
-    }
+    /* 转发任务(TLink)不再删除: 全程保留1s轮询, 夹取/放置计数一变即发屏(最多1s延迟)。
+       此处主动补发一行任务码, 不依赖轮询, 扫码即上屏。 */
+    UART8_SendTaskCode();
     debug_point_pause_start(4, 500);
 }
 
@@ -1915,11 +1913,13 @@ static void station_place_run(void)
         station_place.retrieve)
     {
         /* 第三块放开后直接进入取回准备，不先回50000/1400。 */
+        UART8_PlaceOk();   /*粗加工第三块已放到站点环上: 放置正确+1*/
         station_place.pick = 0;
         station_place.step = PLACE_RETRIEVE_LIFT100;
     }
     else if (station_place.step == PLACE_BELT_HOME)
     {
+        UART8_PlaceOk();   /*一块放置回位完成: 放置正确+1(粗加工/暂存每块都计)*/
         if (++station_place.pick == 3u)
         {
             if (station_place.manual)
@@ -1938,6 +1938,7 @@ static void station_place_run(void)
     }
     else if (station_place.step == PLACE_RETRIEVE_LIFT_HOME)
     {
+        UART8_GrabOk();   /*一块粗加工取回完成(物料已落回车上槽位): 抓取正确+1*/
         if (++station_place.pick == 3u)
         {
             station_place.step = station_place.manual ? PLACE_FINISHED : PLACE_ROUTE_RESUME;
@@ -2445,7 +2446,7 @@ void MotorTask(void *pvParameters)
                 }
                 break;
 
-            case CMD_LIFT_POS:                   /*0x17: 丝杆绝对位置调试(张大头FD,6000RPM)*/
+            case CMD_LIFT_POS:                   /*0x17: 丝杆绝对位置调试，速度共用LIFT_POS_SPEED_RPM*/
                 if (!PHASE_CAN_START(phase) || debug_route_active || debug_pause_active ||
                     RDK_Ring_Active())
                     break;
@@ -2879,6 +2880,7 @@ void MotorTask(void *pvParameters)
             Motor_Stop();
             if (grab_step_index >= GRAB_STEP_NUM)
             {
+                UART8_GrabOk();   /*一块夹取序列完成(夹紧+抬到位): 抓取正确+1*/
                 if (grab_manual)
                 {
                     /* 网页/串口手动触发: 00模式连续夹完本批剩余的块(1→2→3)后停车,

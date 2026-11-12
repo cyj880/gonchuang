@@ -13,7 +13,7 @@
 #define MOTOR_STALL_PROTECT    0x08u
 #define LIFT_STOP_TIMEOUT_MS   1000u
 
-static uint8_t lift_addr;
+static uint8_t lift_addr = LIFT_ZDT_ADDR; /* 跳过上电回零时，到位反馈和位置回读仍使用电机6地址。 */
 static volatile uint8_t reply_code;
 static volatile uint8_t reply_ready;
 static volatile uint8_t reply_size;

@@ -38,9 +38,10 @@ const float g_place_claw_open_deg  = PLACE_CLAW_OPEN_DEG;
 /* ---- 陀螺仪选择开关: 两陀螺仪物理共用USART6/PG9, 同一时刻只插一个; 改后重新上电, 只能一个为1 ---- */
 uint8_t Bno085_RunFlag = 0;    /*1=BNO085 RVC@115200*/
 uint8_t lunqu_RunFlag  = 1;    /*1=轮趣FDI FDILink@921600*/
-/* 丝杆(张大头ID6)上电自动回零开关: 1=开机阻塞回零,失败卡死不开机; 0=跳过回零直接开机
-   (跳过后丝杆位置未知,执行升降/定位动作前需先手动回零或重新置零) */
-uint8_t Lift_AutoHome_RunFlag = 1;
+/* 丝杆(张大头ID6)上电自动回零开关：0=关闭(默认)，跳过回零直接开机；
+   1=开启，开机阻塞回零，失败时不启动任务。修改后重新编译烧录，下次上电生效。
+   跳过回零不会自动设置零点，执行绝对定位前需先确认或校准丝杆零点。 */
+uint8_t Lift_AutoHome_RunFlag = 0;
 /**
   * STM32F427IIH（大疆 RoboMaster A 板）+ FreeRTOS V11.1.0
   * 任务函数放在 Task/ 文件夹（led_task.c、servo_task.c、 motor_task.c、lcd_task.c），

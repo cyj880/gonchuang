@@ -17,14 +17,12 @@
 /* UART7 0x17 调试帧：张大头位置模式(0xFD)绝对目标。clk为无符号幅值，方向由dir
    字节给出：绝对目标=±clk。帧值=离开回零位(最高点)的下行行程(0=最高、255100=最低)；
    实车方向反了改 LIFT_POS_DOWN_DIR。 */
-/* 手册5.3.12(Emm固件0xFD)：速度字段文档标注0000-0BB8=0-3000RPM，X42S标称Emm固件
- * 空载最高6000RPM+(狂暴模式无速度限幅)。2026-11-07提到6000RPM实测后，
- * 2026-11-08按要求回落5000RPM；若驱动器拒绝(返回E2/EE)或电机不动，
- * 说明固件不接受>0BB8字段值，改回3000。
+/* 手册5.3.12(Emm固件0xFD)：速度字段0000-0BB8=0-3000RPM。
+ * 丝杆正常定位速度统一3000RPM，自动流程及独立0x17调试共用。
  * 加速度0-255档，每(256-acc)*50us加减1RPM → acc=255即50us/RPM(20000RPM/s)，
  * 为曲线加减速最快档；acc=0为不加减速直接启动。竖直丝杆负荷重，高速更易
  * 触发堵转保护(屏显Protect!)，先降档再降速。 */
-#define LIFT_POS_SPEED_RPM         5000u
+#define LIFT_POS_SPEED_RPM         3000u
 #define LIFT_POS_ACC               255u
 #define LIFT_POS_MAX_PUL           255100u /* 全行程下行脉冲上限；坐标0=回零最高点 */
 #define LIFT_POS_DOWN_DIR          1u      /* 下行dir字节: 0=CW(向上) 1=CCW(向下) */
@@ -51,7 +49,7 @@ typedef struct {
     uint8_t motor_flags;
 } LiftHomeDiag_t;
 
-/* 丝杆上电自动回零开关(定义在main.c): 1=开机阻塞回零,失败卡死不开机; 0=跳过回零直接开机。
+/* 丝杆上电自动回零开关(定义在main.c，默认0): 1=开机阻塞回零,失败卡死不开机; 0=跳过回零直接开机。
    跳过后丝杆位置未知,执行升降/定位动作前需先手动回零或重新置零。 */
 extern uint8_t Lift_AutoHome_RunFlag;
 

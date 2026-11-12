@@ -471,18 +471,18 @@ void UART8_SendStat(void)
     UART8_SendString("\r\n");
 }
 
-void UART8_SetGrab(uint8_t n)  { g_link_stat.grab  = (n > 6) ? 6 : n; }
-void UART8_SetPlace(uint8_t n) { g_link_stat.place = (n > 6) ? 6 : n; }
+void UART8_SetGrab(uint8_t n)  { g_link_stat.grab  = (n > 12) ? 12 : n; }
+void UART8_SetPlace(uint8_t n) { g_link_stat.place = (n > 12) ? 12 : n; }
 void UART8_SetLoad(uint8_t n)  { g_link_stat.load  = (n > 3) ? 3 : n; }
 
 void UART8_GrabOk(void)
 {
-    if (g_link_stat.grab < 6) g_link_stat.grab++;
+    if (g_link_stat.grab < 12) g_link_stat.grab++;
 }
 
 void UART8_PlaceOk(void)
 {
-    if (g_link_stat.place < 6) g_link_stat.place++;
+    if (g_link_stat.place < 12) g_link_stat.place++;
 }
 
 void UART8_LoadInc(void)
@@ -539,6 +539,6 @@ void UART8_ReportTask(void *pvParameters)
             last_l = g_link_stat.load;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(1000));   /*实时性要求低: 1s轮询足够, 夹/放后最多1s到屏*/
     }
 }
