@@ -3,8 +3,8 @@
 
 #include "imu.h"
 
-/* HWT101 TTL -> USART6：PG9(RX)接模块TX，PG14(TX)接模块RX，115200-8N1。
-   出厂10Hz，调度器启动后由MotorTask轮询非阻塞配置100Hz并验证。
+/* HWT101 TTL -> USART6：PG9(RX)接模块TX，115200-8N1；模块RX无需连接。
+   100Hz已由上位机配置；只接收，首个有效角度帧后就绪，不自动配置。
    原路线约定yaw正方向为俯视车体顺时针。水平安装、Z轴朝上时，
    将维特右手系Z角度取反；若反面安装，应先实测方向后改为+1。
    方向只在驱动入口转换，不能同时修改电机任务的YAW/TURN_OUT_SIGN。 */
@@ -20,7 +20,6 @@ typedef enum
 
 void HWT101_Init(void);
 void HWT101_RxByte(uint8_t byte); /* 仅由USART6 ISR调用，便于协议回放验证。 */
-void HWT101_Poll(uint32_t now_ms); /* 任务调用，时间来自RTOS tick；无阻塞等待。 */
 HWT101_ConfigStatus_t HWT101_ConfigStatus(void);
 
 /* 航向后端接口，上层通过imu.h的IMU_*统一入口调用。 */

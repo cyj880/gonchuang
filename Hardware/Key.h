@@ -6,6 +6,10 @@
 #define KEY1_GPIO_Port	GPIOB			//A板用户按键接在PB2（手册1.7节）
 #define KEY1_Pin		GPIO_Pin_2
 
+/* 一键启动按键: 外接模块(5V上拉, 按下低电平/释放高电平), 信号接PI7(FT引脚, 5V安全) */
+#define KEY2_GPIO_Port	GPIOI
+#define KEY2_Pin		GPIO_Pin_7
+
 typedef struct
 {
 	BitAction Previous;					//上一次扫描到的电平

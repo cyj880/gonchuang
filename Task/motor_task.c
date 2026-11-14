@@ -812,6 +812,7 @@ static TaskHandle_t qr_report_handle = NULL;  /*到扫码区创建/成功后删�
 static void task_step_done(void);
 static void turn_run_start(float start_yaw, float delta, uint8_t accumulate);
 static uint8_t debug_leg_load(void);
+static void debug_route_start(uint8_t selection);
 static void debug_leg_start(void);
 static void debug_rdk_center_return_done(void);
 static void belt_pos_goto(int32_t target);
@@ -820,6 +821,20 @@ static void station_place_fail(void);
 uint8_t Motor_NoNext(void)
 {
     return no_next_alarm;
+}
+
+/* 一键启动(批次1/2/3, 3=连续两批): 供0x13帧与外接启动按键共用。
+   守卫失败静默返回——未完整上传/运行中/已锁定时不启动, 也不发任何反馈。
+   route_debug_take 成功即锁定路线缓存, 保证"连续跑两批"按键的一次性语义:
+   启动后重复触发失败, 须06中止并重新上传路线后才可能再次启动。 */
+void Motor_DebugRunStart(uint8_t selection)
+{
+    if (!PHASE_CAN_START(phase) || debug_route_active || debug_pause_active ||
+        !route_debug_take(selection))
+        return;                                /*未完整上传/运行中: 静默无效*/
+    array_mode = 0;
+    leg1_next_valid = 0;
+    debug_route_start(selection);
 }
 
 uint8_t Motor_RunFault(void)
@@ -2506,12 +2521,12 @@ void MotorTask(void *pvParameters)
     {
         ZbeeCmd c;
 
-        IMU_Poll(ring_now_ms()); /* 仅HWT101配置/验证100Hz；轮趣不发送配置。 */
+        IMU_Poll(ring_now_ms()); /* 保留统一轮询接口；两款均只接收，不自动配置。 */
         RDK_Center_Poll();
 
         if (cmd_get(&c))
         {
-            /* 所选航向源未就绪时不启动闭环；轮趣只等首个AHRS帧，HWT101等100Hz验证。 */
+            /* 所选航向源未就绪时不启动闭环；两款均等待首个有效航向帧。 */
             if (IMU_ConfigStatus() != IMU_CONFIG_READY &&
                 (c.type == CMD_POS_GO || c.type == CMD_POS_ADV || c.type == CMD_CHAIN ||
                  c.type == CMD_RUNALL || c.type == CMD_DEBUG_RUN ||
@@ -2660,12 +2675,7 @@ void MotorTask(void *pvParameters)
 
             case CMD_DEBUG_RUN:                    /*0x13: 路线已上传后的调试一键启动*/
                 cmd_tx_ack(&c);
-                if (!PHASE_CAN_START(phase) || debug_route_active || debug_pause_active ||
-                    !route_debug_take((uint8_t)c.param))
-                    break;                         /*未完整上传/运行中: 只确认收帧, 保持停车*/
-                array_mode = 0;
-                leg1_next_valid = 0;
-                debug_route_start((uint8_t)c.param);
+                Motor_DebugRunStart((uint8_t)c.param);
                 break;
 
             case CMD_RING_ALIGN:

@@ -20,7 +20,7 @@ uint8_t IMU_Source(void)
 
 void IMU_Poll(uint32_t now_ms)
 {
-    if (active_source == IMU_SOURCE_HWT101) HWT101_Poll(now_ms);
+    (void)now_ms; /* 两款均只接收，保留统一轮询接口，不发送配置。 */
 }
 
 IMU_ConfigStatus_t IMU_ConfigStatus(void)

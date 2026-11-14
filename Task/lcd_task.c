@@ -298,9 +298,9 @@ static void lcd_odom_yaw_line(void)
     const char *name = source == IMU_SOURCE_HWT101 ? "HWT" :
                        source == IMU_SOURCE_LUNQU ? "LQ " : "IMU";
     const char *state = status == IMU_CONFIG_READY ?
-        (source == IMU_SOURCE_HWT101 ? "100Hz" : "READY") :
+        "READY" :
         status == IMU_CONFIG_FAILED ? "ERR" :
-        (source == IMU_SOURCE_HWT101 ? "SET" : "WAIT");
+        "WAIT";
     LCD_Printf(0, 76, LCD_6X8, "yaw %-3d %s:%-5s    ", (int)IMU_GetYawAbs360(), name, state);
 }
 

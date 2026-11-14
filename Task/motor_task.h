@@ -111,7 +111,8 @@ typedef struct
     uint32_t elapsed_ms;
 } MotorGrabStatus_t;
 void Motor_GrabGetStatus(MotorGrabStatus_t *out); /*原料区实时等待状态；只读，不额外查询电机。*/
-uint8_t Motor_NoNext(void);             /*未知下一段时返回1，供LCD显示no next*/
+uint8_t Motor_NoNext(void);
+void Motor_DebugRunStart(uint8_t selection); /* 一键启动(1/2批, 3=连续两批), 供0x13帧与外接启动按键共用 */             /*未知下一段时返回1，供LCD显示no next*/
 enum { MOTOR_RUN_FAULT_NONE, MOTOR_RUN_FAULT_ODOM,
        MOTOR_RUN_FAULT_PROGRESS, MOTOR_RUN_FAULT_TIMEOUT };
 uint8_t Motor_RunFault(void); /* 行驶保护停车原因，保持到新运动启动或06中止。 */

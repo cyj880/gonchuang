@@ -10,20 +10,29 @@
   * 扫描逻辑：松开沿（高→低）触发 ClickedCallback，避免长按重复触发。
   */
 
-//按键初始化函数（配置引脚为下拉输入，并复位扫描状态）
+//按键初始化函数（配置引脚为浮空输入，并复位扫描状态；时钟按所在端口自动使能）
 void Key_Init(KeyHandle_TypeDef *Handle)
 {
 	GPIO_InitTypeDef GPIO_InitStructure;
 
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+	/*按句柄端口使能对应GPIO时钟(2026-11-14支持多端口: PB2板载键/PI7外接启动键)*/
+	switch ((uint32_t)Handle->GPIO_Port)
+	{
+	case GPIOA_BASE: RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE); break;
+	case GPIOB_BASE: RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE); break;
+	case GPIOC_BASE: RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE); break;
+	case GPIOE_BASE: RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOE, ENABLE); break;
+	case GPIOF_BASE: RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOF, ENABLE); break;
+	case GPIOI_BASE: RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOI, ENABLE); break;
+	default: break;
+	}
 
-	//PB2浮空输入，按键按下为高电平
-	GPIO_InitStructure.GPIO_Pin = KEY1_Pin;
+	GPIO_InitStructure.GPIO_Pin = Handle->GPIO_Pin;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
 	GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
-	GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
-	GPIO_Init(KEY1_GPIO_Port, &GPIO_InitStructure);
+	GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;   /*外接模块自带5V上拉, 板载PB2按下为高*/
+	GPIO_Init(Handle->GPIO_Port, &GPIO_InitStructure);
 
 	Handle->Previous = Bit_RESET;
 	Handle->Current = Bit_RESET;

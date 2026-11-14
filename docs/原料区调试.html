@@ -21,7 +21,7 @@
 <p id="order" class="note"></p>
 <div class="row"><button id="start" class="primary" disabled>一键启动原料区</button><button id="abort" class="stop" disabled>立即中止 06</button></div>
 <div id="status" class="status" role="status">连接UART7对应串口后即可启动。请使用Chrome或Edge。</div>
-<p class="note">main.c的IMU_Select：0=HWT101（TX接PG9、RX接PG14，上电自动配置100Hz，等HWT:100Hz）；1=轮趣（当前选择，TX接PG9，原921600，等LQ :READY）。共地、仅接所选一款，修改后重新编译上电。网页串口仍为UART7 115200。原料区调试完成后保持停车；重新开始前先点“立即中止”解除本页运行锁。车载屏可查看流程与 no next 具体原因。</p>
+<p class="note">main.c的IMU_Select：0=HWT101（当前选择，TX接PG9、共地，上位机已设100Hz，STM32只接收，等HWT:READY）；1=轮趣（TX接PG9，原921600，等LQ :READY）。共地、仅接所选一款，修改后重新编译上电。网页串口仍为UART7 115200。原料区调试完成后保持停车；重新开始前先点“立即中止”解除本页运行锁。车载屏可查看流程与 no next 具体原因。</p>
 </section>
 <section class="card">
 <h2 style="margin-top:0;font-size:19px">本次执行流程</h2>
