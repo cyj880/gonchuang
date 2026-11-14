@@ -253,7 +253,6 @@ LiftHomeResult_t Lift_ZDT_HomeBeforeScheduler(uint8_t addr)
     static const uint8_t setup_commands[] = {0x9C, 0x0E, 0xF3, 0xFE, 0x4C};
     LiftHomeResult_t result;
     uint32_t start, position;
-    uint32_t waited = 0u;
     uint8_t i, flags;
 
     /* Never use the broadcast address or an existing chassis address. */
@@ -289,25 +288,7 @@ LiftHomeResult_t Lift_ZDT_HomeBeforeScheduler(uint8_t addr)
         goto failed;
     }
 
-    /* 预移动: 若上一轮丝杆停在上位限位处, 直接CW回零会"未移动即堵转",
-       被驱动器判为回零失败(Org_CF, 屏显failed:5/ORG:0B)。先CCW向下退
-       2000脉冲离开顶部, 再触发回零。预移动未确认到位也不阻塞, 继续回零。 */
-    Lift_ZDT_ReachedClear();
-    Emm_V5_Pos_Control(addr, LIFT_POS_DOWN_DIR, 500u, 200u,
-                       LIFT_HOME_RETREAT_PUL, false, false);
-    while (!Lift_ZDT_ReachedGet() && waited < LIFT_HOME_RETREAT_WAIT_MS)
-    { Delay_ms(10); waited += 10; }
-    if (!Lift_ZDT_ReachedGet())
-    {
-        /* 预移动未确认(如已在下限位堵转): 解堵转+重新使能后照常回零。 */
-        lift_prepare_reply(0x0E);
-        Emm_V5_Reset_Clog_Pro(lift_addr);
-        (void)lift_wait_reply(3, LIFT_REPLY_TIMEOUT_MS);
-        lift_prepare_reply(0xF3);
-        Emm_V5_En_Control(lift_addr, true, false);
-        (void)lift_wait_reply(3, LIFT_REPLY_TIMEOUT_MS);
-        Delay_ms(20);
-    }
+    /* 直接向上回零，不再先向下预移动。 */
     Lift_ZDT_ReachedClear();
 
     result = lift_command(0x9A);

@@ -26,6 +26,17 @@
 
 #define ENC_RS485_DEFAULT_STATION   1     /* 当前总线上的编码器站号 */
 
+enum { ENC_RS485_OK, ENC_RS485_NO_REPLY, ENC_RS485_BAD_FRAME,
+       ENC_RS485_TX_TIMEOUT, ENC_RS485_RX_OVERFLOW, ENC_RS485_UART_ERROR };
+typedef struct
+{
+    uint32_t requests, successes, rx_bytes, overruns, uart_errors, buffer_overflows, crc_errors;
+    uint32_t irq_calls, tx_completed, recoveries; /* recoveries仅重建STM32串口，不复位编码器。 */
+    uint8_t last_error, last_rx_len;
+    uint8_t hw_flags, direction_tx; /*最近失败快照；hw_flags正常=0x7F，direction_tx正常=0。*/
+} EncRS485_Diagnostics;
+void EncRS485_GetDiagnostics(EncRS485_Diagnostics *out); /*只读计数，不发命令或修改编码器坐标。*/
+
 /* 阻塞读一次虚拟多圈位置(含收发与超时, 线缆收发约1.5ms，另加应答等待; 失败返回0)
    station: 编码器站号  pos: 出参(32位位置值) */
 uint8_t EncRS485_ReadPos(uint8_t station, uint32_t *pos);

@@ -10,19 +10,19 @@
   *   三次多项式 smoothstep（去程用）：
   *     位置 s(t) = 3t² - 2t³，速度 v(t) = 6t(1-t) —— 开口向下的抛物线，
   *     两端速度为 0，中点最快（峰值 = 1.5 倍平均速度）。
-  *   五次多项式 smootherstep（240°→0° 回程用）：
+  *   五次多项式 smootherstep（270°→30° 回程用）：
   *     位置 s(t) = 6t⁵ - 15t⁴ + 10t³，速度 v(t) = 30t²(1-t)²，
   *     加速度 a(t) = 60t(1-t)(1-2t)，两端速度、加速度均为 0 ——
   *     与前后步骤衔接处速度连续、加速度也连续，无加速度突跳。
   *
   * 对位步骤表（脉宽 500~2500us 线性映射 0~270°）：
-  *   步骤0  0°              500us     盘1
-  *   步骤1  120°            ≈1389us   盘2
-  *   步骤2  240°            ≈2278us   盘3
-  *   循环   直接回 0°        500us     回到盘1（五次多项式缓动），重复
+  *   步骤0  30°             ≈722us     盘1
+  *   步骤1  150°            ≈1611us   盘2
+  *   步骤2  270°            2500us   盘3
+  *   循环   直接回 30°       ≈722us     回到盘1（五次多项式缓动），重复
   *
  * 节奏：每 3s 走一个步骤 —— 缓动 2s 到下一工位 + 静置 1s。
- * 上电默认30°保持（Servo270_Init；当前任务未创建，见 main.c），
+ * 上电默认60°保持（Servo270_Init；当前任务未创建，见 main.c），
  * 若重新启用本任务：静置 1s 后从盘1工位开始走循环。
   * 注意：回程 240° 与去程 120° 同用 2s，且五次曲线峰值速度 = 1.875 倍平均
   *       （三次为 1.5 倍），回程峰值 ≈225°/s，比去程明显快；嫌快可加大回程
@@ -88,14 +88,14 @@ static void Servo270_EaseTo(float start, float target, uint32_t duration_ms,
   */
 void Servo_Task(void *pvParameters)
 {
-    uint8_t step = 0;   /* 从盘1工位开始（上电默认30°保持，见 Servo270_Init） */
+    uint8_t step = 0;   /* 从盘1工位开始（上电默认60°保持，见 Servo270_Init） */
 
     (void)pvParameters;
     vTaskDelay(pdMS_TO_TICKS(1000));    /* 上电静置 1s 等舵机稳定，再走第一步 */
 
     for (;;)
     {
-        /* 0→1→2→0 循环：240° 直接回 0° 的回程用五次多项式（速度、加速度连续），其余三次 */
+        /* 0→1→2→0 循环：270° 直接回 30° 的回程用五次多项式（速度、加速度连续），其余三次 */
         uint8_t next = (uint8_t)((step + 1) % 3);
         Servo_EaseType curve = (next == 0) ? EASE_QUINTIC : EASE_CUBIC;
         Servo270_EaseTo(servo270_step_angle[step], servo270_step_angle[next], 2000, curve);

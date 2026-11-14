@@ -1,7 +1,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "Encoder_RS485.h"
-#include "lunqu_imu.h"
+#include "imu.h"
 #include "odom_task.h"
 
 /* 站号1单里程计：读取编码器内部累计的有符号多圈位置。
@@ -23,38 +23,20 @@ typedef struct
 static OdomCh        odom_ch;
 static OdomData_t    s_odom;
 static volatile uint8_t s_reset_req = 0;
-static volatile uint8_t s_encoder_read_enabled = 1;
-static volatile uint8_t s_encoder_read_busy = 0;
-static volatile uint8_t s_encoder_pause_ack = 0;
 static volatile uint32_t s_encoder_sequence = 0;
 
-/* 编码器轮询任务，yaw更新不依赖编码器在线状态。 */
+/* 编码器全程连续轮询（含视觉/抓取/放料），yaw更新不依赖编码器在线状态。 */
 void OdomTask(void *pvParameters)
 {
     TickType_t last_tick = 0;
-    uint8_t read_claimed;
     (void)pvParameters;
 
     for (;;)
     {
         /*编码器掉线时仍刷新yaw*/
         taskENTER_CRITICAL();
-        s_odom.yaw_deg = IMU_GetYaw();   /*按陀螺仪开关取当前源(轮趣/BNO085)*/
+        s_odom.yaw_deg = IMU_GetYaw();   /*所选陀螺仪最新软件航向，编码器读取逻辑不变*/
         taskEXIT_CRITICAL();
-
-        /*Claim a read atomically so pause can wait for any in-flight transaction.*/
-        taskENTER_CRITICAL();
-        read_claimed = s_encoder_read_enabled;
-        if (read_claimed)
-            s_encoder_read_busy = 1;
-        else
-            s_encoder_pause_ack = 1;
-        taskEXIT_CRITICAL();
-        if (!read_claimed)
-        {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
 
         /*原点复位请求在下次有效读数时生效*/
         if (s_reset_req)
@@ -72,7 +54,7 @@ void OdomTask(void *pvParameters)
         /*仅访问站号1*/
         {
             uint32_t raw;
-            if (EncRS485_ReadPos(ENC_RS485_DEFAULT_STATION, &raw))   /*阻塞约25ms*/
+            if (EncRS485_ReadPos(ENC_RS485_DEFAULT_STATION, &raw))   /*有界收发等待，失败后仍持续轮询*/
             {
                 OdomCh *c = &odom_ch;
                 TickType_t now = xTaskGetTickCount();
@@ -83,23 +65,18 @@ void OdomTask(void *pvParameters)
                 float d_mm = (float)d_cnt * ODOM_MM_PER_COUNT;
 
                 taskENTER_CRITICAL();
-                if (s_encoder_read_enabled)
-                {
-                    if (!c->have) { d_cnt = 0; d_mm = 0.0f; c->have = 1; }
-                    if (c->zero_pend) { d_cnt = 0; d_mm = 0.0f; c->zero_pend = 0; }
+                if (!c->have) { d_cnt = 0; d_mm = 0.0f; c->have = 1; }
+                if (c->zero_pend) { d_cnt = 0; d_mm = 0.0f; c->zero_pend = 0; }
 
-                    c->last = pos;
-                    c->miss = 0;
-                    s_odom.enc_pos[ODOM_POS_AXIS]  = pos;
-                    c->cnt_acc          += d_cnt;
-                    s_odom.dist_mm[ODOM_POS_AXIS] += (int32_t)d_mm;
-                    s_odom.turns[ODOM_POS_AXIS]    = c->cnt_acc / (int32_t)ODOM_COUNTS_PER_REV;
-                    s_odom.online[ODOM_POS_AXIS]   = 1;
-                    if (dt_s > 0.001f) s_odom.speed_mm_s[ODOM_POS_AXIS] = d_mm / dt_s;
-                    s_encoder_sequence++;
-                }
-                s_encoder_read_busy = 0;
-                if (!s_encoder_read_enabled) s_encoder_pause_ack = 1;
+                c->last = pos;
+                c->miss = 0;
+                s_odom.enc_pos[ODOM_POS_AXIS]  = pos;
+                c->cnt_acc          += d_cnt;
+                s_odom.dist_mm[ODOM_POS_AXIS] += (int32_t)d_mm;
+                s_odom.turns[ODOM_POS_AXIS]    = c->cnt_acc / (int32_t)ODOM_COUNTS_PER_REV;
+                s_odom.online[ODOM_POS_AXIS]   = 1;
+                if (dt_s > 0.001f) s_odom.speed_mm_s[ODOM_POS_AXIS] = d_mm / dt_s;
+                s_encoder_sequence++;
                 taskEXIT_CRITICAL();
                 last_tick = now;
             }
@@ -112,10 +89,6 @@ void OdomTask(void *pvParameters)
                     s_odom.online[ODOM_POS_AXIS] = 0;
                     taskEXIT_CRITICAL();
                 }
-                taskENTER_CRITICAL();
-                s_encoder_read_busy = 0;
-                if (!s_encoder_read_enabled) s_encoder_pause_ack = 1;
-                taskEXIT_CRITICAL();
             }
         }
 
@@ -129,11 +102,7 @@ void OdomTask(void *pvParameters)
   */
 void odometry_get(OdomData_t *out)
 {
-    if (out == 0) return;
-
-    taskENTER_CRITICAL();
-    *out = s_odom;
-    taskEXIT_CRITICAL();
+    (void)odometry_snapshot(out);
 }
 
 /*里程原点复位，不清除用于路线定位的原始编码值*/
@@ -142,30 +111,15 @@ void odometry_reset(void)
     s_reset_req = 1;
 }
 
-uint32_t odometry_pause_encoder_read(OdomData_t *snapshot)
+/* 同一临界区取得数据和帧序号，只保存快照，不暂停读取或等待串口事务。 */
+uint32_t odometry_snapshot(OdomData_t *snapshot)
 {
     uint32_t sequence;
-    taskENTER_CRITICAL();
-    s_encoder_read_enabled = 0;
-    s_encoder_pause_ack = (uint8_t)!s_encoder_read_busy;
-    taskEXIT_CRITICAL();
-
-    while (!s_encoder_pause_ack)
-        vTaskDelay(pdMS_TO_TICKS(1));
-
     taskENTER_CRITICAL();
     if (snapshot != 0) *snapshot = s_odom;
     sequence = s_encoder_sequence;
     taskEXIT_CRITICAL();
     return sequence;
-}
-
-void odometry_resume_encoder_read(void)
-{
-    taskENTER_CRITICAL();
-    s_encoder_read_enabled = 1;
-    s_encoder_pause_ack = 0;
-    taskEXIT_CRITICAL();
 }
 
 uint32_t odometry_encoder_sequence(void)

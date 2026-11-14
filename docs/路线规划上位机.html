@@ -150,7 +150,7 @@
         <button class="btn mini" id="btnSendBoth">两批连发</button>
         <button class="btn mini warn" id="btnDebugStart1" disabled title="先发送第一批并等待STM32回传完成">▶ 调试一键启动（批次1）</button>
         <button class="btn mini green" id="btnDebugStart2" disabled title="先发送第二批并等待STM32回传完成">▶ 启动第二批</button>
-        <button class="btn mini" id="btnDebugStartBoth" disabled title="两批均上传并完成回传后，按第一批、第二批顺序运行">▶ 连续跑两批</button>
+        <button class="btn mini" id="btnDebugStartBoth" disabled title="两批上传完成后，将所选陀螺仪当前朝向记为yaw零点，再依次运行两批">▶ 连续跑两批</button>
       </div>
       <div class="param"><span class="name">车体包络</span><input type="range" id="pRadius" min="30" max="200" step="10" value="50"><span class="val" id="pRadiusV">50</span></div>
       <div id="routeInfo">尚未规划。第一批：启停区→扫码区→原料区→粗加工区→暂存区

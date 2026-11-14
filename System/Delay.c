@@ -1,82 +1,40 @@
 #include "Delay.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
-static u32 fac_us=0;
-static u32 fac_ms=0;
-
-// SysTick LOAD寄存器是24位，最大值为0xFFFFFF = 16777215
-#define SYSTICK_LOAD_MAX    0xFFFFFFUL
-
+/* DWT is independent of the FreeRTOS SysTick. Never reset CYCCNT: startup
+ * lift homing also uses its monotonic counter for deadlines. */
 void Delay_Init(u8 SYSCLK)
 {
-    SysTick_CLKSourceConfig(SysTick_CLKSource_HCLK_Div8);
-    fac_us=SYSCLK/8;
-    fac_ms=fac_us*1000;
+    (void)SYSCLK;
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 }
 
 void Delay_us(u32 nus)
 {
-    u32 temp;
-    u32 total_ticks = nus * fac_us;
-    
-    // 分多次调用，避免SysTick LOAD寄存器溢出（24位限制）
-    while(total_ticks > SYSTICK_LOAD_MAX)
+    uint32_t cycles_per_us = SystemCoreClock / 1000000u;
+    Delay_Init(0);
+    while (nus)
     {
-        SysTick->LOAD = SYSTICK_LOAD_MAX;
-        SysTick->VAL = 0x00;
-        SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
-        do
-        {
-            temp = SysTick->CTRL;
-        }while((temp & 0x01) && !(temp & (1 << 16)));
-        SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
-        SysTick->VAL = 0X00;
-        total_ticks -= SYSTICK_LOAD_MAX;
-    }
-    
-    if(total_ticks > 0)
-    {
-        SysTick->LOAD = total_ticks;
-        SysTick->VAL = 0x00;
-        SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
-        do
-        {
-            temp = SysTick->CTRL;
-        }while((temp & 0x01) && !(temp & (1 << 16)));
-        SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
-        SysTick->VAL = 0X00;
+        uint32_t chunk = nus > 1000u ? 1000u : nus;
+        uint32_t start = DWT->CYCCNT;
+        uint32_t cycles = chunk * cycles_per_us;
+        while ((uint32_t)(DWT->CYCCNT - start) < cycles) {}
+        nus -= chunk;
     }
 }
 
+/* Tasks yield to the scheduler. Before startup, in an ISR or while scheduling
+ * is suspended, use DWT instead; none of these paths reprogram SysTick. */
 void Delay_ms(u16 nms)
 {
-    u32 temp;
-    u32 total_ticks = (u32)nms * fac_ms;
-    
-    // 分多次调用，避免SysTick LOAD寄存器溢出（24位限制）
-    while(total_ticks > SYSTICK_LOAD_MAX)
+    if (!nms) return;
+    if (__get_IPSR() == 0u && xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
-        SysTick->LOAD = SYSTICK_LOAD_MAX;
-        SysTick->VAL = 0x00;
-        SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
-        do
-        {
-            temp = SysTick->CTRL;
-        }while((temp & 0x01) && !(temp & (1 << 16)));
-        SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
-        SysTick->VAL = 0X00;
-        total_ticks -= SYSTICK_LOAD_MAX;
+        TickType_t ticks = pdMS_TO_TICKS(nms);
+        vTaskDelay(ticks ? ticks : 1u);
+        return;
     }
-    
-    if(total_ticks > 0)
-    {
-        SysTick->LOAD = total_ticks;
-        SysTick->VAL = 0x00;
-        SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
-        do
-        {
-            temp = SysTick->CTRL;
-        }while((temp & 0x01) && !(temp & (1 << 16)));
-        SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
-        SysTick->VAL = 0X00;
-    }
+    Delay_us((uint32_t)nms * 1000u);
 }

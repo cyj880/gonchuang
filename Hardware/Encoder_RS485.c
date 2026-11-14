@@ -1,5 +1,8 @@
 #include "stm32f4xx.h"
 #include "Encoder_RS485.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include <string.h>
 
 /**
   ******************************************************************************
@@ -24,8 +27,93 @@
 #define RS485_DIR_PORT    GPIOA
 #define RS485_DIR_PIN     GPIO_Pin_4
 
-/* 收字节超时(递减循环数, 168MHz下约10ms, 粗略值) */
-#define RS485_RX_TIMEOUT  300000u
+/* USART2中断负责发送、TC切换收发方向、缓存接收；任务只组帧和解析。
+   避免任务切换拉长请求字节间隔或错过应答；所有等待有上限，不改写SysTick。 */
+#define RS485_RX_BUFFER_SIZE 64u
+#define RS485_REPLY_TIMEOUT_MS 40u
+#define RS485_TX_TIMEOUT_MS 10u
+#define RS485_RECOVER_FAILURES 3u
+#define RS485_RECOVER_INTERVAL_MS 1000u
+static volatile uint8_t rs485_rx_buf[RS485_RX_BUFFER_SIZE];
+static volatile uint8_t rs485_rx_head, rs485_rx_tail, rs485_receiving, rs485_rx_fault;
+static uint8_t rs485_tx_buf[8];
+static volatile uint8_t rs485_tx_len, rs485_tx_index, rs485_tx_active;
+static volatile EncRS485_Diagnostics rs485_diag;
+static uint8_t rs485_read_failures, rs485_have_recovered;
+static TickType_t rs485_recover_tick;
+static void rs485_dir(uint8_t tx_on);
+
+/* 在失败当刻保存寄存器和引脚配置，区分无字节与接收/IRQ被关闭。
+   bit0 UE、1 RE、2 RXNEIE、3 NVIC使能、4 PD6=AF、5 PD6=AF7、6 PA4=输出。 */
+static void rs485_capture_hw(void)
+{
+    uint32_t cr1 = USART2->CR1;
+    rs485_diag.hw_flags = (uint8_t)(
+        ((cr1 & USART_CR1_UE) ? 1u : 0u) |
+        ((cr1 & USART_CR1_RE) ? 2u : 0u) |
+        ((cr1 & USART_CR1_RXNEIE) ? 4u : 0u) |
+        ((NVIC->ISER[(uint32_t)USART2_IRQn >> 5] & (1u << ((uint32_t)USART2_IRQn & 31u))) ? 8u : 0u) |
+        ((((GPIOD->MODER >> 12) & 3u) == 2u) ? 16u : 0u) |
+        ((((GPIOD->AFR[0] >> 24) & 15u) == 7u) ? 32u : 0u) |
+        ((((GPIOA->MODER >> 8) & 3u) == 1u) ? 64u : 0u));
+    rs485_diag.direction_tx = (GPIOA->ODR & GPIO_Pin_4) ? 1u : 0u;
+}
+
+void USART2_IRQHandler(void)
+{
+    uint32_t status = USART2->SR;
+    rs485_diag.irq_calls++;
+    if (status & (USART_SR_RXNE | USART_SR_ORE | USART_SR_FE | USART_SR_NE | USART_SR_PE))
+    {
+        uint8_t byte = (uint8_t)USART2->DR; /*先读SR再读DR，清除RXNE/ORE/FE/NE/PE。*/
+        if (status & USART_SR_RXNE) rs485_diag.rx_bytes++;
+        if (status & (USART_SR_ORE | USART_SR_FE | USART_SR_NE | USART_SR_PE))
+        {
+            rs485_diag.uart_errors++;
+            if (status & USART_SR_ORE) rs485_diag.overruns++;
+            if (rs485_receiving) rs485_rx_fault = ENC_RS485_UART_ERROR;
+        }
+        else if ((status & USART_SR_RXNE) && rs485_receiving)
+        {
+            uint8_t next = (uint8_t)((rs485_rx_head + 1u) & (RS485_RX_BUFFER_SIZE - 1u));
+            if (next == rs485_rx_tail)
+            {
+                rs485_diag.buffer_overflows++;
+                rs485_rx_fault = ENC_RS485_RX_OVERFLOW;
+            }
+            else
+            {
+                rs485_rx_buf[rs485_rx_head] = byte;
+                rs485_rx_head = next;
+            }
+        }
+    }
+    if (rs485_tx_active && (status & USART_SR_TC) && (USART2->CR1 & USART_CR1_TCIE))
+    {
+        USART_ITConfig(USART2, USART_IT_TC, DISABLE);
+        rs485_receiving = 1;
+        rs485_dir(0); /*最后停止位已移出，立刻释放485总线；不等任务重新获得CPU。*/
+        rs485_diag.tx_completed++;
+        rs485_tx_active = 0;
+    }
+    else if (rs485_tx_active && (status & USART_SR_TXE) && (USART2->CR1 & USART_CR1_TXEIE))
+    {
+        USART_SendData(USART2, rs485_tx_buf[rs485_tx_index++]);
+        if (rs485_tx_index >= rs485_tx_len)
+        {
+            USART_ITConfig(USART2, USART_IT_TXE, DISABLE);
+            USART_ITConfig(USART2, USART_IT_TC, ENABLE);
+        }
+    }
+}
+
+void EncRS485_GetDiagnostics(EncRS485_Diagnostics *out)
+{
+    if (!out) return;
+    taskENTER_CRITICAL();
+    *out = rs485_diag;
+    taskEXIT_CRITICAL();
+}
 
 /* RS485方向切换: 1=发送(DE=1/RE=1), 0=接收(DE=0/RE=0) */
 static void rs485_dir(uint8_t tx_on)
@@ -52,23 +140,140 @@ static uint16_t modbus_crc16(const uint8_t *buf, uint16_t len)
     return crc;
 }
 
-static void rs485_put_byte(uint8_t b)
+/* 事务开始时清理旧缓存；IRQ与任务只交换字节，不使用FromISR内核API。 */
+static void rs485_rx_begin(void)
 {
-    USART_SendData(USART2, b);
-    while (USART_GetFlagStatus(USART2, USART_FLAG_TXE) == RESET);
+    taskENTER_CRITICAL();
+    USART_ITConfig(USART2, USART_IT_TXE, DISABLE);
+    USART_ITConfig(USART2, USART_IT_TC, DISABLE);
+    rs485_tx_active = 0;
+    rs485_receiving = 0;
+    rs485_rx_head = rs485_rx_tail = 0;
+    rs485_rx_fault = 0;
+    rs485_diag.requests++;
+    rs485_diag.last_rx_len = 0;
+    (void)USART2->SR;
+    (void)USART2->DR;
+    taskEXIT_CRITICAL();
 }
 
-/* 清残留: 上次超时中断可能留下未读字节/溢出标志 */
-static void rs485_rx_flush(void)
+static uint8_t rs485_send(const uint8_t *data, uint8_t len)
 {
-    while (USART_GetFlagStatus(USART2, USART_FLAG_RXNE) != RESET)
+    TickType_t start;
+    if (!len || len > sizeof(rs485_tx_buf)) return 0;
+    rs485_rx_begin();
+    taskENTER_CRITICAL();
+    memcpy(rs485_tx_buf, data, len);
+    rs485_tx_len = len;
+    rs485_tx_index = 0;
+    rs485_dir(1);
+    rs485_tx_active = 1;
+    USART_ITConfig(USART2, USART_IT_TXE, ENABLE);
+    taskEXIT_CRITICAL();
+    start = xTaskGetTickCount();
+    while (rs485_tx_active)
     {
-        USART_ReceiveData(USART2);
+        if (xTaskGetTickCount() - start >= pdMS_TO_TICKS(RS485_TX_TIMEOUT_MS))
+        {
+            taskENTER_CRITICAL();
+            /*TC中断可能恰在进入临界区前完成，不能误判刚完成的发送。*/
+            if (rs485_tx_active)
+            {
+                rs485_capture_hw();
+                USART_ITConfig(USART2, USART_IT_TXE, DISABLE);
+                USART_ITConfig(USART2, USART_IT_TC, DISABLE);
+                rs485_tx_active = rs485_receiving = 0;
+                rs485_dir(0);
+                rs485_diag.last_error = ENC_RS485_TX_TIMEOUT;
+                taskEXIT_CRITICAL();
+                return 0;
+            }
+            taskEXIT_CRITICAL();
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1u));
     }
-    if (USART_GetFlagStatus(USART2, USART_FLAG_ORE) != RESET)
+    return 1;
+}
+
+static uint8_t rs485_pop(uint8_t *byte)
+{
+    if (rs485_rx_tail == rs485_rx_head) return 0;
+    *byte = rs485_rx_buf[rs485_rx_tail];
+    rs485_rx_tail = (uint8_t)((rs485_rx_tail + 1u) & (RS485_RX_BUFFER_SIZE - 1u));
+    if (rs485_diag.last_rx_len < 255u) rs485_diag.last_rx_len++;
+    return 1;
+}
+
+/* 搜索本次请求的完整帧，噪声/坏CRC后逐字节重同步；静默时让出CPU。 */
+static uint8_t rs485_receive(uint8_t *frame, uint8_t len, const uint8_t *prefix, uint8_t prefix_len)
+{
+    TickType_t start = xTaskGetTickCount();
+    uint8_t used = 0, byte;
+    while (xTaskGetTickCount() - start < pdMS_TO_TICKS(RS485_REPLY_TIMEOUT_MS))
     {
-        (void)USART_ReceiveData(USART2);       /*读SR后读DR清除ORE*/
+        if (rs485_rx_fault) break;
+        if (!rs485_pop(&byte))
+        {
+            vTaskDelay(pdMS_TO_TICKS(1u));
+            continue;
+        }
+        frame[used++] = byte;
+        while (used)
+        {
+            uint8_t compare = used < prefix_len ? used : prefix_len;
+            if (memcmp(frame, prefix, compare) != 0)
+            {
+                --used;
+                memmove(frame, frame + 1, used);
+                continue;
+            }
+            if (used < len) break;
+            {
+                uint16_t crc = modbus_crc16(frame, (uint16_t)(len - 2u));
+                if (!rs485_rx_fault && frame[len - 2u] == (uint8_t)crc &&
+                    frame[len - 1u] == (uint8_t)(crc >> 8))
+                {
+                    rs485_receiving = 0;
+                    rs485_diag.successes++;
+                    rs485_diag.last_error = ENC_RS485_OK;
+                    return 1;
+                }
+            }
+            rs485_diag.crc_errors++;
+            --used;
+            memmove(frame, frame + 1, used);
+        }
     }
+    rs485_receiving = 0;
+    rs485_capture_hw();
+    rs485_diag.last_error = rs485_rx_fault ? rs485_rx_fault :
+        (rs485_diag.last_rx_len ? ENC_RS485_BAD_FRAME : ENC_RS485_NO_REPLY);
+    return 0;
+}
+
+/* 连续失败后的本地恢复，只由OdomTask在完整事务结束后调用。
+   禁用USART2 IRQ后重建UART/引脚，清错误和缓存；不发写寄存器、置零或复位编码器命令。
+   其他串口、CAN、SysTick、里程累计及通信统计均不重置，掉线保护仍生效。 */
+static void rs485_read_failed(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    if (rs485_read_failures < 255u) rs485_read_failures++;
+    if (rs485_read_failures < RS485_RECOVER_FAILURES ||
+        (rs485_have_recovered && now - rs485_recover_tick <
+         pdMS_TO_TICKS(RS485_RECOVER_INTERVAL_MS))) return;
+
+    NVIC_DisableIRQ(USART2_IRQn);
+    USART_Cmd(USART2, DISABLE);
+    USART_DeInit(USART2);
+    rs485_tx_active = rs485_tx_len = rs485_tx_index = 0;
+    rs485_receiving = rs485_rx_fault = rs485_rx_head = rs485_rx_tail = 0;
+    NVIC_ClearPendingIRQ(USART2_IRQn);
+    Encoder_RS485_Init();
+    rs485_diag.recoveries++;
+    rs485_read_failures = 0;
+    rs485_have_recovered = 1;
+    rs485_recover_tick = now;
 }
 
 /**
@@ -81,8 +286,7 @@ uint8_t EncRS485_ReadPos(uint8_t station, uint32_t *pos)
 {
     uint8_t tx[8], rx[9];
     uint16_t crc;
-    uint8_t i;
-    uint32_t t;
+    uint8_t prefix[3] = {station, 0x03u, 0x04u};
 
     tx[0] = station;
     tx[1] = 0x03;                        /*功能码: 读保持寄存器*/
@@ -92,26 +296,12 @@ uint8_t EncRS485_ReadPos(uint8_t station, uint32_t *pos)
     tx[6] = (uint8_t)(crc & 0xFF);       /*CRC低字节在前*/
     tx[7] = (uint8_t)(crc >> 8);
 
-    rs485_rx_flush();                    /*清上次残留*/
-    rs485_dir(1);                        /*切发送*/
-    for (i = 0; i < 8; i++) rs485_put_byte(tx[i]);
-    while (USART_GetFlagStatus(USART2, USART_FLAG_TC) == RESET);  /*等最后一位移出*/
-    rs485_dir(0);                        /*切接收, 释放总线给编码器应答*/
-
-    /*收9字节应答: 站号 03 04 D3 D2 D1 D0 CRC_L CRC_H(数据大端)*/
-    for (i = 0; i < 9; i++)
+    if (!rs485_send(tx, 8u) || !rs485_receive(rx, 9u, prefix, 3u))
     {
-        t = RS485_RX_TIMEOUT;
-        while (USART_GetFlagStatus(USART2, USART_FLAG_RXNE) == RESET)
-        {
-            if (--t == 0) return 0;      /*超时: 编码器未应答*/
-        }
-        rx[i] = (uint8_t)USART_ReceiveData(USART2);
+        rs485_read_failed();
+        return 0;
     }
-
-    if (rx[0] != station || rx[1] != 0x03 || rx[2] != 0x04) return 0;
-    crc = modbus_crc16(rx, 7);
-    if (rx[7] != (uint8_t)(crc & 0xFF) || rx[8] != (uint8_t)(crc >> 8)) return 0;
+    rs485_read_failures = 0;
 
     *pos = ((uint32_t)rx[3] << 24) | ((uint32_t)rx[4] << 16) |
            ((uint32_t)rx[5] << 8)  |  (uint32_t)rx[6];
@@ -127,8 +317,6 @@ uint8_t EncRS485_WriteReg(uint8_t station, uint16_t reg, uint16_t val)
 {
     uint8_t tx[8], rx[8];
     uint16_t crc;
-    uint8_t i;
-    uint32_t t;
 
     tx[0] = station;
     tx[1] = 0x06;                        /*功能码: 写单寄存器*/
@@ -138,27 +326,8 @@ uint8_t EncRS485_WriteReg(uint8_t station, uint16_t reg, uint16_t val)
     tx[6] = (uint8_t)(crc & 0xFF);
     tx[7] = (uint8_t)(crc >> 8);
 
-    rs485_rx_flush();
-    rs485_dir(1);
-    for (i = 0; i < 8; i++) rs485_put_byte(tx[i]);
-    while (USART_GetFlagStatus(USART2, USART_FLAG_TC) == RESET);
-    rs485_dir(0);
-
-    /*0x06应答=请求帧原样回显, 逐字节一致才算成功*/
-    for (i = 0; i < 8; i++)
-    {
-        t = RS485_RX_TIMEOUT;
-        while (USART_GetFlagStatus(USART2, USART_FLAG_RXNE) == RESET)
-        {
-            if (--t == 0) return 0;
-        }
-        rx[i] = (uint8_t)USART_ReceiveData(USART2);
-    }
-    for (i = 0; i < 8; i++)
-    {
-        if (rx[i] != tx[i]) return 0;
-    }
-    return 1;
+    /*0x06应答必须与请求前6字节一致，随后验证CRC。*/
+    return (uint8_t)(rs485_send(tx, 8u) && rs485_receive(rx, 8u, tx, 6u));
 }
 
 /**
@@ -194,6 +363,7 @@ void Encoder_RS485_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
     USART_InitTypeDef USART_InitStructure;
+    NVIC_InitTypeDef irq;
 
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART2, ENABLE);
     RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOD | RCC_AHB1Periph_GPIOA, ENABLE);
@@ -228,5 +398,13 @@ void Encoder_RS485_Init(void)
     USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
     USART_InitStructure.USART_Mode                = USART_Mode_Rx | USART_Mode_Tx;
     USART_Init(USART2, &USART_InitStructure);
+    irq.NVIC_IRQChannel = USART2_IRQn;
+    irq.NVIC_IRQChannelPreemptionPriority = 5; /*不调用RTOS API，仍遵循任务临界区屏蔽。*/
+    irq.NVIC_IRQChannelSubPriority = 0;
+    irq.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&irq);
+    USART_ITConfig(USART2, USART_IT_RXNE, ENABLE);
+    USART_ITConfig(USART2, USART_IT_ERR, ENABLE);
+    USART_ITConfig(USART2, USART_IT_PE, ENABLE);
     USART_Cmd(USART2, ENABLE);
 }

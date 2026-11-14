@@ -7,15 +7,15 @@
  * Set this to the lift driver's actual address before flashing. */
 #define LIFT_ZDT_ADDR              6u
 #define LIFT_HOME_SPEED_RPM        30u    /*回零转速50→30: 碰撞时挤进螺纹的行程减半, 减轻顶紧拧死(2026-11-08)*/
-#define LIFT_HOME_TIMEOUT_MS       60000u /*30→60s: 回零降速后全程更久(从50000处回零约31s), 超时必须跟着放大(2026-11-08)*/
+#define LIFT_HOME_TIMEOUT_MS       60000u /*30→60s: 回零降速后全程更久(保留原回零超时), 超时必须跟着放大(2026-11-08)*/
 #define LIFT_STALL_SPEED_RPM       10u
 #define LIFT_STALL_CURRENT_MA      250u   /*400→250: 更早判停顶得更轻, 防碰撞后拧紧; 若未到顶就误判堵转(回零failed)回调到300-350(2026-11-08)*/
 #define LIFT_STALL_TIME_MS         100u
 /* 位置读回单位=驱动器细分脉冲(手册默认16细分=3200脉冲/转)；允许编码器抖动。 */
-#define LIFT_ZERO_TOLERANCE        16u
+#define LIFT_ZERO_TOLERANCE        4u
 
 /* UART7 0x17 调试帧：张大头位置模式(0xFD)绝对目标。clk为无符号幅值，方向由dir
-   字节给出：绝对目标=±clk。帧值=离开回零位(最高点)的下行行程(0=最高、255100=最低)；
+   字节给出：绝对目标=±clk。帧值=离开回零位(最高点)的下行行程(0=最高、63775=最低)；
    实车方向反了改 LIFT_POS_DOWN_DIR。 */
 /* 手册5.3.12(Emm固件0xFD)：速度字段0000-0BB8=0-3000RPM。
  * 丝杆正常定位速度统一3000RPM，自动流程及独立0x17调试共用。
@@ -24,10 +24,8 @@
  * 触发堵转保护(屏显Protect!)，先降档再降速。 */
 #define LIFT_POS_SPEED_RPM         3000u
 #define LIFT_POS_ACC               255u
-#define LIFT_POS_MAX_PUL           255100u /* 全行程下行脉冲上限；坐标0=回零最高点 */
+#define LIFT_POS_MAX_PUL           63775u /* 新丝杆全行程上限：原255100/4；坐标0=回零最高点 */
 #define LIFT_POS_DOWN_DIR          1u      /* 下行dir字节: 0=CW(向上) 1=CCW(向下) */
-#define LIFT_HOME_RETREAT_PUL      2000u   /* 回零前先向下退的脉冲(离开顶部限位) */
-#define LIFT_HOME_RETREAT_WAIT_MS  1500u   /* 预移动到位回传等待超时 */
 
 typedef enum {
     LIFT_HOME_OK = 0,

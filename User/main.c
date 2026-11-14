@@ -12,12 +12,11 @@
 #include "uart8.h"
 #include "motor_task.h"
 #include "board.h"
-#include "bno08x_uart_rvc.h"
 #include "LCD.h"
 #include "lcd_task.h"
 #include "Encoder_RS485.h"
 #include "odom_task.h"
-#include "lunqu_imu.h"
+#include "imu.h"
 #include "rdk_center.h"
 #include "arm_m2006.h"
 #include "lift_zdt.h"
@@ -27,21 +26,50 @@
    两轮粗加工、第一轮暂存及网页1C放料共用；原料区1A抓取角度独立。
    当前角度越大夹得越紧：夹紧力度不足可适当增大，松不开可适当减小松开角度。
    放料到位后先稳定等待800ms，直接到松开角度并等400ms。 */
-#define PLACE_CLAW_CLOSE_DEG   79.5f  /* 夹紧物料的角度(2026-11-08机械-30°, 原109.5°) */
-#define PLACE_CLAW_OPEN_DEG    18.0f  /* 完全松开物料的角度(机械-30°, 原48°) */
+#define PLACE_CLAW_CLOSE_DEG   77.5f  /* 夹紧物料的角度(2026-11-08机械-30°, 原109.5°) */
+#define PLACE_CLAW_OPEN_DEG    28.0f  /* 完全松开物料的角度(机械-30°, 原48°) */
 
 /* 导出给motor_task.c使用，只需修改上方两个#define。 */
 const float g_place_claw_close_deg = PLACE_CLAW_CLOSE_DEG;
 const float g_place_claw_open_deg  = PLACE_CLAW_OPEN_DEG;
 
+/* 陀螺仪选择：0=HWT101（115200，上电自动配置100Hz，默认）；
+   1=轮趣FDILink（921600，保留原模块输出设置）。修改后重新编译并上电生效。
+   两款共用USART6/PG9，实际只接所选一款；HWT101还须RX接PG14。
+   上电锁存此选择，运行中修改变量不会切换，避免行驶中改变航向基准。 */
+uint8_t IMU_Select = IMU_SOURCE_HWT101;
 
-/* ---- 陀螺仪选择开关: 两陀螺仪物理共用USART6/PG9, 同一时刻只插一个; 改后重新上电, 只能一个为1 ---- */
-uint8_t Bno085_RunFlag = 0;    /*1=BNO085 RVC@115200*/
-uint8_t lunqu_RunFlag  = 1;    /*1=轮趣FDI FDILink@921600*/
 /* 丝杆(张大头ID6)上电自动回零开关：0=关闭(默认)，跳过回零直接开机；
    1=开启，开机阻塞回零，失败时不启动任务。修改后重新编译烧录，下次上电生效。
    跳过回零不会自动设置零点，执行绝对定位前需先确认或校准丝杆零点。 */
-uint8_t Lift_AutoHome_RunFlag = 0;
+uint8_t Lift_AutoHome_RunFlag = 1;
+
+/* 上电默认任务码：156+123+516+231。接口接收12位数字，不含加号；后续扫码或1B注入可覆盖。 */
+static const uint8_t startup_task_digits[] = "156123516231";
+
+/* Only used before the scheduler starts (or if it fails to start). Do not
+ * continue with a missing motor/odometry/LCD task and an unchanged boot screen. */
+static void startup_failed(const char *reason, const char *name)
+{
+    LCD_Clear();
+    LCD_SetColor(LCD_RED);
+    LCD_Printf(0, 0, LCD_8X16, "%s", reason);
+    LCD_Printf(0, 24, LCD_8X16, "%s", name);
+    LCD_Printf(0, 48, LCD_6X8, "Heap free: %lu", (unsigned long)xPortGetFreeHeapSize());
+    LED_Green_Off();
+    for (;;)
+    {
+        LED_Red_Toggle();
+        Delay_ms(250);
+    }
+}
+
+static void startup_create_task(TaskFunction_t entry, const char *name,
+                                configSTACK_DEPTH_TYPE stack_words, UBaseType_t priority)
+{
+    if (xTaskCreate(entry, name, stack_words, NULL, priority, NULL) != pdPASS)
+        startup_failed("Task create FAIL", name);
+}
 /**
   * STM32F427IIH（大疆 RoboMaster A 板）+ FreeRTOS V11.1.0
   * 任务函数放在 Task/ 文件夹（led_task.c、servo_task.c、 motor_task.c、lcd_task.c），
@@ -100,17 +128,17 @@ int main(void)
     board_init();           /* CAN2 初始化：PB12=RX / PB13=TX，1Mbps，供 4 路 Emm_V5 电机使用 */
     Arm_M2006_Init();       /* 夹爪伸出电机：CAN1 PD0/PD1，C610 ID1，首次反馈记为0度 */
     UART7_ZigBee_Init(115200); /* 上位机坐标串口：PE7=RX收坐标帧 / PE8=TX回传网页(命令字02帧)，收发双向 */   //ZigBee链路：接收电脑发送的坐标，并回传给网页端显示
-    UART8_Init(115200);     /* 摄像头(PE0) + 任务码显示屏(PE1)，见 Hardware/uart8.c */
     UART8_LinkInit();       /* 摄像头帧解析 + 任务码解析 + 上报变量初始化 */
-    if (lunqu_RunFlag)        Lunqu_Init(921600);   /*轮趣FDI惯导: PG9=RX, FDILink@921600*/
-    else if (Bno085_RunFlag)  BNO08X_Init(115200);  /*BNO085: PG9=RX, RVC@115200*/
+    (void)UART8_InjectTask(startup_task_digits); /* 开机即可使用默认物料/环号计划 */
+    UART8_Init(115200);     /* 默认任务码发布后再启用接收，后续扫码可覆盖 */
+    IMU_Init(IMU_Select);  /* 只初始化所选陀螺仪；共享USART6/PG9，选择在上电时锁存。 */
     route_rx_init();        /* UART7发送互斥锁: ACK帧(电机任务)与02回传帧(LCD任务)防交错 */
     Encoder_RS485_Init();   /* RS485绝对值编码器: USART2(PD5=TX/PD6=RX) + PA4方向脚, Modbus轮询站号1 */                           
     RDK_Center_Init(115200); /* RDK圆心链路: USART3(PD8=TX/PD9=RX) */
 
     /* 上电提示音：蜂鸣器（PH6, TIM12_CH1, 2700Hz）鸣叫1s后关闭。
-       此处调度器尚未启动，SysTick 空闲，可安全使用阻塞式 Delay_ms */
-    Delay_Init(168);        /* SYSCLK=168MHz，SysTick HCLK/8 计时 */
+       此处调度器尚未启动，Delay_ms使用DWT；运行期调用则让出RTOS调度。 */
+    Delay_Init(168);        /* DWT独立计时，不修改FreeRTOS使用的SysTick */
 	Buzzer_Init();                              
 
     /* 丝杆地址6：Lift_AutoHome_RunFlag=1 时 CW向上碰撞回零，确认当前位置清零后才创建任务；
@@ -156,25 +184,25 @@ int main(void)
 
 
 //    xTaskCreate(LED_FlowTask, "LED_Flow", 256, NULL, 2, NULL);
-    /* 270°舵机上电由 Servo270_Init() 直接输出30°(≈722us)并保持，不再创建轮转任务；
+    /* 270°舵机上电由 Servo270_Init() 直接输出60°(≈944us)并保持，不再创建轮转任务；
        路线到原料区时由 MotorTask 转到0°工位；需恢复三工位循环时取消下行注释即可 */
-//    xTaskCreate(Servo_Task, "Servo", 256, NULL, 2, NULL);  /*优先级3(高于RS485忙等): 20ms拍不被调度抖动拉长*/ /* 270°转盘对位:0/120/240°三工位循环,每3s一步;去程三次缓动,240→0回程五次缓动(加速度连续) */
+//    xTaskCreate(Servo_Task, "Servo", 256, NULL, 2, NULL);  /*优先级3(高于RS485忙等): 20ms拍不被调度抖动拉长*/ /* 270°转盘对位:30/150/270°三工位循环,每3s一步;去程三次缓动,270→30回程五次缓动(加速度连续) */
     /* RouteTask 已并入 LCD_Task（收帧回传 + 坐标/任务码两页轮显），不再单独创建 */
-    xTaskCreate(KeyTask, "Key", 256, NULL, 2, NULL);   /* PB2按键：松开翻转红色LED */
-    xTaskCreate(MotorTask, "Motor", 1024, NULL, 2, NULL); /* 四轮 Emm_V5 电机（CAN2） */
-    xTaskCreate(Arm_M2006_Task, "Arm2006", 256, NULL, 3, NULL); /* 100Hz夹爪位置/速度双环 */
-    xTaskCreate(OdomTask, "Odom", 1024, NULL, 3, NULL);  /* RS485里程计1(站号1)，与Motor同为优先级3 */
-    xTaskCreate(LCD_Task, "LCD", 1024, NULL, 1, NULL);    /* TFT-LCD 显示（SPI1+DMA） */
+    LCD_ShowString(0, 60, "Creating tasks...", LCD_6X8);
+    startup_create_task(KeyTask, "Key", 256, 2);       /* PB2按键 */
+    startup_create_task(MotorTask, "Motor", 2048, 2);  /* 四轮电机 */
+    startup_create_task(Arm_M2006_Task, "Arm2006", 256, 3); /* 100Hz RM控制 */
+    startup_create_task(OdomTask, "Odom", 2048, 3);    /* 连续RS485里程计 */
+    startup_create_task(LCD_Task, "LCD", 1024, 1);     /* TFT显示 */
 //    UART8_ReportTask 不在此创建：由 MotorTask 在到扫码区开始找码时动态创建
 //    (qr_report_handle)，扫码成功后删除——开关见 motor_task.h 的
 //    MOTOR_ROUTE_QR_SCAN_ENABLE（调试阶段为0，到扫码区不会创建）。
 
+    LCD_ShowString(0, 72, "Starting RTOS...", LCD_6X8);
     vTaskStartScheduler();
 
     /* 正常情况下不会执行到这里；若堆内存不足导致调度器启动失败则停在此处 */
-    for (;;)
-    {
-    }
+    startup_failed("RTOS start FAIL", "Scheduler returned");
 }
 
 

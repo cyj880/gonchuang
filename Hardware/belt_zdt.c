@@ -1,6 +1,7 @@
 #include "belt_zdt.h"
 #include "Emm_V5.h"
-#include "Delay.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 /* 底部同步带(地址5): 位置读回 + 到位回传捕获，上电位置为0，不自动回零。
    应答帧格式与丝杆(lift_zdt.c)同款: ExtId=(addr<<8)|包序, Data[0]=功能码, 尾字节0x6B。
@@ -19,8 +20,6 @@ void Belt_ZDT_OnCanRx(const volatile CanRxMsg *frame)
 {
     uint8_t i;
 
-    if (frame->IDE == CAN_Id_Extended &&
-        frame->ExtId == ((uint32_t)BELT_ZDT_ADDR << 8))
     if (frame->IDE != CAN_Id_Extended || frame->RTR != CAN_RTR_Data ||
         frame->ExtId != ((uint32_t)BELT_ZDT_ADDR << 8) ||
         frame->DLC < 2u || frame->DLC > 8u ||
@@ -62,12 +61,14 @@ static void belt_prepare_reply(uint8_t code)
 /* 位置回读等待应答。1=收到且长度匹配。 */
 static uint8_t belt_wait_reply(uint8_t size, uint32_t timeout_ms)
 {
-    uint32_t waited = 0u;
+    TickType_t start = xTaskGetTickCount();
 
     while (!reply_ok)
     {
-        Delay_ms(1);
-        if (++waited >= timeout_ms) { reply_code = 0; return 0; }
+        if (xTaskGetTickCount() - start >= pdMS_TO_TICKS(timeout_ms))
+        { reply_code = 0; return 0; }
+        /* 运行期只能让RTOS调度，不能用会改写并关闭SysTick的Delay_ms。 */
+        vTaskDelay(pdMS_TO_TICKS(2u));
     }
     reply_code = 0;
     return (reply_len == size) ? 1u : 0u;

@@ -59,7 +59,7 @@
 
 #define configSUPPORT_STATIC_ALLOCATION              1
 #define configSUPPORT_DYNAMIC_ALLOCATION             1
-#define configTOTAL_HEAP_SIZE                        20480   /* 15KB→20KB：新增LCD任务(512字)与递归互斥锁的余量 */
+#define configTOTAL_HEAP_SIZE                        32768   /* 32KB: task stacks alone need 22KB; reserve TCB/mutex/runtime space. */
 #define configAPPLICATION_ALLOCATED_HEAP             0
 #define configSTACK_ALLOCATION_FROM_SEPARATE_HEAP    0
 #define configENABLE_HEAP_PROTECTOR                  0

@@ -165,6 +165,7 @@ void route_rx_byte(uint8_t ch)
         else if (ch == CMD_BELT_POS) { rx_p_idx = 0; rx_p_len = 4; rx_state = RX_P_DATA; }
         else if (ch == CMD_GRAB_SEQ) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_TASK_INJECT) { rx_p_idx = 0; rx_p_len = 6; rx_state = RX_P_DATA; }
+        else if (ch == CMD_RAW_RUN) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_PLACE_SEQ) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_ABORT || ch == CMD_RUNALL || ch == CMD_STACK_ALIGN)
             rx_state = RX_SUM;                     /*无载荷, 累加和=命令字本身*/
@@ -255,12 +256,13 @@ void route_rx_byte(uint8_t ch)
             else if (rx_cmd == CMD_POS_ADV) bmax = 5;              /*0直线/1右前/2绝对yaw/3左转/4右转/5右后*/
             else if (rx_cmd == CMD_DEBUG_RUN) bmax = 3;            /*1批次1/2批次2/3两批连续*/
             else if (rx_cmd == CMD_GRAB_SEQ) bmax = 3;             /*0=按当前序号 1~3=固定第几块*/
+            else if (rx_cmd == CMD_RAW_RUN) bmax = 2;              /*独立原料区批次1/2*/
             else if (rx_cmd == CMD_PLACE_SEQ) bmax = 4;            /*1首轮粗加工/2次轮粗加工/3首轮暂存/4次轮暂存*/
             else if (rx_cmd == CMD_TASK_INJECT) bmax = 0xFF;       /*任务码压缩字节, 半字节校验在应用层*/
             else if (rx_cmd == CMD_CHAIN)  bmax = 4;              /*方向: 仅1=右前 4=左前合法(见下)*/
             else { rx_state = RX_H1; break; }
             if (rx_cmd == CMD_CHAIN && ch != 1 && ch != 4) { rx_state = RX_H1; break; }
-            if ((rx_cmd == CMD_DEBUG_RUN || rx_cmd == CMD_PLACE_SEQ) && ch < 1)
+            if ((rx_cmd == CMD_DEBUG_RUN || rx_cmd == CMD_PLACE_SEQ || rx_cmd == CMD_RAW_RUN) && ch < 1)
             { rx_state = RX_H1; break; }
             if (ch > bmax) { rx_state = RX_H1; break; }
             rx_p_dir = ch;                 /*复用: 03存方向, 05存子命令*/
@@ -287,7 +289,7 @@ void route_rx_byte(uint8_t ch)
                 rx_cmd == CMD_DEBUG_RUN || rx_cmd == CMD_RDK_CENTER || rx_cmd == CMD_RING_ALIGN ||
                 rx_cmd == CMD_ARM_ANGLE || rx_cmd == CMD_LIFT_POS ||
                 rx_cmd == CMD_SERVO_ANGLE || rx_cmd == CMD_BELT_POS ||
-                rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_TASK_INJECT || rx_cmd == CMD_PLACE_SEQ)
+                rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_TASK_INJECT || rx_cmd == CMD_PLACE_SEQ || rx_cmd == CMD_RAW_RUN)
             {
                 /* 位置命令在帧尾通过后再提交（见 RX_T2） */
                 rx_state = RX_T1;
@@ -550,7 +552,7 @@ void route_rx_byte(uint8_t ch)
                 if (g_cmd.cnt < 255) g_cmd.cnt++;
                 g_cmd.ready = 1;
             }
-            else if (rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_PLACE_SEQ)
+            else if (rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_PLACE_SEQ || rx_cmd == CMD_RAW_RUN)
             {
                 g_cmd.type = rx_cmd;
                 g_cmd.param = rx_p_dir;                  /*1A块序选择 / 1C站点选择*/
@@ -937,6 +939,7 @@ void cmd_tx_ack(const ZbeeCmd *c)
         break;
     case CMD_GRAB_SEQ:
     case CMD_PLACE_SEQ:
+    case CMD_RAW_RUN:
         pl[0] = (uint8_t)(p & 0xFF); /*1A块序选择 / 1C站点选择*/
         plen = 1;
         break;

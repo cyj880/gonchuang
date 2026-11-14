@@ -109,7 +109,7 @@ void Servo270_Init(void)
     GPIO_InitStructure.GPIO_PuPd  = GPIO_PuPd_NOPULL;
     GPIO_Init(GPIOA, &GPIO_InitStructure);
 
-    /*输出比较通道1：PWM1模式，上电默认30°（≈722us）并保持。*/
+    /*输出比较通道1：PWM1模式，上电默认60°（≈722us）并保持。*/
     TIM_OCStructInit(&TIM_OCInitStructure);
     TIM_OCInitStructure.TIM_OCMode      = TIM_OCMode_PWM1;
     TIM_OCInitStructure.TIM_OCPolarity  = TIM_OCPolarity_High;

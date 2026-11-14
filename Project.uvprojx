@@ -965,14 +965,14 @@
               <FilePath>.\Hardware\uart8.h</FilePath>
             </File>
             <File>
-              <FileName>bno08x_uart_rvc.c</FileName>
+              <FileName>imu.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\Hardware\bno08x_uart_rvc.c</FilePath>
+              <FilePath>.\Hardware\imu.c</FilePath>
             </File>
             <File>
-              <FileName>bno08x_uart_rvc.h</FileName>
+              <FileName>imu.h</FileName>
               <FileType>5</FileType>
-              <FilePath>.\Hardware\bno08x_uart_rvc.h</FilePath>
+              <FilePath>.\Hardware\imu.h</FilePath>
             </File>
             <File>
               <FileName>lunqu_imu.c</FileName>
@@ -983,6 +983,16 @@
               <FileName>lunqu_imu.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\Hardware\lunqu_imu.h</FilePath>
+            </File>
+            <File>
+              <FileName>hwt101_imu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Hardware\hwt101_imu.c</FilePath>
+            </File>
+            <File>
+              <FileName>hwt101_imu.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Hardware\hwt101_imu.h</FilePath>
             </File>
             <File>
               <FileName>Buzzer.c</FileName>

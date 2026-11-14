@@ -89,7 +89,40 @@ void Motor_Enable(bool state);
 
 /* FreeRTOS 任务入口 */
 void MotorTask(void *pvParameters);
+enum { MOTOR_GRAB_FAULT_NONE, MOTOR_GRAB_FAULT_LIFT, MOTOR_GRAB_FAULT_BELT,
+       MOTOR_GRAB_FAULT_ARM, MOTOR_GRAB_FAULT_RDK, MOTOR_GRAB_FAULT_ODOM,
+       MOTOR_GRAB_FAULT_NEXT };
+typedef struct
+{
+    uint8_t pick, step, reason;
+    int16_t rm_angle;     /* ARM故障时RM实际角度(deg) */
+    int16_t rm_target;    /* ARM故障时RM目标角度(deg) */
+    uint8_t rm_ready;     /* ARM故障时RM反馈有效性 */
+} MotorGrabFault_t;
+/* 原料区故障快照：物料/步骤从1起；步骤0表示抓取前准备或等RDK。 */
+void Motor_GrabGetFault(MotorGrabFault_t *out);
+enum { MOTOR_GRAB_WAIT_LIFT = 1, MOTOR_GRAB_WAIT_BELT = 2, MOTOR_GRAB_WAIT_RM = 4 };
+typedef struct
+{
+    uint8_t active, pick, step, started, servo, axes, waiting;
+    uint8_t stage, vision_tx; /*stage:0抓取序列、1到站准备、2对位后准备；vision_tx仅表示STM32已下发mode4，不是RDK应答。*/
+    uint8_t feedback; /*丝杆/同步带9F主动到位帧标志，位定义同MOTOR_GRAB_WAIT_*。*/
+    int32_t lift_target, belt_target; /*丝杆为负坐标；目标仅对应axes中的轴。*/
+    uint32_t elapsed_ms;
+} MotorGrabStatus_t;
+void Motor_GrabGetStatus(MotorGrabStatus_t *out); /*原料区实时等待状态；只读，不额外查询电机。*/
 uint8_t Motor_NoNext(void);             /*未知下一段时返回1，供LCD显示no next*/
+enum { MOTOR_RUN_FAULT_NONE, MOTOR_RUN_FAULT_ODOM,
+       MOTOR_RUN_FAULT_PROGRESS, MOTOR_RUN_FAULT_TIMEOUT };
+uint8_t Motor_RunFault(void); /* 行驶保护停车原因，保持到新运动启动或06中止。 */
+typedef struct
+{
+    int32_t current, target, error, progress; /* 停车瞬间原始坐标、误差及距上次进度基准靠近量 */
+    uint32_t wait_ms;
+    int16_t command_rpm; /* 位置环最后输出，PHASE_SLOW不使用此值 */
+    uint8_t phase;
+} MotorRunFaultSnapshot_t;
+void Motor_RunGetFaultSnapshot(MotorRunFaultSnapshot_t *out);
 int32_t Motor_RoutePos(int32_t encoder_pos); /*原始编码值换算为最近路线的累计pos*/
 
 #endif

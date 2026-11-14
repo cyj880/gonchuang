@@ -1,6 +1,5 @@
 #include "stm32f4xx.h"
 #include "lunqu_imu.h"
-#include "bno08x_uart_rvc.h"
 #include <string.h>
 #include <math.h>
 
@@ -10,17 +9,18 @@
   * @brief   轮趣 WHEELTEC FDI 惯导接收 —— 帧缓冲/对齐方式按轮趣例程,
   *          解析在中断内直接完成(不设独立解析任务)
   ******************************************************************************
-  * 例程结构(与例程逐行一致, 仅外设名/变量名适配):
-  *   Fd_data[64] 连续缓冲; "0xFD后跟0xFC 或 Count>0" 判在帧中; Count 计到帧长;
+  * 沿用移植前轮趣例程的帧长/字段布局：
+  *   Fd_data[64] 连续缓冲; 空闲时遇FC开始，Count 计到帧长；
   *   TYPE/LEN 匹配置 flag; 收满 IMU_RS(64)/AHRS_RS(56) 且帧尾 0xFD 校验通过
-  *   才 memcpy 到 Fd_rsimu/Fd_rsahrs; 解析在任务上下文(TTL_Hex2Dec 等价)。
-  *   不校验 CRC(与例程一致; CRC16 仅作诊断统计)。
+  *   才 memcpy 到 Fd_rsimu/Fd_rsahrs; AHRS直接在接收中断解析。
+  *   不校验 CRC，沿用移植前轮趣例程接收规则。
   * 偏移(例程实测): Fd_rsahrs[19..22]=Roll [23..26]=Pitch [27..30]=Heading(rad)
-  * 唯一增补: Count>=64 强制清零(防例程中 TYPE/LEN 不匹配帧的缓冲越界写)。
+  * 收满帧后再检查64字节边界，串口错误或非法float不会发布新航向。
   ******************************************************************************
   */
 
 LunquData_t lunqu_data;
+static volatile uint8_t lq_have_yaw;
 
 /* ---- 零点机制: 上电/按PB2时刻的朝向 = 0 deg, yaw以相对零点输出 ----
    闭环(IMU_GetYaw)用+-180相对角(PID连续); 显示(IMU_GetYawAbs360)用0~360 */
@@ -34,7 +34,6 @@ static uint8_t Fd_data[64];
 static uint8_t Fd_rsimu[64];
 static uint8_t Fd_rsahrs[56];
 static uint8_t lq_count = 0;             /*例程 Count: 帧内字节计数*/
-static uint8_t lq_last_rsnum = 0;        /*例程 last_rsnum: 上一字节*/
 static uint8_t lq_rsimu_flag = 0;
 static uint8_t lq_rsacc_flag = 0;
 
@@ -59,6 +58,7 @@ static float LqF32(const uint8_t *p)
 /* ---- 角度归一 ---- */
 static float LqNorm180(float a)
 {
+    a = fmodf(a, 360.0f);
     while (a > 180.0f)   a -= 360.0f;
     while (a <= -180.0f) a += 360.0f;
     return a;
@@ -70,11 +70,24 @@ static float LqNorm360(float a)
     return a;
 }
 
-/* ---- PB2按键: 重新记零点(当前朝向=0 deg) ---- */
+/* 当前物理朝向设为指定软件yaw：短暂关中断，避免高优先级USART6打断更新。 */
+void Lunq_SetYaw(float yaw_deg)
+{
+    uint32_t primask;
+    yaw_deg = LqNorm180(yaw_deg);
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (lq_have_yaw) lq_yaw_zero_deg = lq_yaw_raw_deg - yaw_deg;
+    lq_zero_done = lq_have_yaw; /* 首帧前设角时，首帧再建立偏移。 */
+    lunqu_data.yaw = LqNorm180(yaw_deg);
+    lunqu_data.yaw_abs360 = LqNorm360(yaw_deg);
+    __set_PRIMASK(primask);
+}
+
+/* PB2/连续两批启动：当前朝向记为0°。 */
 void Lunq_SetZero(void)
 {
-    lq_yaw_zero_deg = lq_yaw_raw_deg;
-    lq_zero_done = 1;
+    Lunq_SetYaw(0.0f);
 }
 
 void Lunqu_Init(uint32_t baud)
@@ -85,6 +98,19 @@ void Lunqu_Init(uint32_t baud)
 
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART6, ENABLE);
     RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOG, ENABLE);
+
+    NVIC_DisableIRQ(USART6_IRQn);
+    USART_Cmd(USART6, DISABLE);
+    USART_ITConfig(USART6, USART_IT_TXE, DISABLE);
+    USART_ITConfig(USART6, USART_IT_TC, DISABLE);
+    memset(&lunqu_data, 0, sizeof(lunqu_data));
+    lq_yaw_zero_deg = lq_yaw_raw_deg = 0.0f;
+    lq_zero_done = lq_have_yaw = 0;
+    imu_update_sequence = 0;
+    lq_count = lq_rsimu_flag = lq_rsacc_flag = 0;
+    memset(Fd_data, 0, sizeof(Fd_data));
+    memset(Fd_rsimu, 0, sizeof(Fd_rsimu));
+    memset(Fd_rsahrs, 0, sizeof(Fd_rsahrs));
 
     GPIO_PinAFConfig(GPIOG, GPIO_PinSource9, GPIO_AF_USART6);
     GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_9;
@@ -102,6 +128,9 @@ void Lunqu_Init(uint32_t baud)
     USART_InitStructure.USART_Mode                = USART_Mode_Rx;
     USART_Init(USART6, &USART_InitStructure);
 
+    (void)USART6->SR;
+    (void)USART6->DR;
+    NVIC_ClearPendingIRQ(USART6_IRQn);
     USART_ITConfig(USART6, USART_IT_RXNE, ENABLE);
     USART_Cmd(USART6, ENABLE);
 
@@ -113,28 +142,20 @@ void Lunqu_Init(uint32_t baud)
 }
 
 /**
-  * @brief  逐字节接收 —— 例程 UART5_IRQHandler 主体逐行移植(仅变量名适配)
-  * @note   由 bno08x_uart_rvc.c 的 USART6 中断按开关分流调用; 唯一增补是
-  *         Count>=64 强制清零(防例程中 TYPE/LEN 不匹配帧的缓冲越界写)
+  * @brief  逐字节接收轮趣IMU/AHRS帧，使用原项目字段布局。
+  * @note   由imu.c统一USART6中断按上电选择分流；未知帧最多缓存64字节。
   */
 void Lunq_RxByte(uint8_t Usart_Receive)
 {
     Fd_data[lq_count] = Usart_Receive;
-    if (((lq_last_rsnum == FRAME_END) && (Usart_Receive == FRAME_HEAD)) || lq_count > 0)
+    if (Usart_Receive == FRAME_HEAD || lq_count > 0) /* 允许直接从上电首个FC帧头接收。 */
     {
         lq_count++;
-        if ((Fd_data[1] == TYPE_IMU)  && (Fd_data[2] == IMU_LEN))  lq_rsimu_flag = 1;
-        if ((Fd_data[1] == TYPE_AHRS) && (Fd_data[2] == AHRS_LEN)) lq_rsacc_flag = 1;
-        if (lq_count >= 64)                /*增补: 越界保护(例程缺陷, 必要)*/
-        {
-            lq_count = 0;
-            lq_rsimu_flag = 0;
-            lq_rsacc_flag = 0;
-        }
+        if (lq_count >= 3 && (Fd_data[1] == TYPE_IMU)  && (Fd_data[2] == IMU_LEN))  lq_rsimu_flag = 1;
+        if (lq_count >= 3 && (Fd_data[1] == TYPE_AHRS) && (Fd_data[2] == AHRS_LEN)) lq_rsacc_flag = 1;
     }
     else
         lq_count = 0;
-    lq_last_rsnum = Usart_Receive;
 
     if (lq_rsimu_flag == 1 && lq_count == IMU_RS)      /*收满IMU整帧*/
     {
@@ -153,64 +174,70 @@ void Lunq_RxByte(uint8_t Usart_Receive)
             /*解析直接在中断内完成(卡死根因是crc16_idx越界, 已修复):*/
             if (Fd_rsahrs[1] == TYPE_AHRS && Fd_rsahrs[2] == AHRS_LEN)
             {
+                /* 拒绝NaN/Inf或明显非法航向，避免坏float进入角差归一循环。 */
+                float yaw_rad = LqF32(&Fd_rsahrs[27]);
+                if (!(yaw_rad >= -100.0f && yaw_rad <= 100.0f))
+                {
+                    memset(Fd_data, 0, sizeof(Fd_data));
+                    return;
+                }
                 lunqu_data.roll      = LqF32(&Fd_rsahrs[19]) * 57.29578f;
                 lunqu_data.pitch     = LqF32(&Fd_rsahrs[23]) * 57.29578f;
-                lq_yaw_raw_deg       = LqF32(&Fd_rsahrs[27]) * 57.29578f;
+                lq_yaw_raw_deg       = yaw_rad * 57.29578f;
                 lunqu_data.yaw_speed = LqF32(&Fd_rsahrs[15]) * 57.29578f;
 
                 if (!lq_zero_done)            /*上电首帧: 当前朝向=0 deg*/
                 {
-                    lq_yaw_zero_deg = lq_yaw_raw_deg;
+                    lq_yaw_zero_deg = lq_yaw_raw_deg - lunqu_data.yaw;
                     lq_zero_done = 1;
                 }
                 lunqu_data.yaw       = LqNorm180(lq_yaw_raw_deg - lq_yaw_zero_deg);
                 lunqu_data.yaw_abs360 = LqNorm360(lq_yaw_raw_deg - lq_yaw_zero_deg);
-                IMU_NotifyUpdateFromISR();
+                lq_have_yaw = 1;
+                imu_update_sequence++;
             }
         }
         memset(Fd_data, 0, 64);
+    }
+    if (lq_count >= sizeof(Fd_data)) /* 先处理完整64字节IMU帧，再保护未知帧边界。 */
+    {
+        lq_count = lq_rsimu_flag = lq_rsacc_flag = 0;
+        memset(Fd_data, 0, sizeof(Fd_data));
     }
 }
 
 
 
 
-/**
-  * @brief  按开关返回当前陀螺仪 yaw(deg) —— 上层(里程计/闭环)统一入口
-  */
-float IMU_GetYaw(void)
+/* 轮趣后端只提供本款航向；统一选择和USART6入口在imu.c。 */
+uint8_t Lunq_Ready(void) { return lq_have_yaw; }
+float Lunq_GetYaw(void) { return lunqu_data.yaw; }
+float Lunq_GetYawAbs360(void) { return lunqu_data.yaw_abs360; }
+uint32_t Lunq_UpdateSequence(void) { return imu_update_sequence; }
+
+void Lunq_GetSample(IMU_Sample_t *out)
 {
-    if (lunqu_RunFlag)  return lunqu_data.yaw;
-    if (Bno085_RunFlag) return bno08x_data.yaw;
-    return 0.0f;
+    uint32_t primask;
+    if (out == NULL) return;
+    primask = __get_PRIMASK();
+    __disable_irq();
+    out->yaw_deg = lunqu_data.yaw;
+    out->sequence = imu_update_sequence;
+    __set_PRIMASK(primask);
 }
 
-/* ---- PB2按键: 重新记零点(轮趣=当前朝向归0; BNO085上电自带零基准, 空操作) ---- */
-void IMU_SetZero(void)
+void Lunqu_IRQHandler(void)
 {
-    if (lunqu_RunFlag) Lunq_SetZero();
-}
-
-/* ---- LCD显示: yaw 0~360(相对零点) ---- */
-static float LqNorm360_pub(float a)
-{
-    a = fmodf(a, 360.0f);
-    if (a < 0.0f) a += 360.0f;
-    return a;
-}
-float IMU_GetYawAbs360(void)
-{
-    if (lunqu_RunFlag)  return LqNorm360_pub(lunqu_data.yaw);
-    if (Bno085_RunFlag) return LqNorm360_pub(bno08x_data.yaw);
-    return 0.0f;
-}
-
-void IMU_NotifyUpdateFromISR(void)
-{
-    imu_update_sequence++;
-}
-
-uint32_t IMU_UpdateSequence(void)
-{
-    return imu_update_sequence;
+    uint32_t status = USART6->SR;
+    if (status & (USART_SR_RXNE | USART_SR_ORE | USART_SR_NE | USART_SR_FE | USART_SR_PE))
+    {
+        uint8_t byte = (uint8_t)USART6->DR;
+        if (status & (USART_SR_ORE | USART_SR_NE | USART_SR_FE | USART_SR_PE))
+        {
+            lq_count = lq_rsimu_flag = lq_rsacc_flag = 0;
+            memset(Fd_data, 0, sizeof(Fd_data));
+        }
+        else if (status & USART_SR_RXNE)
+            Lunq_RxByte(byte);
+    }
 }
