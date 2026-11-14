@@ -33,11 +33,11 @@
 const float g_place_claw_close_deg = PLACE_CLAW_CLOSE_DEG;
 const float g_place_claw_open_deg  = PLACE_CLAW_OPEN_DEG;
 
-/* 陀螺仪选择：0=HWT101（115200，上电自动配置100Hz，默认）；
-   1=轮趣FDILink（921600，保留原模块输出设置）。修改后重新编译并上电生效。
+/* 陀螺仪选择：0=HWT101（115200，上电自动配置100Hz）；
+   1=轮趣FDILink（当前选择，921600，保留原模块输出设置）。修改后重新编译并上电生效。
    两款共用USART6/PG9，实际只接所选一款；HWT101还须RX接PG14。
    上电锁存此选择，运行中修改变量不会切换，避免行驶中改变航向基准。 */
-uint8_t IMU_Select = IMU_SOURCE_HWT101;
+uint8_t IMU_Select = IMU_SOURCE_LUNQU;
 
 /* 丝杆(张大头ID6)上电自动回零开关：0=关闭(默认)，跳过回零直接开机；
    1=开启，开机阻塞回零，失败时不启动任务。修改后重新编译烧录，下次上电生效。

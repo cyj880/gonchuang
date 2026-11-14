@@ -731,10 +731,12 @@ static const float grab_pick_servo270_drop[3] = {
 };
 
 /* 圆环站点放料及粗加工取回；与原料区grab_steps独立，保存物料/环号/原槽位。 */
-#define PLACE_LIFT_WAIT_LIMIT_MS 2000u   /* 两轮粗加工/暂存：收到9F提前继续，否则2秒放行 */
+#define PLACE_LIFT_WAIT_LIMIT_MS 1500u   /* 两轮粗加工/暂存：收到9F提前继续，否则1.5秒放行(2026-11-14, 原2s) */
 #define PLACE_LIFT_LOW_POS_PUL   10000u  /* 丝杆目标0~10000脉冲（含边界）使用短等待 */
-#define PLACE_LIFT_LOW_WAIT_MS   1000u   /* 上述低脉冲目标：最多等1秒 */
-#define PLACE_BELT_WAIT_LIMIT_MS 2500u   /* 同步带：收到9F提前继续，否则2.5秒放行 */
+#define PLACE_LIFT_LOW_WAIT_MS   500u    /* 上述低脉冲目标：最多等0.5秒(2026-11-14, 原1s) */
+#define PLACE_BELT_WAIT_LIMIT_MS 2000u   /* 同步带目标>5000脉冲：收到9F提前继续，否则2秒放行(2026-11-14, 原2.5s) */
+#define PLACE_BELT_LOW_POS_PUL   5000u   /* 同步带目标0~5000脉冲（含边界）使用短等待 */
+#define PLACE_BELT_LOW_WAIT_MS   1000u   /* 上述低脉冲目标：最多等1秒(2026-11-14新增分段) */
 #define PLACE_ARM_WAIT_LIMIT_MS  4000u   /* RM反馈有效时：到位提前继续，否则4秒放行 */
 #define PLACE_SETTLE_MS          800u   /* 放料轴全部到位后，保持夹紧等待机构稳定 */
 #define PLACE_AXIS_BELT          1u
@@ -749,7 +751,8 @@ enum { PLACE_PICK, PLACE_CLOSE, PLACE_PICK_LIFT, PLACE_DROP_BELT_ARM, PLACE_DROP
 typedef struct {
     uint8_t color[3], ring[3], slot[3];
     uint8_t pick, step, started, axes, belt_done, lift_done, arm_done, manual, retrieve; /* 仅粗加工取回 */
-    uint16_t lift_wait_ms; /* 按本阶段丝杆绝对目标选择1秒或2秒，不按移动距离 */
+    uint16_t lift_wait_ms; /* 按本阶段丝杆绝对目标选择1.5秒或0.5秒，不按移动距离 */
+    uint16_t belt_wait_ms; /* 按本阶段同步带绝对目标选择2秒或1秒 */
     uint32_t drop_lift_target; /* 本次放料高度：二轮暂存32750，其余56750 */
     uint32_t encoder_sequence; /* 里程计始终读取；离站前检查新在线读数，不暂停/恢复任务 */
     TickType_t tick;
@@ -1929,6 +1932,8 @@ static void station_place_move(uint8_t axes, int32_t belt, int16_t arm, uint32_t
     station_place.axes = axes;
     station_place.lift_wait_ms = (lift <= PLACE_LIFT_LOW_POS_PUL) ?
         PLACE_LIFT_LOW_WAIT_MS : PLACE_LIFT_WAIT_LIMIT_MS;
+    station_place.belt_wait_ms = (belt <= PLACE_BELT_LOW_POS_PUL) ?
+        PLACE_BELT_LOW_WAIT_MS : PLACE_BELT_WAIT_LIMIT_MS;
     station_place.belt_done = station_place.lift_done = station_place.arm_done = 0;
     station_place.tick = xTaskGetTickCount();
     if ((axes & PLACE_AXIS_ARM) && !Arm_M2006_SetTargetDeg(arm))
@@ -1954,7 +1959,7 @@ static uint8_t station_place_move_done(void)
        超时只放行状态机，不停止轴；并行组仍等其他轴确认或各自超时。 */
     if (axes & PLACE_AXIS_BELT)
         station_place.belt_done |= (uint8_t)(Belt_ZDT_ReachedGet() ||
-            elapsed >= pdMS_TO_TICKS(PLACE_BELT_WAIT_LIMIT_MS));
+            elapsed >= pdMS_TO_TICKS(station_place.belt_wait_ms));
     if (axes & PLACE_AXIS_LIFT)
         station_place.lift_done |= (uint8_t)(Lift_ZDT_ReachedGet() ||
             elapsed >= pdMS_TO_TICKS(station_place.lift_wait_ms));
