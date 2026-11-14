@@ -75,6 +75,8 @@ void Emm_V5_Vel_Control(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bo
 void Emm_V5_Pos_Control(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, uint32_t clk, bool raF, bool snF);
 // 让电机立即停止运动
 void Emm_V5_Stop_Now(uint8_t addr, bool snF);
+/* One-shot position hold; requires Emm firmware motion mode 02 support. */
+uint8_t Emm_V5_Hold_Current_Position(uint8_t addr);
 // 触发多机同步开始运动
 void Emm_V5_Synchronous_motion(uint8_t addr);
 /**********************************************************

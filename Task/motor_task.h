@@ -91,7 +91,7 @@ void Motor_Enable(bool state);
 void MotorTask(void *pvParameters);
 enum { MOTOR_GRAB_FAULT_NONE, MOTOR_GRAB_FAULT_LIFT, MOTOR_GRAB_FAULT_BELT,
        MOTOR_GRAB_FAULT_ARM, MOTOR_GRAB_FAULT_RDK, MOTOR_GRAB_FAULT_ODOM,
-       MOTOR_GRAB_FAULT_NEXT };
+        MOTOR_GRAB_FAULT_NEXT, MOTOR_GRAB_FAULT_CHASSIS };
 typedef struct
 {
     uint8_t pick, step, reason;

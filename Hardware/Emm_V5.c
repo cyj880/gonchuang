@@ -228,6 +228,20 @@ void Emm_V5_Pos_Control(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, ui
   can_SendCmd(cmd, 13);
 }
 
+/* Emm mode 02: zero displacement relative to CURRENT actual position.
+ * Send ONCE after stopping; subsequent FE/F6/FD commands replace this hold.
+ * Return is transport status only, not a driver acknowledgement. */
+uint8_t Emm_V5_Hold_Current_Position(uint8_t addr)
+{
+  uint8_t cmd[13] = {0};
+  cmd[0] = addr;
+  cmd[1] = 0xFD;
+  cmd[4] = 50;    /* Nonzero speed parameter; requested displacement is zero. */
+  cmd[10] = 0x02; /* Relative to current actual position, NOT previous target. */
+  cmd[12] = 0x6B;
+  return can_SendCmd(cmd, sizeof(cmd));
+}
+
 /**
   * @brief    立即停止
   * @param    addr  ：电机地址

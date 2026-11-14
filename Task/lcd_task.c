@@ -48,9 +48,9 @@ static void lcd_odom_cmd_line(void)
     else if (Motor_NoNext())
     {
         MotorGrabFault_t fault;
-        static const char *const reason[] = {"", "LIFT", "BELT", "RM", "RDK", "ODOM", "NEXT"};
+        static const char *const reason[] = {"", "LIFT", "BELT", "RM", "RDK", "ODOM", "NEXT", "HOLD"};
         Motor_GrabGetFault(&fault);
-        if (fault.reason > MOTOR_GRAB_FAULT_NONE && fault.reason <= MOTOR_GRAB_FAULT_NEXT)
+        if (fault.reason > MOTOR_GRAB_FAULT_NONE && fault.reason < sizeof(reason) / sizeof(reason[0]))
             LCD_Printf(0, 64, LCD_6X8, "no next G%uS%u %-4s ",
                        (unsigned)fault.pick, (unsigned)fault.step, reason[fault.reason]);
         else
