@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""物料抓取判定：固定抓取区 + 转盘运动状态机。
+"""物料抓取判定：三抓取区（近端/左远端/右远端）+ 转盘运动状态机。
+
+2026-11-15 三区扩展（cyqm 三槽位思路移植，用户定案）：
+    - REGION 1=近端（原单抓取区）、2=左远端、3=右远端，优先级 1>2>3；
+    - 逐区独立判定有效性：区内恰好 1 个目标色物料=有效候选，≥2=歧义
+      区跳过；上报取优先级最高的有效区（0x11 REGION 字段，LEN=3）；
+    - 判稳状态机不变（先见运动→转动确认→低速证据→settled）；
+    - 乙路线：同色重臂只清低速证据/测速基线（soft_rearm），保留
+      motion_confirmed——盘停后重发命令 ≈0.4s 重攒证据即 READY。
 
 2026-10-31 修订（cyqm material_pickup_detector 状态机移植适配）：
 停稳判断从"单目标矩心速度门"升级为状态机——固定抓取区（画面中心矩形，
@@ -14,10 +22,10 @@
       只见部分盘、物料会出入画，抓取判定只发生在目标位于区内时——区内
       必偏心，单目标速度即可信（盘转矩心必动），无需全场 max；
     - bbox 触及边距防护圈的物料视为正在出入画，不参与测速与判定；
-    - 串口 0x11 帧（AA 55 11 02 STATE COLOR，logistics_vision_main.
-      encode_material_state_frame）：转盘停稳（settled）后每周期单次
-      上报——区内 STATE=5 可夹取、区外 STATE=1 区内无物料，锁存至
-      下一条颜色命令，其余静默。
+    - 串口 0x11 帧（AA 55 11 03 STATE COLOR REGION，logistics_vision_main.
+      encode_material_state_frame）：转盘停稳（settled）后 10Hz 持续
+      上报——有有效区 STATE=5+REGION 可夹取、无有效区 STATE=1/0/6，
+      其余静默。
 
 STATE 枚举（encode_material_state_frame 使用）：
     0 NOT_VISIBLE   目标色物料不可见
@@ -44,14 +52,31 @@ STATE_MULTI = 6
 STATE_NAMES = ('NOT_VISIBLE', 'OUT_OF_REGION', 'WAIT_MOTION', 'MOVING',
                'SETTLING', 'READY', 'MULTI')
 
+# 抓取区编号（0x11 REGION 字段；2026-11-15 用户定案）
+REGION_NONE = 0
+REGION_NEAR = 1     # 近端（原单抓取区）
+REGION_LEFT = 2     # 左远端
+REGION_RIGHT = 3    # 右远端
+REGION_PRIORITY = (REGION_NEAR, REGION_LEFT, REGION_RIGHT)
+
 
 @dataclass(frozen=True)
 class GraspParams:
-    # 抓取区（去畸变图像像素，画面中心矩形；2026-10-31 用户定：中心区域下移80px）
+    # 近端抓取区（REGION 1；2026-11-15 用户定：中心 (320,320)，260x200）
     region_cx: float = 320.0
     region_cy: float = 320.0
-    region_w: float = 240.0
+    region_w: float = 260.0
     region_h: float = 200.0
+    # 左远端抓取区（REGION 2；粗略初值，位置尺寸待现场微调）
+    region2_cx: float = 150.0
+    region2_cy: float = 160.0
+    region2_w: float = 190.0
+    region2_h: float = 160.0
+    # 右远端抓取区（REGION 3；粗略初值，位置尺寸待现场微调）
+    region3_cx: float = 490.0
+    region3_cy: float = 160.0
+    region3_w: float = 190.0
+    region3_h: float = 160.0
     # 边距防护圈：bbox 触圈的物料视为正在出入画，不参与测速
     edge_margin_px: float = 20.0
     # 运动阈值（px/s）：规则 6~10s/圈折算起点，待实机录像校准
@@ -69,7 +94,8 @@ class GraspParams:
         values = vars(self)
         if not all(math.isfinite(v) and v >= 0 for v in values.values()):
             raise ValueError('抓取参数必须为有限非负数')
-        for name in ('region_w', 'region_h', 'moving_speed_px_s',
+        for name in ('region_w', 'region_h', 'region2_w', 'region2_h',
+                     'region3_w', 'region3_h', 'moving_speed_px_s',
                      'near_stop_speed_px_s', 'min_frame_interval_s',
                      'max_frame_interval_s'):
             if values[name] <= 0:
@@ -84,6 +110,25 @@ class GraspParams:
         cx, cy = float(center[0]), float(center[1])
         return (abs(cx - self.region_cx) <= self.region_w / 2 and
                 abs(cy - self.region_cy) <= self.region_h / 2)
+
+    def regions(self):
+        """三个抓取区 (region_id, cx, cy, w, h)，按优先级 1>2>3 排列。"""
+        return ((REGION_NEAR, self.region_cx, self.region_cy,
+                 self.region_w, self.region_h),
+                (REGION_LEFT, self.region2_cx, self.region2_cy,
+                 self.region2_w, self.region2_h),
+                (REGION_RIGHT, self.region3_cx, self.region3_cy,
+                 self.region3_w, self.region3_h))
+
+    def region_of(self, center):
+        """点所在的抓取区编号（0=不在任何抓取区）。
+
+        同点落在多个区时取优先级较高（编号较小）者。"""
+        cx, cy = float(center[0]), float(center[1])
+        for rid, rcx, rcy, rw, rh in self.regions():
+            if abs(cx - rcx) <= rw / 2 and abs(cy - rcy) <= rh / 2:
+                return rid
+        return REGION_NONE
 
 
 class GraspMotionJudge:
@@ -106,6 +151,13 @@ class GraspMotionJudge:
 
     def reset(self):
         self.motion_confirmed = False
+        self._reset_counters()
+
+    def soft_rearm(self):
+        """同色重臂（乙路线，2026-11-15）：只清低速证据与测速基线，
+        保留 motion_confirmed——盘已停时单片机重发命令后重新攒满低速
+        证据（≈0.4s）即可 READY，无需再等"先见运动"；若重发时盘恰在
+        转动，速度门照常挡住。换色/进入模式用 reset()（全清）。"""
         self._reset_counters()
 
     @property

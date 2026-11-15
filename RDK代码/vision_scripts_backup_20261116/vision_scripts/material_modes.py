@@ -8,7 +8,8 @@ import time
 import cv2
 
 from mode_worker import ModeWorker
-from material_grasp import (GraspMotionJudge, GraspParams, STATE_NAMES,
+from material_grasp import (GraspMotionJudge, GraspParams, REGION_NONE,
+                            REGION_PRIORITY, STATE_NAMES,
                             STATE_MULTI, STATE_READY)
 from material_color_detect import (COLOR_NAMES, ColorConfigError,
                                    annotate_blobs, draw_debug_label, find_material_blobs,
@@ -73,10 +74,17 @@ class MaterialModeWorker(ModeWorker):
                        'speed_px_s': None, 'in_region': False,
                        'settled': False, 'generation': self.generation}
 
-    def _reset_state(self, color=1):
+    def _reset_state(self, color=1, preserve_motion=False):
         self._color = color
         if self.track:
-            self._judge = GraspMotionJudge(self.grasp_params)
+            if (preserve_motion and getattr(self, '_judge', None) is not None
+                    and getattr(self, '_judge_color', None) == color):
+                # 乙路线：同色重臂保留 motion_confirmed——盘停后重发命令
+                # 重新攒低速证据即可 READY；换色/进模式走全清分支。
+                self._judge.soft_rearm()
+            else:
+                self._judge = GraspMotionJudge(self.grasp_params)
+                self._judge_color = color
         self._stats_time = time.monotonic()
         self._stats_count = 0
         self._stats_ms = 0.0
@@ -90,24 +98,25 @@ class MaterialModeWorker(ModeWorker):
                 self._config_error = str(exc)
                 print(f'[{self.mode}][错误] {exc}')
 
-    def _draw_region(self, canvas):
-        """抓取区可视化：画面中心矩形（--grasp-region-* 可调）。"""
-        p = self.grasp_params
-        x0 = int(round(p.region_cx - p.region_w / 2))
-        y0 = int(round(p.region_cy - p.region_h / 2))
-        x1 = int(round(p.region_cx + p.region_w / 2))
-        y1 = int(round(p.region_cy + p.region_h / 2))
-        cv2.rectangle(canvas, (x0, y0), (x1, y1), (255, 255, 0), 1, cv2.LINE_AA)
-        cv2.putText(canvas, 'GRASP REGION', (x0 + 4, y0 + 16),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1,
-                    cv2.LINE_AA)
+    def _draw_regions(self, canvas, highlight=0):
+        """三抓取区可视化：青色=常规，绿色=当前上报区（STATE=5 的区）。"""
+        for rid, cx, cy, w, h in self.grasp_params.regions():
+            x0 = int(round(cx - w / 2))
+            y0 = int(round(cy - h / 2))
+            x1 = int(round(cx + w / 2))
+            y1 = int(round(cy + h / 2))
+            color = (0, 255, 0) if rid == highlight else (255, 255, 0)
+            cv2.rectangle(canvas, (x0, y0), (x1, y1), color, 1, cv2.LINE_AA)
+            cv2.putText(canvas, f'GRASP R{rid}', (x0 + 4, y0 + 16),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1,
+                        cv2.LINE_AA)
 
     def _process(self, frame, source_ns, generation):
         started = time.monotonic()
         undist = self.und.remap(frame)
         canvas = undist.copy()
         if self.track:
-            self._draw_region(canvas)
+            self._draw_regions(canvas)
         if self._config_error:
             cv2.putText(canvas, 'HSV CONFIG ERROR - see terminal', (8, 100),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
@@ -132,17 +141,25 @@ class MaterialModeWorker(ModeWorker):
 
         multi = False
         target = None
-        in_region = []
+        report_region = REGION_NONE
+        region_counts = {}
         if self.track:
-            # 区域优先选择：区内恰好1个→目标；≥2个→MULTI无效（用户决定）；
-            # 区内0个→最大面积候选（仅追踪显示，不可能READY）
-            in_region = [b for b in visible
-                         if self.grasp_params.in_region(b.center)]
-            multi = len(in_region) >= 2
+            # 三区选择（优先级 1>2>3）：逐区计数，恰好1个=有效候选，
+            # ≥2=歧义区跳过；上报最高优先级有效区；目标全在歧义区→MULTI。
+            # 区外物料不产生歧义，仅作为显示/测速对象。
+            for b in visible:
+                rid = self.grasp_params.region_of(b.center)
+                region_counts[rid] = region_counts.get(rid, 0) + 1
+            valid = [rid for rid in REGION_PRIORITY
+                     if region_counts.get(rid, 0) == 1]
+            report_region = valid[0] if valid else REGION_NONE
+            multi = bool(visible) and report_region == REGION_NONE and any(
+                c >= 2 for rid, c in region_counts.items() if rid)
             if multi:
                 target = max(visible, key=lambda b: b.area_px) if visible else None
-            elif in_region:
-                target = in_region[0]
+            elif report_region:
+                target = next(b for b in visible if
+                              self.grasp_params.region_of(b.center) == report_region)
             else:
                 target = max(visible, key=lambda b: b.area_px) if visible else None
             status = 'TRACKING' if visible else 'LOST'
@@ -157,17 +174,21 @@ class MaterialModeWorker(ModeWorker):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
         grasp = {}
         if self.track:
-            grasp = self._judge_result(target, in_region, multi, source_ns)
+            grasp = self._judge_result(target, report_region, multi, source_ns)
+            self._draw_regions(canvas, highlight=grasp.get('region', 0))
         counts = {cid: sum(b.color_id == cid for b in visible) for cid in COLOR_NAMES}
         hud = [('R%d Y%d B%d G%d K%d L%d  ambiguous=%d' % (
             *counts.values(), len(ambiguous)), 78)]
-        if target is not None:
-            hud.append(('TARGET (centroid)', 104))
         if self.track:
-            hud.append((f"GRASP {grasp['state_name']}", 128))
+            hud.append(('P1:%d P2:%d P3:%d' % tuple(
+                region_counts.get(rid, 0) for rid in REGION_PRIORITY), 104))
+        if target is not None:
+            hud.append(('TARGET (centroid)', 130))
+        if self.track:
+            hud.append((f"GRASP {grasp['state_name']}", 154))
             speed = grasp.get('speed_px_s')
             if speed is not None:
-                hud.append((f'speed={speed:.1f}px/s', 152))
+                hud.append((f'speed={speed:.1f}px/s', 178))
         for text, y in hud:
             draw_debug_label(canvas, text, (8, y))
         elapsed_ms = (time.monotonic() - started) * 1000
@@ -189,12 +210,13 @@ class MaterialModeWorker(ModeWorker):
                   f'grasp={grasp.get("reason", "--")} center={grasp.get("grasp_center")}')
             self._stats_time, self._stats_count, self._stats_ms = now, 0, 0.0
 
-    def _judge_result(self, target, in_region, multi, source_ns):
-        """转盘运动状态机：multi/不可见/出区时测速对象与判定口径见类文档。"""
+    def _judge_result(self, target, report_region, multi, source_ns):
+        """转盘运动状态机（三区版）：测速对象 = 上报区内的物料（区外时
+        为最大面积候选，仅提供转动证据）；multi/不可见时无测速对象。"""
         if multi:
             measure, in_reg = None, False
-        elif in_region:
-            measure, in_reg = in_region[0], True
+        elif report_region:
+            measure, in_reg = target, True
         else:
             # 区外目标也参与测速（提供转动证据）；触边距圈的由判定器剔除
             measure, in_reg = target, False
@@ -206,6 +228,7 @@ class MaterialModeWorker(ModeWorker):
                 'speed_px_s': speed if measure is not None else None,
                 'grasp_center': (tuple(float(v) for v in target.center)
                                  if target is not None and not multi else None),
-                'in_region': bool(in_region),
+                'in_region': bool(in_reg),
+                'region': int(report_region),
                 'settled': self._judge.settled,
                 'track_color': self._color}

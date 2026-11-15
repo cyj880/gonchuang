@@ -344,5 +344,35 @@ class SerialLinkResilienceTests(unittest.TestCase):
             link.stop()
 
 
+    def test_split_frame_across_long_gap_is_assembled(self):
+        # 2026-11-15 随机丢指令漏洞回归：一帧分两次读取、间隔 80ms。
+        # 旧代码的 50ms 空闲重置会把缓冲里的半帧整体丢弃（指令蒸发、
+        # RDK 保持 raw）；修复后任意间隔都能拼接完成。
+        on_mode = Mock()
+        link = main.SerialLink('/dev/null', 115200, on_mode=on_mode)
+        handle = Mock()
+        link._handle = handle
+        handle.in_waiting = 5
+        handle.read.return_value = self.RAW_CMD[:5]     # 第一片 AA 55 10 01 00
+        link._poll()
+        time.sleep(0.08)                                # 间隔 > 旧 50ms 阈值
+        handle.in_waiting = 3
+        handle.read.return_value = self.RAW_CMD[5:]     # 第二片 11 0D 0A
+        link._poll()
+        on_mode.assert_called_once_with('raw')
+
+    def test_noise_bytes_then_frame_still_parsed(self):
+        # 噪声字节（含假帧头）之后的完整命令仍能解析——靠校验和与
+        # 逐字节滑动重同步，不依赖空闲重置
+        on_mode = Mock()
+        link = main.SerialLink('/dev/null', 115200, on_mode=on_mode)
+        handle = Mock()
+        link._handle = handle
+        handle.in_waiting = 20
+        handle.read.return_value = b'\x00\xaa\x55\xff' + self.RAW_CMD
+        link._poll()
+        on_mode.assert_called_once_with('raw')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -138,29 +138,71 @@ class MaterialIntegrationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'LOST')
 
     def test_region_priority_and_multi_invalid(self):
-        # 区域优先：区内唯一→目标=区内那个；区内≥2 同色→MULTI 无效（用户决定）
+        # 三区选择（优先级 1>2>3）：区内唯一→目标=区内那个并上报区号；
+        # 区内≥2 同色→该区歧义跳过/全歧义→MULTI 无效（用户决定）
         worker = self.worker(track=True)
         worker.start_mode(color=3)
-        result = self.process(worker)              # 蓝 blob 在 (260,230)：区内唯一
+        result = self.process(worker)              # 蓝 blob (260,230)：近端区唯一
         self.assertEqual(result['status'], 'TRACKING')
         self.assertEqual(result['target'].color_id, 3)
         self.assertTrue(result['in_region'])
+        self.assertEqual(result['region'], 1)      # REGION_NEAR
         self.assertEqual(result['state_name'], 'WAIT_MOTION')
 
         hsv = np.full((480, 640, 3), (0, 0, 180), np.uint8)
-        for cx in (280, 380):                      # 两个蓝物料都在默认区内
+        for cx in (280, 380):                      # 两个蓝物料都在近端区
             cv2.circle(hsv, (cx, 240), 25, (110, 220, 180), -1)
         result = self.process(worker, cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR))
         self.assertEqual(result['state'], STATE_MULTI)
+        self.assertEqual(result['region'], 0)
         self.assertFalse(result['grasp_ready'])
         self.assertIsNone(result['grasp_center'])
 
+        # 优先级跳过：近端区 2 个蓝（歧义）+ 左远端区 1 个蓝 → 报左远端
         hsv = np.full((480, 640, 3), (0, 0, 180), np.uint8)
-        cv2.circle(hsv, (60, 100), 25, (110, 220, 180), -1)   # 区外唯一
+        for cx, cy in ((280, 240), (380, 240), (150, 160)):
+            cv2.circle(hsv, (cx, cy), 25, (110, 220, 180), -1)
         result = self.process(worker, cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR))
         self.assertEqual(result['status'], 'TRACKING')
+        self.assertEqual(result['region'], 2)      # 跳过歧义的近端区
+        self.assertTrue(result['in_region'])
+        self.assertEqual(result['target'].center[0], 150)
+
+        hsv = np.full((480, 640, 3), (0, 0, 180), np.uint8)
+        cv2.circle(hsv, (320, 460), 25, (110, 220, 180), -1)  # 三区之外唯一
+        result = self.process(worker, cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR))
+        self.assertEqual(result['status'], 'TRACKING')
+        self.assertEqual(result['region'], 0)
         self.assertFalse(result['in_region'])
         self.assertEqual(result['state_name'], 'OUT_OF_REGION')
+
+    def test_same_color_rearm_preserves_motion_confirmed(self):
+        # 乙路线（2026-11-15）：同色重臂保留"已确认转动"——盘停后重发
+        # 命令无需再等先见运动，重攒低速证据即 READY；换色则全清。
+        worker = self.worker(track=True)
+        worker.start_mode(color=3)
+
+        def blue(x, y):
+            hsv = np.full((480, 640, 3), (0, 0, 180), np.uint8)
+            cv2.circle(hsv, (x, y), 25, (110, 220, 180), -1)
+            return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+        self.process(worker, blue(200, 320))   # 基线（近端区内）
+        self.process(worker, blue(300, 320))   # 快速 → moving 1
+        self.process(worker, blue(400, 320))   # 快速 → moving 2 → 确认
+        self.assertTrue(worker._judge.motion_confirmed)
+
+        worker.start_mode(color=3, preserve_motion=True)  # 同色软重臂
+        result = None
+        for _ in range(8):                     # 停着的盘上重攒低速证据
+            result = self.process(worker, blue(400, 320))
+        self.assertTrue(result['grasp_ready'], result['state_name'])
+        self.assertEqual(result['region'], 1)
+
+        worker.start_mode(color=2, preserve_motion=False)  # 换色 = 全清
+        result = self.process(worker, blue(400, 320))
+        self.assertFalse(worker._judge.motion_confirmed)   # 判稳器已重置
+        self.assertEqual(result['state_name'], 'NOT_VISIBLE')  # 黄色不可见
 
     def test_current_missing_frame_never_keeps_old_target(self):
         worker = self.worker(track=True)

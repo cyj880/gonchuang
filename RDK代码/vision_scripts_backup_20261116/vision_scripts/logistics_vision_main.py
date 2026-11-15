@@ -28,13 +28,16 @@ logistics_vision_main.py —— 单进程多模式视觉主程序（无 ROS2）
     帧 = AA 55 + 命令 + 长度 + payload + 校验和 + 0D 0A；
     checksum = (命令+长度+payload和) & 0xFF；
     0x10 模式命令（STM32→视觉）：payload[0]=模式号（material_track 附颜色）；
-    0x11 物料状态/夹取帧（视觉→STM32）：
-         AA 55 11 02 STATE COLOR CK 0D 0A（STATE 用 material_grasp 枚举，
-         5=READY）；转盘确认转动且停稳后以 10Hz 持续发送——目标在区内为
-         STATE=5（可夹取），在区外为 STATE=1（抓取区内还没有物料）；
-         单片机收到首帧即夹取并关闭通道，多余帧被丢弃（对 RDK 无影响，
-         RDK 不需要单片机任何回传）；未停稳/多物料/目标不可见静默；
-         单片机抓取条件 = STATE==5 且 COLOR==期望。
+    0x11 物料状态/夹取帧（视觉→STM32，三抓取区版 2026-11-15）：
+         AA 55 11 03 STATE COLOR REGION CK 0D 0A（STATE 用 material_grasp
+         枚举，5=READY；REGION 0=无/1=近端/2=左远端/3=右远端，仅 STATE=5
+         有意义）；转盘确认转动且停稳后以 10Hz 持续发送——目标在优先级
+         最高的有效区为 STATE=5+REGION（可夹取），无有效区为
+         STATE=0/1/6+REGION=0；单片机收到首帧即夹取并关闭通道，多余帧
+         被丢弃（对 RDK 无影响，RDK 不需要单片机任何回传）；未停稳静默；
+         单片机抓取条件 = STATE==5 且 COLOR==期望，按 REGION 对应机构
+         位姿；乙路线：每抓一次重发一条同色命令开新周期（同色重臂保留
+         motion_confirmed）。
     0x13 已识别圆环结果（视觉→STM32）：
          payload = count + yaw_valid + yaw×100(int16) + 每环[id, x:u16, y:u16]，
          站点按 (x,y) 排序、最多 3 个、绝对 640x480 像素坐标。
@@ -210,19 +213,24 @@ def encode_identified_ring_result(sites, yaw=None):
     return encode_frame(RING_IDENTIFIED_RESULT, payload)
 
 
-def encode_material_state_frame(state, color):
-    """0x11：物料状态/夹取帧（视觉→STM32，借鉴 cyqm 上报模型）。
+def encode_material_state_frame(state, color, region=0):
+    """0x11：物料状态/夹取帧（视觉→STM32，三抓取区版，2026-11-15）。
 
-    AA 55 11 02 STATE COLOR CK 0D 0A；STATE 用 material_grasp 状态枚举
-    （5=READY），COLOR 为本周期跟踪颜色 1~6。转盘确认转动且停稳后以
-    10Hz 持续发送：目标在区内 STATE=5（可夹取），区外 STATE=1（抓取区
-    内还没有物料）；单片机收到首帧即夹取，多余帧被丢弃。单片机抓取
-    条件 = STATE==5 且 COLOR==期望（motor_task 侧核对）。"""
+    AA 55 11 03 STATE COLOR REGION CK 0D 0A（总长 10 字节，LEN=3）；
+    STATE 用 material_grasp 状态枚举（5=READY），COLOR 为本周期跟踪
+    颜色 1~6，REGION 为抓取区编号（0=无 / 1=近端 / 2=左远端 /
+    3=右远端；仅 STATE=5 时有意义）。转盘停稳（settled）后以 10Hz
+    持续发送：目标在优先级最高的有效区 → STATE=5+REGION（可夹取），
+    无有效区 → STATE=0/1/6 且 REGION=0；单片机抓取条件 = STATE==5
+    且 COLOR==期望，按 REGION 对应机构位姿（乙路线：每抓一次重发
+    一条同色命令开新周期，同色重臂保留 motion_confirmed）。"""
     if not 0 <= int(state) <= 6:
         raise ValueError("state must fit material_grasp enum 0..6")
     if not 1 <= int(color) <= 6:
         raise ValueError("color must be 1..6")
-    payload = struct.pack('<BB', int(state), int(color))
+    if not 0 <= int(region) <= 3:
+        raise ValueError("region must be 0..3")
+    payload = struct.pack('<BBB', int(state), int(color), int(region))
     return encode_frame(MATERIAL_GRASP_RESULT, payload)
 
 
@@ -427,7 +435,6 @@ class SerialLink(threading.Thread):
         self._handle = None
         self._parser = FrameParser()
         self._last_open_error = ''
-        self._last_rx = None
         self.tx_count = 0
         self._last_rx_err = ''
         self._last_rx_err_t = 0.0
@@ -469,7 +476,6 @@ class SerialLink(threading.Thread):
                 pass
         self._handle = None
         self._parser = FrameParser()
-        self._last_rx = None
 
     def _poll(self):
         try:
@@ -484,11 +490,11 @@ class SerialLink(threading.Thread):
             with self._lock:
                 self._close()
             return
-        if data:
-            now = time.monotonic()
-            if self._last_rx is not None and now - self._last_rx > 0.05:
-                self._parser = FrameParser()
-            self._last_rx = now
+        # 无空闲重置（2026-11-15 修复随机丢指令漏洞）：一帧分多次到达
+        # （任意间隔）都由缓冲拼接完成；假帧由长度上限/帧尾/校验和/
+        # 逐字节滑动重同步四道防线挡住。原 50ms 空闲重置会把跨间隙的
+        # 半帧整体丢弃（实测分片 80ms 指令蒸发、RDK 保持 raw），且
+        # 违背"解析容忍噪声/拆包/粘包"的协议契约。
         for command, payload in self._parser.feed(data):
             if command != COMMAND:
                 continue
@@ -621,7 +627,8 @@ def legacy_center_frame(center):
 
 
 class VisionPublisher(threading.Thread):
-    """ring 30Hz 0x13 / turntable 10Hz旧帧 / track READY期间10Hz重发固定夹取帧 / stacked 10Hz 0x14。"""
+    """ring 30Hz 0x13 / turntable 10Hz旧帧 / track 停稳期间10Hz持续上报
+    STATE/COLOR/REGION / stacked 10Hz 0x14。"""
 
     def __init__(self, serial_link, workers, mode_manager):
         super().__init__(daemon=True, name='vision-publisher')
@@ -764,14 +771,15 @@ class VisionPublisher(threading.Thread):
                 self._tt_reported = True
 
     def _publish_material(self):
-        """0x11 停稳期间 10Hz 持续发送（借鉴旧版防丢包节奏 + cyqm 帧语义）：
+        """0x11 停稳期间 10Hz 持续发送（三抓取区版）：
 
         转盘确认转动且低速证据攒满（停稳，与目标是否在区内无关）后持续
-        发送：目标在区内 STATE=5+COLOR（可夹取），区外 STATE=1+COLOR
-        （抓取区内还没有物料）。单片机收到首帧即夹取并关闭通道，后续
-        重复帧被丢弃——对 RDK 无影响，RDK 不需要单片机任何回传。物料被
-        夹走/盘再转动（未停稳）即静默，恢复停稳自动继续；写失败下个节拍
-        用新鲜帧重试；未停稳/区内多物料/目标色不可见静默。"""
+        发送：目标在优先级最高的有效区 → STATE=5+REGION（可夹取，乙路线
+        下单片机抓完重发同色命令开新周期）；无有效区 → STATE=0/1/6 且
+        REGION=0。单片机收到首帧即夹取并关闭通道，后续重复帧被丢弃——
+        对 RDK 无影响，RDK 不需要单片机任何回传。物料被夹走/盘再转动
+        （未停稳）即静默，恢复停稳自动继续；写失败下个节拍用新鲜帧重试；
+        未停稳/全部歧义/目标色不可见静默。"""
         now = time.monotonic()
         if now < self._next_material_tx:
             return
@@ -790,7 +798,8 @@ class VisionPublisher(threading.Thread):
             return
         state = STATE_READY if result.get('grasp_ready') else \
             int(result.get('state', 0))
-        self.link.send(encode_material_state_frame(state, color))
+        region = int(result.get('region', 0) or 0)
+        self.link.send(encode_material_state_frame(state, color, region))
 
     def _publish_stacked(self):
         """码垛连续流: 10Hz 每周期发一帧, 未检测发 FLAGS=0 空帧(0x14 草案)。"""
@@ -839,32 +848,40 @@ class ModeManager:
             raise ValueError('color is only valid for material_track')
         return parts[0]
 
-    def _activate(self, mode_str):
+    def _activate(self, mode_str, preserve_motion=False):
         parts = mode_str.split()
         worker = self.workers.get(parts[0])
         if parts[0] == 'material_track':
             self.track_color = int(parts[1])
             if worker is not None:
-                worker.start_mode(color=self.track_color)
+                worker.start_mode(color=self.track_color,
+                                  preserve_motion=preserve_motion)
         elif worker is not None:
             worker.start_mode()
 
     def request_mode(self, mode_str):
-        """串口/键盘共用入口；每条 material_track 命令（含同色重复）都
-        清停稳证据、重臂新周期（cyqm 同款语义）。"""
+        """串口/键盘共用入口；material_track 命令重臂新周期——同色重发
+        为软重臂（清低速证据/测速基线/区域选择，保留 motion_confirmed，
+        乙路线：盘停后重发 ≈0.4s 重攒证据即可 READY）；换色或从其他模式
+        进入为全清重臂（先见运动重新要求）。"""
         with self._lock:
             mode_str = self._normalize(mode_str)
             base = mode_str.split()[0]
             if self.active_mode == mode_str and base != 'material_track':
                 return
             old = self.active_mode
+            old_parts, new_parts = old.split(), mode_str.split()
+            rearm = (base == 'material_track'
+                     and old_parts[0] == 'material_track'
+                     and len(old_parts) == 2
+                     and old_parts[1] == new_parts[1])
             old_worker = self.workers.get(old.split()[0])
             if old_worker is not None:
                 old_worker.stop_mode()
             self.active_mode = mode_str
             if self.publisher is not None:
                 self.publisher.on_mode_changed()
-            self._activate(mode_str)
+            self._activate(mode_str, preserve_motion=rearm)
             if base in self.workers:
                 print(f'[mode] {old} -> {mode_str}（工作线程已启动）')
             elif base == 'raw':

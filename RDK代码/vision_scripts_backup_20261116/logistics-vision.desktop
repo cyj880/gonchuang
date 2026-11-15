@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Logistics Vision
-Comment=vision_scripts 单进程多模式主程序（2026-11-13 协议版：0x11 停稳持续上报 STATE/COLOR 帧，§14.5；上电 raw 静默等 STM32 命令）
+Comment=vision_scripts 单进程多模式主程序（2026-11-15 版：0x11 停稳持续上报 + 0x18 命令应答；圆环线角优先 yaw；串口收发三层自愈；上电 raw 静默等 STM32 命令）
 Exec=/bin/bash -c "sleep 5; cd /home/sunrise/vision_scripts && nohup python3 -u logistics_vision_main.py --start-mode raw --display >> /tmp/main_live.log 2>&1 &"
 Terminal=false
 X-GNOME-Autostart-enabled=true

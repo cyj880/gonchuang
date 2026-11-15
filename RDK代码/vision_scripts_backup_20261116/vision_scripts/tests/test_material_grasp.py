@@ -130,6 +130,23 @@ class StateMachineTests(unittest.TestCase):
         states = self.feed(self.stationary(6))
         self.assertEqual(states[-1], STATE_READY)
 
+    def test_soft_rearm_preserves_motion_confirmed(self):
+        # 乙路线（2026-11-15）：同色重臂只清低速证据/测速基线，保留
+        # "已确认转动"——停着的盘上重发命令后重攒 5 帧低速即 READY，
+        # 无需再等先见运动；换色/进模式仍走 reset()（全清）。
+        judge = grasp.GraspMotionJudge(grasp.GraspParams())
+        judge.update(0.0, blob((200, 300)), True, False)     # 基线
+        judge.update(DT, blob((280, 300)), True, False)      # 高速 → moving 1
+        judge.update(2 * DT, blob((360, 300)), True, False)  # → moving 2 → 确认
+        self.assertTrue(judge.motion_confirmed)
+        judge.soft_rearm()
+        self.assertTrue(judge.motion_confirmed)              # 保留
+        self.assertFalse(judge.settled)                      # 低速证据已清
+        state = None
+        for i in range(1, 7):
+            state, _ = judge.update(1.0 + i * DT, blob((360, 300)), True, False)
+        self.assertEqual(state, STATE_READY)                 # 重攒证据即 READY
+
     def test_edge_guarded_blob_not_measured(self):
         self.feed(self.moving(4))
         clipped = blob((10.0, 240.0), bbox=(0, 200, 60, 80))  # 触左边距圈
@@ -145,6 +162,14 @@ class StateMachineTests(unittest.TestCase):
         p = grasp.GraspParams()
         self.assertTrue(p.in_region((320, 240)))
         self.assertFalse(p.in_region((100, 240)))
+        # 三抓取区：近端(320,320) 260x200 / 左远端(150,160) / 右远端(490,160)
+        self.assertEqual(p.region_of((320, 240)), grasp.REGION_NEAR)
+        self.assertEqual(p.region_of((150, 160)), grasp.REGION_LEFT)
+        self.assertEqual(p.region_of((490, 160)), grasp.REGION_RIGHT)
+        self.assertEqual(p.region_of((320, 100)), grasp.REGION_NONE)
+        self.assertEqual(tuple(r[0] for r in p.regions()),
+                         (grasp.REGION_NEAR, grasp.REGION_LEFT,
+                          grasp.REGION_RIGHT))
 
 
 class TurntableDetectorTests(unittest.TestCase):
@@ -206,19 +231,24 @@ class TurntableDetectorTests(unittest.TestCase):
 
 class WireTests(unittest.TestCase):
     def test_material_state_frame_bytes(self):
-        # 0x11 帧家族: AA 55 11 02 STATE COLOR CK 0D 0A
-        # CK = (0x11 + 0x02 + STATE + COLOR) & 0xFF
-        cases = ((grasp.STATE_READY, 3, 'aa55110205031b0d0a'),        # 周期报告
-                 (grasp.STATE_WAITING_MOTION, 1, 'aa5511020201160d0a'),  # 回执
-                 (grasp.STATE_NOT_VISIBLE, 1, 'aa5511020001140d0a'),     # 回执
-                 (grasp.STATE_MULTI, 6, 'aa55110206061f0d0a'))           # 回执
-        for state, color, expected in cases:
-            frame = main.encode_material_state_frame(state, color)
-            self.assertEqual(frame.hex(), expected, (state, color))
-            self.assertEqual(len(frame), 9)
-        for state, color in ((7, 1), (-1, 1), (5, 0), (5, 7)):
+        # 0x11 帧家族（三抓取区版 2026-11-15）:
+        # AA 55 11 03 STATE COLOR REGION CK 0D 0A
+        # CK = (0x11 + 0x03 + STATE + COLOR + REGION) & 0xFF
+        cases = ((grasp.STATE_READY, 3, 0, 'aa5511030503001c0d0a'),   # 停稳无有效区
+                 (grasp.STATE_READY, 1, 1, 'aa5511030501011b0d0a'),   # 近端 READY
+                 (grasp.STATE_READY, 1, 2, 'aa5511030501021c0d0a'),   # 左远端 READY
+                 (grasp.STATE_READY, 1, 3, 'aa5511030501031d0d0a'),   # 右远端 READY
+                 (grasp.STATE_WAITING_MOTION, 1, 0, 'aa551103020100170d0a'),
+                 (grasp.STATE_NOT_VISIBLE, 1, 0, 'aa551103000100150d0a'),
+                 (grasp.STATE_MULTI, 6, 0, 'aa551103060600200d0a'))
+        for state, color, region, expected in cases:
+            frame = main.encode_material_state_frame(state, color, region)
+            self.assertEqual(frame.hex(), expected, (state, color, region))
+            self.assertEqual(len(frame), 10)
+        for state, color, region in ((7, 1, 0), (-1, 1, 0), (5, 0, 0),
+                                     (5, 7, 0), (5, 1, 4), (5, 1, -1)):
             with self.assertRaises(ValueError):
-                main.encode_material_state_frame(state, color)
+                main.encode_material_state_frame(state, color, region)
 
     @staticmethod
     def make_publisher(latest, active_mode='material_track 3'):
@@ -239,7 +269,7 @@ class WireTests(unittest.TestCase):
         # 停稳期间 10Hz 持续发送（单片机收首帧即夹取，多余帧无害）
         publisher, worker, link = self.make_publisher(
             {'grasp_ready': True, 'settled': True, 'generation': 7,
-             'track_color': 3, 'state': grasp.STATE_READY})
+             'track_color': 3, 'state': grasp.STATE_READY, 'region': 1})
         publisher._next_material_tx = 0.0
         publisher._publish_material()
         self.assertEqual(link.send.call_count, 1)
@@ -248,24 +278,31 @@ class WireTests(unittest.TestCase):
         self.assertEqual(link.send.call_count, 2)
         self.assertEqual(link.send.call_args.args[0],
                          main.encode_material_state_frame(
-                             grasp.STATE_READY, 3))
-        publisher.on_mode_changed()                   # 新命令 = 新周期
-        worker.latest_source_ns = time.monotonic_ns()  # 新命令之后的新鲜源帧
+                             grasp.STATE_READY, 3, 1))
+
+    def test_publisher_forwards_report_region(self):
+        # REGION 字节随 0x11 透传：READY 时告诉单片机目标在哪个抓取区
+        publisher, worker, link = self.make_publisher(
+            {'grasp_ready': True, 'settled': True, 'generation': 7,
+             'track_color': 3, 'state': grasp.STATE_READY, 'region': 2})
         publisher._next_material_tx = 0.0
         publisher._publish_material()
-        self.assertEqual(link.send.call_count, 3)
+        self.assertEqual(link.send.call_args.args[0],
+                         main.encode_material_state_frame(
+                             grasp.STATE_READY, 3, 2))
 
     def test_publisher_reports_empty_region_when_settled_outside(self):
         # 盘已停稳但目标在区外: 持续发送 STATE=1（抓取区内还没有物料）
         publisher, worker, link = self.make_publisher(
             {'grasp_ready': False, 'settled': True, 'generation': 7,
-             'track_color': 3, 'state': grasp.STATE_OUT_OF_REGION})
+             'track_color': 3, 'state': grasp.STATE_OUT_OF_REGION,
+             'region': 0})
         publisher._next_material_tx = 0.0
         publisher._publish_material()
         self.assertEqual(link.send.call_count, 1)
         self.assertEqual(link.send.call_args.args[0],
                          main.encode_material_state_frame(
-                             grasp.STATE_OUT_OF_REGION, 3))
+                             grasp.STATE_OUT_OF_REGION, 3, 0))
         publisher._next_material_tx = 0.0
         publisher._publish_material()                 # 停稳期间持续重发
         self.assertEqual(link.send.call_count, 2)
@@ -446,17 +483,17 @@ class GraspWorkerTests(unittest.TestCase):
                     self.assertEqual(worker.latest_source_ns, source,
                                      worker.last_error)
 
-            def cycle_frames(moving_xs, settle_x):
+            def cycle_frames(moving_xs, settle_x, y=240):
                 # 时间戳用真实单调钟（合成时钟会超前真实时间，触发"源帧
                 # 来自未来"拒收）。运动 3 帧（≈126px/s ≥60 确认转动）+
                 # 静止 7 帧（攒满 5 帧低速证据）+ 5 帧（停稳期供持续重发）
-                return ([material_image(center=(cx, 240))
+                return ([material_image(center=(cx, y))
                          for cx in moving_xs] +
-                        [material_image(center=(settle_x, 240))] * 12)
+                        [material_image(center=(settle_x, y))] * 12)
 
             try:
                 manager.request_mode('material_track 1')   # 颜色命令开启周期
-                feed(cycle_frames((400, 412, 424), 424))   # 区内停稳
+                feed(cycle_frames((400, 412, 424), 424))   # 近端区(1)停稳
                 deadline = time.monotonic() + 2
                 while handle.write.call_count < 2 and \
                         time.monotonic() < deadline:
@@ -464,7 +501,7 @@ class GraspWorkerTests(unittest.TestCase):
                 self.assertGreaterEqual(handle.write.call_count, 2)
                 self.assertEqual(handle.write.call_args.args[0],
                                  main.encode_material_state_frame(
-                                     grasp.STATE_READY, 1))
+                                     grasp.STATE_READY, 1, grasp.REGION_NEAR))
                 count = handle.write.call_count
                 # 物料夹走（空白帧）: 未停稳 → 静默（先等过渡期与 TTL 走完
                 # 再取基线——最后一次停稳快照在转静默时还会发出一帧）
@@ -473,9 +510,11 @@ class GraspWorkerTests(unittest.TestCase):
                 count = handle.write.call_count
                 time.sleep(0.4)
                 self.assertEqual(handle.write.call_count, count)
-                # 新命令重臂新周期；区外停稳 → STATE=1 持续发送
+                # 同色命令软重臂（乙路线：保留已确认转动）——若全清则此
+                # 处静止盘永远等不到先见运动而静默，本段即失败；区外停稳
+                # → STATE=1+REGION=0 持续发送
                 manager.request_mode('material_track 1')
-                feed(cycle_frames((100, 112, 124), 124))
+                feed(cycle_frames((320, 308, 296), 296, y=100))
                 deadline = time.monotonic() + 2
                 while handle.write.call_count <= count and \
                         time.monotonic() < deadline:
@@ -483,7 +522,8 @@ class GraspWorkerTests(unittest.TestCase):
                 self.assertGreater(handle.write.call_count, count)
                 self.assertEqual(handle.write.call_args.args[0],
                                  main.encode_material_state_frame(
-                                     grasp.STATE_OUT_OF_REGION, 1))
+                                     grasp.STATE_OUT_OF_REGION, 1,
+                                     grasp.REGION_NONE))
             finally:
                 publisher.stop()
                 worker.close()
