@@ -8,9 +8,11 @@
 #define RING_TARGET_X_PX 320
 #define RING_TARGET_Y_PX 240 /* modes 0/4 center average Y; mode 3 is yaw only */
 #define RING_TOL_YAW_CDEG 50 /* +/-0.5 deg */
-#define RING_FINE_XY_PX 24.0f       /* 完整站点对位：最后24像素逐步降速 */
-#define RING_FINE_XY_MAX_RPM 4.0f   /* 24像素时4RPM，误差6像素时1RPM */
-#define RING_FINE_YAW_CDEG 600.0f   /* 最后6度由6RPM平滑降到容差边缘1RPM */
+#define RING_FINE_XY_PX 16.0f       /* 完整站点对位：最后16像素逐步降速 */
+#define RING_FINE_XY_MAX_RPM 4.0f   /* 16像素时4RPM */
+#define RING_FINE_XY_REF_PX 6.0f
+#define RING_FINE_XY_REF_RPM 2.0f   /* 6像素时2RPM，继续靠近时进一步降速 */
+#define RING_FINE_YAW_CDEG 100.0f   /* 最后1度由2RPM平滑降到容差边缘1RPM */
 #define RING_FINE_YAW_MIN_RPM 1.0f
 
 typedef enum
@@ -79,10 +81,12 @@ static float center_speed(float error)
     if (speed < 12.0f) speed = 12.0f;
     if (speed > 60.0f) speed = 60.0f;
     speed *= (2.0f / 3.0f) * 0.5f;
-    /* Fine approach inside 2x tolerance: taper below the 4 RPM floor so the
-       tight +/-3 px window is not overshot at crawl speed. */
+    /* Full station modes interpolate through (16px,4RPM) and (6px,2RPM).
+       Other debug modes keep their original fine approach. */
     if ((align_mode == 0 || align_mode == 5) && fabsf(error) <= RING_FINE_XY_PX)
-        speed = fabsf(error) * RING_FINE_XY_MAX_RPM / RING_FINE_XY_PX;
+        speed = RING_FINE_XY_REF_RPM + (fabsf(error) - RING_FINE_XY_REF_PX) *
+            (RING_FINE_XY_MAX_RPM - RING_FINE_XY_REF_RPM) /
+            (RING_FINE_XY_PX - RING_FINE_XY_REF_PX);
     else if (fabsf(error) <= 2.0f * RING_TOL_PX)
         speed = fabsf(error) * (2.0f / 3.0f);
     return error < 0 ? -speed : speed;
@@ -96,7 +100,7 @@ static float yaw_speed(int16_t yaw_cdeg)
     if (speed > 6.0f) speed = 6.0f;
     if ((align_mode == 0 || align_mode == 5) && error <= RING_FINE_YAW_CDEG)
     {
-        speed = RING_FINE_YAW_MIN_RPM + (6.0f - RING_FINE_YAW_MIN_RPM) *
+        speed = RING_FINE_YAW_MIN_RPM + (2.0f - RING_FINE_YAW_MIN_RPM) *
             (error - RING_TOL_YAW_CDEG) / (RING_FINE_YAW_CDEG - RING_TOL_YAW_CDEG);
         if (speed < RING_FINE_YAW_MIN_RPM) speed = RING_FINE_YAW_MIN_RPM;
     }
