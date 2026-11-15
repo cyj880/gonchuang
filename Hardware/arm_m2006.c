@@ -10,13 +10,13 @@
 #define ARM_FEEDBACK_TIMEOUT_MS 100u
 #define ARM_CONTROL_PERIOD_MS  10u
 #define ARM_CONTROL_DT         0.01f
-#define ARM_POSITION_KP        20.0f   /*角度误差deg -> 转子目标rpm；减轻终点来回纠偏，外环无积分*/
-#define ARM_SPEED_KP           1.5f
+#define ARM_POSITION_KP        40.0f   /* 位置环目标转速20→40（2倍）；外环仍无积分 */
+#define ARM_SPEED_KP           3.0f    /* 速度跟踪/制动比例同步提高，避免高速目标下内环跟随滞后 */
 #define ARM_SPEED_KI           0.1f
 #define ARM_SPEED_ILIMIT       5000.0f /*速度环积分提供静摩擦/负载保持力，饱和时禁止继续同向积累*/
-#define ARM_SPEED_MAX_RPM      8000.0f /*转子速度上限，36:1后输出轴约1333°/s*/
-#define ARM_SPEED_RAMP_RPM_S   6000.0f /*加速限斜率；换目标沿用当前速度指令*/
-#define ARM_BRAKE_RPM_S       12000.0f /*减速限斜率，同时用于剩余距离制动限速*/
+#define ARM_SPEED_MAX_RPM      16000.0f /* 转子上限8000→16000；输出轴约444RPM */
+#define ARM_SPEED_RAMP_RPM_S   24000.0f /* 加速6000→24000；相同行程半时长所需斜率为4倍 */
+#define ARM_BRAKE_RPM_S       48000.0f /* 制动12000→48000；sqrt限速对应2倍目标转速 */
 #define ARM_CURRENT_MAX        10000.0f
 #define ARM_ARRIVE_DEG         0.5f      /*AtTarget到位角度窗*/
 #define ARM_ARRIVE_RPM         36.0f     /*转子36rpm=输出轴6°/s；角度进窗但高速掠过不算到位*/

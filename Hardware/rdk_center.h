@@ -47,7 +47,7 @@ void RDK_Center_Init(uint32_t baud);
 void RDK_Center_IRQHandler(void);
 void RDK_Center_Enable(uint8_t enable);
 void RDK_Center_Clear(void);
-void RDK_Center_SendTurntable(void); /*AA55模式4：转盘识别，不带颜色参数*/
+void RDK_Center_SendTurntable(void); /*AA55模式4：转盘识别，首个圆心前500ms重发*/
 void RDK_Center_SendIdle(void);      /*AA55模式0：退出识别，显示相机画面*/
 void RDK_Center_SendAllMaterials(void); /*AA55模式2：全物料识别（尚未接入流程）*/
 void RDK_Center_SendStackDetect(void);  /*AA55模式5：码垛识别（第二轮暂存/1D通过RDK_Stack_Start启用接收）*/
@@ -57,6 +57,7 @@ void RDK_GrabPeek(uint8_t *ack_seen, uint8_t *state, uint8_t *color); /*只读�
 uint8_t RDK_GrabActive(void);               /*夹取接收通道是否打开*/
 uint8_t RDK_Center_SendGrabColor(uint8_t color); /*AA55 10 02 03 COLOR：第一件夹取颜色1~6，非法返回0*/
 void RDK_Center_Poll(void);
+uint8_t RDK_VisionWaitingFirst(void); /*模式1/4/5首个有效回包前每500ms重发，退出取消。*/
 uint8_t RDK_CenterValid(void);
 int16_t RDK_CenterX(void);
 int16_t RDK_CenterY(void);

@@ -34,14 +34,24 @@ void Key_Init(KeyHandle_TypeDef *Handle)
 	GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;   /*外接模块自带5V上拉, 板载PB2按下为高*/
 	GPIO_Init(Handle->GPIO_Port, &GPIO_InitStructure);
 
-	Handle->Previous = Bit_RESET;
-	Handle->Current = Bit_RESET;
+	Handle->Previous = Handle->Current = Handle->Candidate =
+		(BitAction)GPIO_ReadInputDataBit(Handle->GPIO_Port, Handle->GPIO_Pin);
+	Handle->StableScans = 0;
 }
 
 //按键扫描函数（需周期性调用，检测到按键松开时触发回调）
 void Key_Scan(KeyHandle_TypeDef *Handle)
 {
-	Handle->Current = (BitAction)GPIO_ReadInputDataBit(Handle->GPIO_Port, Handle->GPIO_Pin);
+	BitAction sample = (BitAction)GPIO_ReadInputDataBit(Handle->GPIO_Port, Handle->GPIO_Pin);
+	if (sample != Handle->Candidate)
+	{
+		Handle->Candidate = sample;
+		Handle->StableScans = 1;
+		return;
+	}
+	if (Handle->StableScans < 3u) Handle->StableScans++;
+	if (Handle->StableScans < 3u) return;
+	Handle->Current = sample;
 
 	//A板按键按下为高：Previous=按下(SET)、Current=松开(RESET) → 松开沿
 	if(Handle->Previous == Bit_SET && Handle->Current == Bit_RESET)

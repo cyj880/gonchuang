@@ -43,7 +43,7 @@ static void lcd_odom_cmd_line(void)
     {
         static const char *const reason[] = {"", "ODOM", "NO PROGRESS", "TIMEOUT"};
         uint8_t fault = Motor_RunFault();
-        LCD_Printf(0, 64, LCD_6X8, "STOP %-16s", reason[fault]);
+        LCD_Printf(0, 64, LCD_6X8, "%s %-16s", Motor_OdomWaiting() ? "WAIT" : "STOP", reason[fault]);
     }
     else if (Motor_NoNext())
     {
@@ -54,13 +54,15 @@ static void lcd_odom_cmd_line(void)
             LCD_Printf(0, 64, LCD_6X8, "no next G%uS%u %-4s ",
                        (unsigned)fault.pick, (unsigned)fault.step, reason[fault.reason]);
         else
-            LCD_Printf(0, 64, LCD_6X8, "no next              ");
+            LCD_Printf(0, 64, LCD_6X8, "no next %-13s", Motor_NoNextState());
         /* RM故障快照: 实际角vs目标角区分"没到位"与"反馈丢失(rm_ready=0)" */
         if (fault.reason == MOTOR_GRAB_FAULT_ARM)
             LCD_Printf(0, 112, LCD_6X8, "RMa:%4d T:%4d rdy:%u ",
                        (int)fault.rm_angle, (int)fault.rm_target,
                        (unsigned)fault.rm_ready);
     }
+    else if (*Motor_StartMessage())
+        LCD_Printf(0, 64, LCD_6X8, "%-21s", Motor_StartMessage());
     else if (c.type == CMD_POS_GO || c.type == CMD_POS_ADV || c.type == CMD_CHAIN)
         LCD_Printf(0, 64, LCD_6X8, "c%02X %-9ld #%-2u", c.type, (long)(int32_t)c.param, ccnt);
     else
@@ -89,6 +91,32 @@ static void lcd_odom_center_line(void)
 {
     RDK_CenterDiagnostics d;
     MotorGrabStatus_t grab;
+    MotorRouteStatus route;
+    if (Motor_RouteGetStatus(&route))
+    {
+        OdomData_t o;
+        odometry_get(&o);
+        LCD_SetColor(LCD_YELLOW);
+        LCD_Printf(0, 76, LCD_6X8, "B%u S%02u/%02u P%u K%u    ", (unsigned)route.batch,
+            (unsigned)route.segment, (unsigned)route.count, (unsigned)route.point, (unsigned)route.busy);
+        LCD_Printf(0, 86, LCD_6X8, "Why:%-16s", route.reason);
+        LCD_Printf(0, 98, LCD_6X8, "Prev:%4u,%4u       ", (unsigned)route.previous_x, (unsigned)route.previous_y);
+        if (route.has_leg)
+        {
+            LCD_Printf(0, 110, LCD_6X8, "From:%4u,%4u       ", (unsigned)route.from_x, (unsigned)route.from_y);
+            LCD_Printf(0, 122, LCD_6X8, "To:  %4u,%4u       ", (unsigned)route.to_x, (unsigned)route.to_y);
+        }
+        else
+        {
+            LCD_Printf(0, 110, LCD_6X8, "From:--,--           ");
+            LCD_Printf(0, 122, LCD_6X8, "To:  --,--           ");
+        }
+        LCD_Printf(0, 134, LCD_6X8, "H%u G%u A%u T%u N%u     ", (unsigned)route.heading,
+            (unsigned)route.goal, (unsigned)route.action, (unsigned)route.station, (unsigned)route.next_batch);
+        LCD_Printf(0, 146, LCD_6X8, "E%u V%u IM%u U%u        ", (unsigned)o.online[ODOM_POS_AXIS],
+            (unsigned)o.valid_streak, (unsigned)(IMU_ConfigStatus() == IMU_CONFIG_READY), (unsigned)route.upload_error);
+        return;
+    }
     if (Motor_RunFault() == MOTOR_RUN_FAULT_PROGRESS)
     {
         MotorRunFaultSnapshot_t f;
@@ -176,7 +204,7 @@ static void lcd_odom_center_line(void)
         LCD_Printf(0, 110, LCD_6X8, "%-21s", line);
         snprintf(line, sizeof(line), "Icmd:%6d mA", (int)arm.current_command);
         LCD_Printf(0, 122, LCD_6X8, "%-21s", line);
-        LCD_Printf(0, 134, LCD_6X8, "L1s B2s RM3s         ");
+        LCD_Printf(0, 134, LCD_6X8, "L1s B2s RM1.5s       ");
         snprintf(line, sizeof(line), "step time:%2lus", (unsigned long)(grab.elapsed_ms / 1000u));
         LCD_Printf(0, 146, LCD_6X8, "%-21s", line);
         return;

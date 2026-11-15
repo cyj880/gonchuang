@@ -112,10 +112,22 @@ typedef struct
 } MotorGrabStatus_t;
 void Motor_GrabGetStatus(MotorGrabStatus_t *out); /*原料区实时等待状态；只读，不额外查询电机。*/
 uint8_t Motor_NoNext(void);
+void Motor_RequestDebugRun(uint8_t selection); /*按键任务仅提交启动请求，MotorTask处理*/
+const char *Motor_StartMessage(void); /*近期启动结果，未成功时给出原因*/
+const char *Motor_NoNextState(void); /*LOAD/MOTION/ODOM每300ms重检；FAULT不重放机械动作。*/
+typedef struct
+{
+    uint8_t batch, next_batch, segment, count, point, busy, upload_error;
+    uint8_t action, station, rule, has_leg;
+    uint16_t heading, goal, from_x, from_y, to_x, to_y, previous_x, previous_y;
+    const char *reason;
+} MotorRouteStatus;
+uint8_t Motor_RouteGetStatus(MotorRouteStatus *out); /*仅LOAD/MOTION故障时只读诊断*/
 void Motor_DebugRunStart(uint8_t selection); /* 一键启动(1/2批, 3=连续两批), 供0x13帧与外接启动按键共用 */             /*未知下一段时返回1，供LCD显示no next*/
 enum { MOTOR_RUN_FAULT_NONE, MOTOR_RUN_FAULT_ODOM,
        MOTOR_RUN_FAULT_PROGRESS, MOTOR_RUN_FAULT_TIMEOUT };
-uint8_t Motor_RunFault(void); /* 行驶保护停车原因，保持到新运动启动或06中止。 */
+uint8_t Motor_RunFault(void); /* ODOM等待恢复后清除；其他行驶故障保持到新运动/06。 */
+uint8_t Motor_OdomWaiting(void); /*1=编码器离线停车等恢复，保留当前动作及路线。*/
 typedef struct
 {
     int32_t current, target, error, progress; /* 停车瞬间原始坐标、误差及距上次进度基准靠近量 */

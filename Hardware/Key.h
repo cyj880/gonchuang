@@ -14,6 +14,8 @@ typedef struct
 {
 	BitAction Previous;					//上一次扫描到的电平
 	BitAction Current;					//本次扫描到的电平
+	BitAction Candidate;             //消抖候选电平
+	uint8_t StableScans;              //连续相同扫描次数(10ms一次)
 
 	GPIO_TypeDef *GPIO_Port;			//按键所在的GPIO端口
 	uint16_t GPIO_Pin;					//按键的引脚号

@@ -148,7 +148,7 @@
         <button class="btn mini warn" id="btnSendB1">📡 发第一批坐标</button>
         <button class="btn mini green" id="btnSendB2">📡 发第二批坐标</button>
         <button class="btn mini" id="btnSendBoth">两批连发</button>
-        <button class="btn mini warn" id="btnDebugStart1" disabled title="先发送第一批并等待STM32回传完成">▶ 调试一键启动（批次1）</button>
+        <button class="btn mini warn" id="btnDebugStart1" disabled title="先上传第一批并等待STM32保存和缓存校验通过">▶ 调试一键启动（批次1）</button>
         <button class="btn mini green" id="btnDebugStart2" disabled title="先发送第二批并等待STM32回传完成">▶ 启动第二批</button>
         <button class="btn mini" id="btnDebugStartBoth" disabled title="两批上传完成后，将所选陀螺仪当前朝向记为yaw零点，再依次运行两批">▶ 连续跑两批</button>
       </div>
@@ -167,7 +167,7 @@
       <div class="hint">🚦 45°点硬规则：45°点为<b>单向边（只允许 启停区→45°点）</b>，且<b>仅出现在第一批出发段</b>，此后任何段不再经过；<b>第二批全程不出现右上角45度/右下角45度</b>。回程（用户指定，固定）：启停区1 经 左上角→右上角→斜插回区；启停区2 经 <strong>左下角→右下角</strong>→斜插回区。</div>
       <div class="hint">✂️ 直线途经点自动精简：关键点=任务站点+实际拐点。站点之间同一直线上的非任务点（如 左上角→右上角 直线上的 原料区、暂存区→扫码区 直线上的 中心点）不列为关键点、不发给车端；45°点永不剔除。</div>
       <div class="hint">📡 帧协议（二进制，115200-8N1，蓝牙/ZigBee 透传）：<b>AA 55</b> | CMD | 批次(1/2) | [点数N | 坐标…mm,小端] | SUM | <b>0D 0A</b>，SUM=中间字节累加和低8位。CMD：<b>04</b>=动作指令帧；<b>01</b>=直角段坐标帧；<b>03</b>=含45°斜走的段坐标帧；<b>13</b>=调试启动选择帧（1第一批、2第二批、3两批连续）。对应启动帧为 <code>AA 55 13 01 14 0D 0A</code>、<code>AA 55 13 02 15 0D 0A</code>、<code>AA 55 13 03 16 0D 0A</code>。</div>
-      <div class="hint">📥 回传：车端把收到的每一帧（01/03 段帧、04 动作帧）<b>原样发回</b>，右上回传板按收到顺序显示指令词与坐标；收满发送帧数自动标“回传完成”并删除该批路线任务。
+      <div class="hint">📥 回传：每段动作与坐标合为一条信息帧；STM32保存后应答，再发下一帧。超时自动重发，最后核对缓存数量和CRC16，通过后才允许启动。上传期间请勿断开串口。
     </section>
 
     <section>
@@ -989,8 +989,8 @@ function drawRouteRxBoard(cw,ch){
       parts=[{t: want? '已发送 '+want+' 帧 —— 等待车端逐帧回传' : '暂未收到数据 —— 发送后此处显示车端回传', plain:true}];
       title='STM32回传 第'+b+'批';
     } else {
-      const done = want && d.frames>=want;
-      title='STM32回传 第'+b+'批  '+d.frames+'帧'+(done? ' ✓回传完成('+want+'/'+want+')':'');
+      const done = d.done;
+      title='STM32'+(d.reliable?'保存确认':'回传')+' 第'+b+'批  '+d.frames+'帧'+(done? ' ✓'+(d.reliable?'缓存核验完成':'回传完成')+'('+want+'/'+want+')':'');
       parts=[];
       for(const e of d.seq){
         if(e.k==='d') parts.push({t:e.v, cmd:true});
@@ -1527,61 +1527,123 @@ function buildSegFrame(batch, pts, cmd){
   b.push(sum&0xFF, 0x0D, 0x0A);
   return new Uint8Array(b);
 }
-async function uartWrite(frame){
-  if(!serial.port||!serial.port.writable) throw new Error('串口未连接');
-  serial.writer=serial.port.writable.getWriter();
-  await serial.writer.write(frame);
-  try{serial.writer.releaseLock();}catch(e){}
+// 可靠上传20/21：CRC16-Modbus(CMD+LEN16+PAYLOAD)，一个请求只接受一个匹配ACK。
+let routeUploadBusy=false, routeAckWaiter=null, serialWriteChain=Promise.resolve();
+const routeAckRx=[];
+function routeCrc(bytes,crc=0xFFFF){
+  for(const b of bytes){crc^=b;for(let i=0;i<8;i++)crc=(crc&1)?(crc>>>1)^0xA001:crc>>>1;}
+  return crc;
 }
-async function sendRouteFrame(batch){
-  const route=state.routes[batch===1?'b1':'b2'];
-  if(!route){ logLine('sys',`[系统] 第 ${batch} 批路线尚未规划，无法发送。`); return; }
-  if(!serial.port||!serial.port.writable){ logLine('sys','[系统] 请先连接串口（蓝牙/ZigBee）。'); return; }
-  const chain=route.chain;
-  if(chain.error){ logLine('sys',`[系统] ${chain.error}，无法发送。`); return; }
-  state.txEndHeading[batch] = chain.endHeading;                    // 记录结束朝向（下一批承接）
-  state.txFrames[batch] = chain.runs.length * 2;                   // 已发送帧数（每段=指令帧+段坐标帧，回传完成判定）
-  state.rxBoards[batch] = {seq:[], frames:0, lastTime:null, done:false};   // 清空该批回传累计
-  state.debugStartSent[batch] = false;
-  updateDebugStartButton(batch);
-  let sent=0;
-  try{
-    for(const item of chain.runs){
-      const df=buildCmdFrame(batch, item.code);
-      await uartWrite(df);
-      logLine('tx',`▷ 第${batch}批动作指令【${item.cmdName}】(CMD 04): ${bytesToHex(df)}`);
-      const pts=item.kind==='station'
-        ? [route.marks[item.run.from],route.marks[item.run.from]]
-        : route.marks.slice(item.run.from,item.run.to+1);
-      const cmd=item.kind==='station'?0x01:
-        (pts.some(m=>m.name==='右上角45度'||m.name==='右下角45度')?0x03:0x01);
-      const sf=buildSegFrame(batch, pts, cmd);
-      await uartWrite(sf);
-      const label=item.kind==='station'
-        ? `${pts[0].name}原地对准/操作节点（yaw ${item.station.yaw}°）`
-        : `${item.run.dir}行${item.move}段`;
-      logLine('tx',`▷ 第${batch}批${label}（CMD 0x${cmd.toString(16).toUpperCase()}，${sf.length}字节，${pts.length}点${cmd===0x03?'，含45°斜走':''}）: ${bytesToHex(sf)}`);
-      sent+=pts.length;
+function buildUploadFrame(op,batch,session,seq,extra=[]){
+  const payload=[op,batch,session&255,(session>>>8)&255,(session>>>16)&255,(session>>>24)&255,seq,...extra];
+  const body=[0x20,payload.length&255,payload.length>>>8,...payload];const crc=routeCrc(body);
+  return new Uint8Array([0xAA,0x55,...body,crc&255,crc>>>8,13,10]);
+}
+function routeAckFeed(ch){
+  routeAckRx.push(ch);
+  while(routeAckRx.length){
+    if(routeAckRx[0]!==0xAA){routeAckRx.shift();continue;}
+    if(routeAckRx.length<2)return;
+    if(routeAckRx[1]!==0x55){routeAckRx.shift();continue;}
+    if(routeAckRx.length<5)return;
+    if(routeAckRx[2]!==0x21||routeAckRx[3]!==11||routeAckRx[4]!==0){routeAckRx.shift();continue;}
+    if(routeAckRx.length<20)return;
+    const f=routeAckRx.slice(0,20);
+    if(f[18]!==13||f[19]!==10||routeCrc(f.slice(2,16))!==(f[16]|f[17]<<8)){routeAckRx.shift();continue;}
+    routeAckRx.splice(0,20);
+    const w=routeAckWaiter,session=(f[7]|f[8]<<8|f[9]<<16|f[10]<<24)>>>0;
+    if(!w||f[5]!==w.op||f[6]!==w.batch||session!==w.session||f[11]!==w.seq)continue;
+    if(f[12]){
+      routeAckWaiter=null;clearTimeout(w.timer);
+      w.reject(new Error(['','STM32路线运行中，先06中止','上传会话不符','帧序号不符','帧内容或路段连续性错误','STM32缓存核验失败'][f[12]]||'STM32拒绝保存'));
+    }else if(f[13]===w.count&&(f[14]|f[15]<<8)===w.digest){
+      routeAckWaiter=null;clearTimeout(w.timer);w.resolve();
     }
-    logLine('sys',`[系统] 第 ${batch} 批发送完成：${chain.runs.length} 个动作段 / ${sent} 个关键点（等待车端回传 ${state.txFrames[batch]} 帧）。`);
-  }catch(err){ logLine('sys',`[系统] 发送失败：${err.message}`); }
+  }
+}
+function cancelRouteAck(message){
+  const w=routeAckWaiter;if(!w)return;
+  routeAckWaiter=null;clearTimeout(w.timer);w.reject(new Error(message));
+}
+function uartWrite(frame){
+  const operation=serialWriteChain.then(async()=>{
+    if(!serial.port||!serial.port.writable)throw new Error('串口未连接');
+    const writer=serial.port.writable.getWriter();serial.writer=writer;
+    try{await writer.write(frame);}finally{writer.releaseLock();if(serial.writer===writer)serial.writer=null;}
+  });
+  serialWriteChain=operation.catch(()=>{});return operation;
+}
+async function uploadExchange(op,batch,session,seq,extra,count,digest){
+  const frame=buildUploadFrame(op,batch,session,seq,extra);
+  for(let attempt=0;attempt<8;attempt++){
+    const receipt=new Promise((resolve,reject)=>{
+      const w={op,batch,session,seq,count,digest,resolve,reject};
+      w.timer=setTimeout(()=>{if(routeAckWaiter===w)routeAckWaiter=null;reject(new Error('ACK_TIMEOUT'));},1500);
+      routeAckWaiter=w;
+    });
+    receipt.catch(()=>{});
+    try{await uartWrite(frame);}catch(err){cancelRouteAck(err.message);throw err;}
+    try{await receipt;return;}catch(err){
+      if(err.message!=='ACK_TIMEOUT')throw err;
+      logLine('sys',`[系统] 第${batch}批序号${seq}等待保存确认超时，重发同一帧（${attempt+1}/8）。`);
+    }
+  }
+  throw new Error(`第${batch}批序号${seq}连续8次无保存确认，停止上传；禁止启动，请检查连接后重新上传。`);
+}
+async function sendRouteFrame(batch,ownsLock=false){
+  if(routeUploadBusy&&!ownsLock){logLine('sys','[系统] 正在逐帧上传，请等待完成。');return false;}
+  const route=state.routes[batch===1?'b1':'b2'];
+  if(!route||route.chain.error){logLine('sys','[系统] 路线不存在或规划有误，不能上传。');return false;}
+  if(!serial.port||!serial.port.writable){logLine('sys','[系统] 请先连接串口。');return false;}
+  if(!ownsLock)routeUploadBusy=true;
+  const chain=route.chain,rb={seq:[],frames:0,lastTime:null,done:false,reliable:true};
+  state.rxBoards[batch]=rb;state.debugStartSent[batch]=false;
+  try{
+    const records=chain.runs.map(item=>{
+      const pts=item.kind==='station'?[route.marks[item.run.from],route.marks[item.run.from]]:route.marks.slice(item.run.from,item.run.to+1);
+      if(pts.length<2||pts.length>64)throw new Error('每段必须2～64个点');
+      const cmd=item.kind==='station'?1:pts.some(m=>m.name==='右上角45度'||m.name==='右下角45度')?3:1;
+      const sf=buildSegFrame(batch,pts,cmd);
+      return {code:item.code,coords:pts.map(m=>[m.x,2400-m.y]),data:[item.code,cmd,pts.length,...sf.slice(5,-3)]};
+    });
+    if(!records.length||records.length>32)throw new Error('每批必须1～32段');
+    state.txFrames[batch]=records.length+2;
+    const session=crypto.getRandomValues(new Uint32Array(1))[0]||1;
+    const digest=routeCrc(records.flatMap(r=>r.data));
+    updateRouteSendButtons();draw();
+    const accepted=()=>{rb.frames++;rb.lastTime=new Date();draw();};
+    await uploadExchange(0,batch,session,0,[records.length,digest&255,digest>>>8],0,0xFFFF);accepted();
+    let prefix=0xFFFF;
+    for(let i=0;i<records.length;i++){
+      const record=records[i];prefix=routeCrc(record.data,prefix);
+      await uploadExchange(1,batch,session,i+1,record.data,i+1,prefix);
+      rb.seq.push({k:'d',v:{1:'前进',2:'后退',3:'顺时针转90度',4:'逆时针转90度'}[record.code]});
+      for(const point of record.coords)rb.seq.push({k:'p',p:point});
+      accepted();logLine('rx',`📥 第${batch}批 第${i+1}/${records.length}段已保存并校验。`);
+    }
+    await uploadExchange(2,batch,session,records.length+1,[],records.length,digest);accepted();
+    rb.done=true;state.txEndHeading[batch]=chain.endHeading;
+    logLine('sys',`[系统] 第${batch}批上传完成：${records.length}段逐帧确认，STM32缓存CRC16一致，可以启动。`);
+    draw();return true;
+  }catch(err){rb.done=false;logLine('sys',`[系统] 上传失败：${err.message}`);draw();return false;}
+  finally{if(!ownsLock)routeUploadBusy=false;updateRouteSendButtons();}
 }
 function updateRouteSendButtons(){
-  $('btnSendB1').disabled=!state.routes.b1 || !!state.routeErrors[1];
-  $('btnSendB2').disabled=!state.routes.b2 || !!state.routeErrors[2];
+  $('btnSendB1').disabled=routeUploadBusy || !state.routes.b1 || !!state.routeErrors[1];
+  $('btnSendB2').disabled=routeUploadBusy || !state.routes.b2 || !!state.routeErrors[2];
   $('btnSendBoth').disabled=$('btnSendB1').disabled || $('btnSendB2').disabled;
   updateDebugStartButton(1);
 }
 function updateDebugStartButton(){
   for(const batch of [1,2]){
     const rb=state.rxBoards[batch];
-    $('btnDebugStart'+batch).disabled=!!state.routeErrors[batch] ||
+    $('btnDebugStart'+batch).disabled=routeUploadBusy || !!state.routeErrors[batch] ||
       !(rb && rb.done && !state.debugStartSent[batch]);
   }
   $('btnDebugStartBoth').disabled=$('btnDebugStart1').disabled || $('btnDebugStart2').disabled;
 }
 async function sendDebugStart(selection){
-  if(![1,2,3].includes(selection))return;
+  if(routeUploadBusy||![1,2,3].includes(selection))return;
   const batches=selection===3?[1,2]:[selection];
   const label=selection===3?'连续跑两批':`启动第${selection}批`;
   for(const batch of batches){
@@ -1605,8 +1667,10 @@ $('btnDebugStart1').addEventListener('click',()=>sendDebugStart(1));
 $('btnDebugStart2').addEventListener('click',()=>sendDebugStart(2));
 $('btnDebugStartBoth').addEventListener('click',()=>sendDebugStart(3));
 $('btnSendBoth').addEventListener('click',async()=>{
-  await sendRouteFrame(1);
-  setTimeout(()=>sendRouteFrame(2), 300);   // 两批间隔 300ms，给单片机留处理时间
+  if(routeUploadBusy)return;
+  routeUploadBusy=true;updateRouteSendButtons();
+  try{if(await sendRouteFrame(1,true))await sendRouteFrame(2,true);}
+  finally{routeUploadBusy=false;updateRouteSendButtons();}
 });
 
 /* ================= STM32 回传帧解析（车端逐帧原样回传：01/02/03 点帧 + 04 动作帧） =================
@@ -1616,6 +1680,7 @@ $('btnSendBoth').addEventListener('click',async()=>{
    收满发送帧数 → 回传板标注"回传完成"并删除该批路线任务 */
 const rxFsm = {st:0, cmd:0, batch:0, cnt:0, expect:0, idx:0, buf:new Uint8Array(4*64), sum:0};
 function rxFsmFeed(ch){
+  routeAckFeed(ch);
   switch(rxFsm.st){
     case 0:
       if(ch===0xAA) rxFsm.st=1;
@@ -1673,6 +1738,7 @@ function rxFsmFeed(ch){
 /* 回传帧接受：追加进对应批次回传数据；收满发送帧数 → 标注完成并删除该批路线任务 */
 function rxEchoAccept(cmd, batch, pts, act){
   const rb = state.rxBoards[batch];
+  if(rb?.reliable)return; // 旧回显不能推进可靠上传进度或开放启动
   if(!rb){ logLine('rx',`📥 第 ${batch} 批回传忽略（该批尚未发送，无法对照帧数）`); return; }
   rb.frames++; rb.lastTime=new Date();
   if(pts){
@@ -1768,6 +1834,7 @@ async function readLoop(port){
   logLine('sys','[系统] 串口已断开。');
 }
 async function serialDisconnect(){
+  cancelRouteAck('串口已断开');
   serial.keepReading=false;
   try{ if(serial.reader) await serial.reader.cancel(); }catch(e){}
   try{ if(serial.writer){serial.writer.releaseLock();} }catch(e){}
@@ -1785,16 +1852,20 @@ $('btnSend').addEventListener('click',async()=>{
   let bytes;
   if($('sendHex').checked) bytes=hexToBytes(t);
   else bytes=new TextEncoder().encode(t+($('sendCRLF').checked?'\r\n':''));
+  if(routeUploadBusy){
+    if(bytesToHex(bytes).replace(/\s/g,'').toUpperCase()!=='AA5506060D0A'){
+      logLine('sys','[系统] 正在逐帧上传，手动发送仅允许06中止。');return;
+    }
+    cancelRouteAck('用户06中止上传');
+  }
   try{
-    serial.writer=serial.port.writable.getWriter();
-    await serial.writer.write(bytes);
-    try{serial.writer.releaseLock();}catch(e){}
+    await uartWrite(bytes);
     logLine('tx','▷ '+($('sendHex').checked?bytesToHex(bytes):t));
   }catch(err){ logLine('sys',`[系统] 发送失败：${err.message}`); }
 });
 $('sendText').addEventListener('keydown',e=>{ if(e.key==='Enter') $('btnSend').click(); });
 navigator.serial?.addEventListener?.('disconnect',e=>{
-  if(e.target===serial.port){ logLine('sys','[系统] 设备已拔出。'); serial={port:null,reader:null,writer:null,keepReading:false}; setSerialStat('未连接'); }
+  if(e.target===serial.port){ cancelRouteAck('设备已拔出');logLine('sys','[系统] 设备已拔出。'); serial={port:null,reader:null,writer:null,keepReading:false}; setSerialStat('未连接'); }
 });
 
 /* ================= 导入导出 / 本地保存 ================= */

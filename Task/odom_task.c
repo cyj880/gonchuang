@@ -70,6 +70,7 @@ void OdomTask(void *pvParameters)
 
                 c->last = pos;
                 c->miss = 0;
+                if (s_odom.valid_streak < 255u) s_odom.valid_streak++;
                 s_odom.enc_pos[ODOM_POS_AXIS]  = pos;
                 c->cnt_acc          += d_cnt;
                 s_odom.dist_mm[ODOM_POS_AXIS] += (int32_t)d_mm;
@@ -82,6 +83,9 @@ void OdomTask(void *pvParameters)
             }
             else
             {
+                taskENTER_CRITICAL();
+                s_odom.valid_streak = 0;
+                taskEXIT_CRITICAL();
                 if (odom_ch.miss < 255) odom_ch.miss++;
                 if (odom_ch.miss >= 5)
                 {

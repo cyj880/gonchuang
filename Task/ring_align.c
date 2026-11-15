@@ -1,4 +1,4 @@
-﻿#include "ring_align.h"
+#include "ring_align.h"
 #include <math.h>
 #include <string.h>
 
@@ -8,6 +8,10 @@
 #define RING_TARGET_X_PX 320
 #define RING_TARGET_Y_PX 240 /* modes 0/4 center average Y; mode 3 is yaw only */
 #define RING_TOL_YAW_CDEG 50 /* +/-0.5 deg */
+#define RING_FINE_XY_PX 24.0f       /* 完整站点对位：最后24像素逐步降速 */
+#define RING_FINE_XY_MAX_RPM 4.0f   /* 24像素时4RPM，误差6像素时1RPM */
+#define RING_FINE_YAW_CDEG 600.0f   /* 最后6度由6RPM平滑降到容差边缘1RPM */
+#define RING_FINE_YAW_MIN_RPM 1.0f
 
 typedef enum
 {
@@ -77,9 +81,26 @@ static float center_speed(float error)
     speed *= (2.0f / 3.0f) * 0.5f;
     /* Fine approach inside 2x tolerance: taper below the 4 RPM floor so the
        tight +/-3 px window is not overshot at crawl speed. */
-    if (fabsf(error) <= 2.0f * RING_TOL_PX)
+    if ((align_mode == 0 || align_mode == 5) && fabsf(error) <= RING_FINE_XY_PX)
+        speed = fabsf(error) * RING_FINE_XY_MAX_RPM / RING_FINE_XY_PX;
+    else if (fabsf(error) <= 2.0f * RING_TOL_PX)
         speed = fabsf(error) * (2.0f / 3.0f);
     return error < 0 ? -speed : speed;
+}
+
+static float yaw_speed(int16_t yaw_cdeg)
+{
+    float error = fabsf((float)yaw_cdeg);
+    float speed = error / 50.0f;
+    if (speed < 2.0f) speed = 2.0f;
+    if (speed > 6.0f) speed = 6.0f;
+    if ((align_mode == 0 || align_mode == 5) && error <= RING_FINE_YAW_CDEG)
+    {
+        speed = RING_FINE_YAW_MIN_RPM + (6.0f - RING_FINE_YAW_MIN_RPM) *
+            (error - RING_TOL_YAW_CDEG) / (RING_FINE_YAW_CDEG - RING_TOL_YAW_CDEG);
+        if (speed < RING_FINE_YAW_MIN_RPM) speed = RING_FINE_YAW_MIN_RPM;
+    }
+    return speed * (yaw_cdeg < 0 ? -1 : 1) * yaw_sign;
 }
 
 void RingAlign_Start(uint32_t now_ms)
@@ -111,6 +132,11 @@ void RingAlign_Stop(void)
     state = ALIGN_OFF;
     settled = 0;
     reset_motion();
+}
+
+void RingAlign_ResetTimeout(uint32_t now_ms)
+{
+    start_ms = now_ms; /* 首帧未到的通信等待不消耗60秒校准时间，不改模式或方向。 */
 }
 
 uint8_t RingAlign_Command(uint8_t op, int8_t value, const RDK_RingResult *r, uint32_t now_ms)
@@ -224,10 +250,7 @@ void RingAlign_Update(const RDK_RingResult *r, uint32_t now_ms, RingAlignMotion 
         else if (yaw_bad)
         {
             next = ALIGN_YAW;
-            w = fabsf((float)r->yaw_cdeg) / 50.0f;
-            if (w < 2) w = 2;
-            if (w > 6) w = 6;
-            w *= (r->yaw_cdeg < 0 ? -1 : 1) * yaw_sign;
+            w = yaw_speed(r->yaw_cdeg);
             settled = 0;
         }
         else
@@ -269,10 +292,7 @@ void RingAlign_Update(const RDK_RingResult *r, uint32_t now_ms, RingAlignMotion 
             else if (yaw_bad)
             {
                 next = ALIGN_YAW;
-                w = fabsf((float)r->yaw_cdeg) / 50.0f;
-                if (w < 2) w = 2;
-                if (w > 6) w = 6;
-                w *= (r->yaw_cdeg < 0 ? -1 : 1) * yaw_sign;
+                w = yaw_speed(r->yaw_cdeg);
                 settled = 0;
             }
             else
@@ -286,10 +306,7 @@ void RingAlign_Update(const RDK_RingResult *r, uint32_t now_ms, RingAlignMotion 
         else if (align_mode != 4 && (r->yaw_cdeg < -RING_TOL_YAW_CDEG || r->yaw_cdeg > RING_TOL_YAW_CDEG))
         {
             next = ALIGN_YAW;
-            w = fabsf((float)r->yaw_cdeg) / 50.0f;
-            if (w < 2) w = 2;
-            if (w > 6) w = 6;
-            w *= (r->yaw_cdeg < 0 ? -1 : 1) * yaw_sign;
+            w = yaw_speed(r->yaw_cdeg);
             settled = 0;
         }
         else if (align_mode != 3 &&

@@ -11,6 +11,7 @@ typedef struct
 void RingAlign_Start(uint32_t now_ms);
 void RingAlign_StartMode(uint8_t mode, int8_t sign, uint32_t now_ms);
 void RingAlign_Stop(void); /* preserves RAM-only yaw direction */
+void RingAlign_ResetTimeout(uint32_t now_ms); /* 仅首帧通信等待期间刷新超时起点。 */
 void RingAlign_ResetYawSign(void); /* 恢复默认yaw校正方向-1(清0x15方向覆盖) */
 void RingAlign_Update(const RDK_RingResult *result, uint32_t now_ms, RingAlignMotion *out);
 uint8_t RingAlign_Command(uint8_t op, int8_t value, const RDK_RingResult *result, uint32_t now_ms);

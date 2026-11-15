@@ -95,7 +95,7 @@ static uint16_t LCD_BackgroundColor = LCD_BLACK;		//当前背景色，默认黑�
 #define LCD_DMA_ALL_IT_FLAGS        (DMA_IT_FEIF3 | DMA_IT_DMEIF3 | DMA_IT_TEIF3 | DMA_IT_HTIF3 | DMA_IT_TCIF3)
 #define LCD_DMA_IT_SOURCES          (DMA_IT_TC | DMA_IT_TE | DMA_IT_DME | DMA_IT_FE)
 #define LCD_DMA_TIMEOUT_MS          100U		/*单次DMA等待超时，仅用于总线异常时自恢复*/
-#define LCD_DMA_IRQ_PRIORITY        6U			/*中断优先级数值需大于等于configMAX_SYSCALL（5），才能调用FromISR API*/
+#define LCD_DMA_IRQ_PRIORITY        15U			/*恒最低让路所有数据流; 15≥configMAX_SYSCALL(5), 调FromISR合法(2026-11-14)*/
 #define LCD_DMA_CHUNK_PIXELS        640U		/*DMA发送暂存缓冲的像素数（640像素=1280字节）*/
 #define LCD_USE_DMA                 1			/*1使用DMA搬运像素，0退化为纯轮询发送（调试用）*/
 

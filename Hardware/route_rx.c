@@ -8,6 +8,8 @@
 #include "belt_zdt.h"
 
 /* ================= 帧接收状态机（串口中断里逐字节喂入） =================
+   当前网页20/21保存应答协议：CRC帧先发布单帧信箱，route_rx_poll任务中保存/回读确认。
+   以下01/03/04为旧调试兼容接口，不用于新网页的保存确认。
    路线段帧：AA 55 | 01/03 | BATCH | N | X1L X1H Y1L Y1H | ... | SUM | 0D 0A
             （01=直角段 03=含45°斜走段, 结构相同, 收法相同）
    动作帧：  AA 55 | 04 | BATCH | CODE | SUM | 0D 0A   （CODE: 1前进/2后退/3顺时针转90度/4逆时针转90度）
@@ -63,6 +65,29 @@ static volatile uint8_t pending_action_valid;
 static volatile uint8_t pending_action_batch;
 static volatile uint8_t pending_action_code;
 
+/* 20/21可靠上传：每个动作和坐标作为完整信息帧保存后确认。 */
+#define ROUTE_UPLOAD_CMD 0x20u
+#define ROUTE_UPLOAD_ACK 0x21u
+#define ROUTE_UPLOAD_PAYLOAD_MAX (10u + 4u * ROUTE_MAX_PT)
+typedef struct {
+    uint32_t session;
+    uint16_t expected_crc;
+    uint8_t total, verified;
+} RouteUpload;
+static RouteUpload upload[2];
+static uint8_t upload_rx[ROUTE_UPLOAD_PAYLOAD_MAX], upload_mail[ROUTE_UPLOAD_PAYLOAD_MAX];
+static uint16_t upload_length, upload_index, upload_crc, upload_wire_crc, upload_mail_length;
+static volatile uint8_t upload_pending;
+static void route_upload_poll(void);
+static uint16_t route_cache_crc(uint8_t index);
+static uint16_t route_crc_byte(uint16_t crc, uint8_t byte)
+{
+    uint8_t i;
+    crc ^= byte;
+    for (i = 0; i < 8u; i++) crc = (crc & 1u) ? (uint16_t)((crc >> 1) ^ 0xA001u) : (uint16_t)(crc >> 1);
+    return crc;
+}
+
 /* ---- UART7 帧级发送互斥 ----
    cmd_tx_ack(MotorTask) 与 route_tx_uplink(LCD_Task) 跨任务共用 UART7,
    无锁时两帧字节交错 -> 网页与串口助手都收到坏帧。帧级锁保证一帧完整发完。 */
@@ -98,7 +123,8 @@ static volatile uint8_t g_act_new  = 0;      /* 1 = 有未取走的新动作帧 
 typedef enum
 {
     RX_H1, RX_H2, RX_CMD, RX_BATCH, RX_ACT, RX_CNT, RX_DATA, RX_SUM, RX_T1, RX_T2,
-    RX_P_DATA
+    RX_P_DATA, RX_UP_LEN_LO, RX_UP_LEN_HI, RX_UP_DATA, RX_UP_CRC_LO,
+    RX_UP_CRC_HI, RX_UP_T1, RX_UP_T2
 } RxState;
 
 static RxState rx_state = RX_H1;
@@ -152,7 +178,8 @@ void route_rx_byte(uint8_t ch)
     case RX_CMD:
         rx_sum_calc = ch;
         rx_cmd = ch;
-        if (ch == CMD_ROUTE || ch == CMD_ROUTE45)  rx_state = RX_BATCH;
+        if (ch == ROUTE_UPLOAD_CMD) { upload_crc = route_crc_byte(0xFFFFu, ch); rx_state = RX_UP_LEN_LO; }
+        else if (ch == CMD_ROUTE || ch == CMD_ROUTE45)  rx_state = RX_BATCH;
         else if (ch == CMD_ACTION)                 rx_state = RX_BATCH;   /*批号后跟1字节动作码*/
         else if (ch == CMD_PULSE)  { rx_p_idx = 0; rx_p_len = 5; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_GO) { rx_p_idx = 0; rx_p_len = 5; rx_state = RX_P_DATA; }
@@ -172,6 +199,39 @@ void route_rx_byte(uint8_t ch)
         else if (ch == CMD_DEBUG_RUN) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_CHAIN)  { rx_p_idx = 0; rx_p_len = 9; rx_state = RX_P_DATA; }
         else                       rx_state = RX_H1;
+        break;
+
+    case RX_UP_LEN_LO:
+        upload_length = ch;
+        upload_crc = route_crc_byte(upload_crc, ch);
+        rx_state = RX_UP_LEN_HI;
+        break;
+    case RX_UP_LEN_HI:
+        upload_length |= (uint16_t)ch << 8;
+        upload_crc = route_crc_byte(upload_crc, ch);
+        upload_index = 0;
+        rx_state = upload_length >= 7u && upload_length <= ROUTE_UPLOAD_PAYLOAD_MAX ? RX_UP_DATA : RX_H1;
+        break;
+    case RX_UP_DATA:
+        upload_rx[upload_index++] = ch;
+        upload_crc = route_crc_byte(upload_crc, ch);
+        if (upload_index == upload_length) rx_state = RX_UP_CRC_LO;
+        break;
+    case RX_UP_CRC_LO: upload_wire_crc = ch; rx_state = RX_UP_CRC_HI; break;
+    case RX_UP_CRC_HI:
+        upload_wire_crc |= (uint16_t)ch << 8;
+        rx_state = upload_wire_crc == upload_crc ? RX_UP_T1 : RX_H1;
+        break;
+    case RX_UP_T1: rx_state = ch == 0x0Du ? RX_UP_T2 : RX_H1; break;
+    case RX_UP_T2:
+        if (ch == 0x0Au && !upload_pending)
+        {
+            uint16_t j;
+            for (j = 0; j < upload_length; j++) upload_mail[j] = upload_rx[j];
+            upload_mail_length = upload_length;
+            upload_pending = 1; /* 最后发布；任务处理完前ISR不覆盖mail。 */
+        }
+        rx_state = RX_H1;
         break;
 
     case RX_BATCH:
@@ -428,7 +488,7 @@ void route_rx_byte(uint8_t ch)
             else if (rx_cmd == CMD_ROUTE || rx_cmd == CMD_ROUTE45)
             {
                 g_route[rx_batch - 1].ready = 1;                 /*帧尾校验通过, 正式提交*/
-                if (!debug_route_busy[rx_batch - 1] &&
+                if (!debug_route_busy[rx_batch - 1] && !upload[rx_batch - 1].session &&
                     pending_action_valid && pending_action_batch == rx_batch &&
                     rx_cnt >= 2 &&
                     debug_segment_count[rx_batch - 1] < ROUTE_DEBUG_SEG_MAX)
@@ -456,7 +516,7 @@ void route_rx_byte(uint8_t ch)
                     debug_segment_count[rx_batch - 1]++;
                     route_upload_segment[rx_batch - 1] = 1;
                 }
-                else if (!debug_route_busy[rx_batch - 1])
+                else if (!debug_route_busy[rx_batch - 1] && !upload[rx_batch - 1].session)
                     debug_upload_error[rx_batch - 1] = 1;
                 if (pending_action_batch == rx_batch) pending_action_valid = 0;
                 echo_push_frame(rx_frame_buf, rx_frame_len);     /*整帧原样入回传FIFO, LCD_Task排空发回网页*/
@@ -465,7 +525,7 @@ void route_rx_byte(uint8_t ch)
             {
                 g_act_code = rx_act;                             /*路线上传只记录动作，不提交运动命令*/
                 g_act_new = 1;
-                if (!debug_route_busy[rx_batch - 1])
+                if (!debug_route_busy[rx_batch - 1] && !upload[rx_batch - 1].session)
                 {
                     if (!route_upload_active[rx_batch - 1])
                     {
@@ -629,11 +689,138 @@ static void echo_push_frame(const uint8_t *p, uint16_t n)
     }
 }
 
+static uint16_t route_cache_crc(uint8_t index)
+{
+    uint16_t crc = 0xFFFFu;
+    uint8_t i, j;
+    if (debug_segment_count[index] > ROUTE_DEBUG_SEG_MAX) return 0;
+    for (i = 0; i < debug_segment_count[index]; i++)
+    {
+        DebugRouteSegment *s = &debug_segments[index][i];
+        if (s->count < 2u || s->count > ROUTE_MAX_PT) return 0;
+        crc = route_crc_byte(crc, s->action);
+        crc = route_crc_byte(crc, s->cmd);
+        crc = route_crc_byte(crc, s->count);
+        for (j = 0; j < s->count; j++)
+        {
+            crc = route_crc_byte(crc, (uint8_t)s->x[j]);
+            crc = route_crc_byte(crc, (uint8_t)(s->x[j] >> 8));
+            crc = route_crc_byte(crc, (uint8_t)s->y[j]);
+            crc = route_crc_byte(crc, (uint8_t)(s->y[j] >> 8));
+        }
+    }
+    return crc;
+}
+
+/* 状态：0保存成功，1运行中，2会话不符，3序号不符，4内容非法，5缓存核验失败。 */
+static void route_upload_poll(void)
+{
+    uint8_t *p = upload_mail;
+    uint8_t op, batch, seq, index, status = 0, j;
+    uint32_t session;
+    uint16_t n, digest, crc;
+    uint8_t ack[20];
+    if (!upload_pending) return;
+    n = upload_mail_length;
+    op = p[0]; batch = p[1]; seq = p[6];
+    session = (uint32_t)p[2] | ((uint32_t)p[3] << 8) | ((uint32_t)p[4] << 16) | ((uint32_t)p[5] << 24);
+    if (batch < 1u || batch > 2u || !session) { upload_pending = 0; return; }
+    index = batch - 1u;
+    if (debug_route_busy[index]) status = 1;
+    else if (op == 0u && n == 10u && seq == 0u && p[7] && p[7] <= ROUTE_DEBUG_SEG_MAX)
+    {
+        uint16_t expected = (uint16_t)p[8] | ((uint16_t)p[9] << 8);
+        if (upload[index].session == session)
+        {
+            if (upload[index].total != p[7] || upload[index].expected_crc != expected) status = 4;
+        }
+        else
+        {
+            upload[index].session = session;
+            upload[index].total = p[7];
+            upload[index].expected_crc = expected;
+            upload[index].verified = 0;
+            debug_segment_count[index] = debug_upload_error[index] = 0;
+            debug_read_segment[index] = 0; debug_read_point[index] = 1;
+            route_upload_action[index] = route_upload_segment[index] = route_upload_active[index] = 0;
+            if (pending_action_batch == batch) pending_action_valid = 0;
+        }
+    }
+    else if (upload[index].session != session) status = 2;
+    else if (op == 1u && n >= 18u)
+    {
+        uint8_t count = p[9];
+        if (!seq || seq > upload[index].total || count < 2u || count > ROUTE_MAX_PT ||
+            n != 10u + 4u * count || p[7] < 1u || p[7] > 4u || (p[8] != 1u && p[8] != 3u)) status = 4;
+        else if (seq > debug_segment_count[index] + 1u) status = 3;
+        else
+        {
+            DebugRouteSegment *s = &debug_segments[index][seq - 1u];
+            uint8_t duplicate = (uint8_t)(seq <= debug_segment_count[index]);
+            uint16_t first_x = (uint16_t)p[10] | ((uint16_t)p[11] << 8);
+            uint16_t first_y = (uint16_t)p[12] | ((uint16_t)p[13] << 8);
+            if (duplicate && (s->action != p[7] || s->cmd != p[8] || s->count != count)) status = 4;
+            if (seq == 1u && ((batch == 2u && (first_x != 400u || first_y != 1200u)) ||
+                (batch == 1u && (first_x != 2200u || (first_y != 2200u && first_y != 200u))))) status = 4;
+            if (seq > 1u)
+            {
+                DebugRouteSegment *previous = &debug_segments[index][seq - 2u];
+                if (!previous->count || previous->count > ROUTE_MAX_PT ||
+                    first_x != previous->x[previous->count - 1u] ||
+                    first_y != previous->y[previous->count - 1u]) status = 4;
+            }
+            for (j = 0; j < count && !status; j++)
+            {
+                uint16_t offset = 10u + 4u * j;
+                uint16_t x = (uint16_t)p[offset] | ((uint16_t)p[offset + 1u] << 8);
+                uint16_t y = (uint16_t)p[offset + 2u] | ((uint16_t)p[offset + 3u] << 8);
+                if (x > 2400u || y > 2400u || (duplicate && (s->x[j] != x || s->y[j] != y))) status = 4;
+            }
+            if (!status && !duplicate)
+            {
+                s->action = p[7]; s->cmd = p[8]; s->count = count;
+                for (j = 0; j < count; j++)
+                {
+                    uint16_t offset = 10u + 4u * j;
+                    s->x[j] = (uint16_t)p[offset] | ((uint16_t)p[offset + 1u] << 8);
+                    s->y[j] = (uint16_t)p[offset + 2u] | ((uint16_t)p[offset + 3u] << 8);
+                }
+                debug_segment_count[index] = seq;
+                upload[index].verified = 0;
+            }
+        }
+    }
+    else if (op == 2u && n == 7u && seq == upload[index].total + 1u)
+    {
+        if (debug_segment_count[index] != upload[index].total || route_cache_crc(index) != upload[index].expected_crc)
+            status = 5;
+        else
+        {
+            route_upload_action[index] = route_upload_segment[index] = 1;
+            upload[index].verified = 1; /* 最后发布，只有完整缓存才有启动资格。 */
+        }
+    }
+    else status = 4;
+    digest = route_cache_crc(index); /* ACK回读已保存内存的前缀校验，不回显输入冒充保存。 */
+    ack[0] = 0xAAu; ack[1] = 0x55u; ack[2] = ROUTE_UPLOAD_ACK; ack[3] = 11; ack[4] = 0;
+    for (j = 0; j < 7; j++) ack[5u + j] = p[j];
+    ack[12] = status; ack[13] = debug_segment_count[index]; ack[14] = (uint8_t)digest; ack[15] = (uint8_t)(digest >> 8);
+    crc = 0xFFFFu;
+    for (j = 2; j < 16; j++) crc = route_crc_byte(crc, ack[j]);
+    ack[16] = (uint8_t)crc; ack[17] = (uint8_t)(crc >> 8); ack[18] = 13; ack[19] = 10;
+    /* ACK在任务中按帧互斥发送；不向ISR单生产者回传FIFO插入第二个生产者。 */
+    if (!s_uart7_tx_mutex || xSemaphoreTake(s_uart7_tx_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
+    for (j = 0; j < sizeof(ack); j++) UART7_SendByte(ack[j]);
+    xSemaphoreGive(s_uart7_tx_mutex);
+    upload_pending = 0;
+}
+
 /* ---- 帧中途超时复位 + 回传FIFO排空（任务上下文周期调用, LCD_Task 10ms） ----
    route_rx_poll   : 帧中途 >200ms 无新字节 -> 丢弃半帧回空闲(防字节丢失卡死状态机)
    route_echo_flush: 把回传FIFO里校验通过的整帧逐字节经 UART7 原样发回网页(逐帧原样回传) */
 void route_rx_poll(void)
 {
+    route_upload_poll(); /* 存储/校验/ACK均在任务处理，UART7 ISR不等待。 */
     if (rx_state != RX_H1)
     {
         if ((xTaskGetTickCount() - rx_last_tick) > pdMS_TO_TICKS(200))
@@ -668,16 +855,23 @@ uint8_t   route_ready(uint8_t batch)         { return g_route[batch - 1].ready; 
 void      route_clear_ready(uint8_t batch)   { g_route[batch - 1].ready = 0; }
 RouteFrame* route_get(uint8_t batch)         { return &g_route[batch - 1]; }
 
+uint8_t route_upload_processing(void) { return upload_pending; }
+
 uint8_t route_debug_take(uint8_t batch)
 {
     uint8_t i, ready = 1;
     if (batch < 1 || batch > 3) return 0;
+    if (upload_pending) return 0; /* 上传任务尚未完成：不得与缓存写入竞争。 */
     taskENTER_CRITICAL();
     for (i = 0; i < 2; i++)
         if ((batch & (1u << i)) &&
             !(route_upload_action[i] && route_upload_segment[i] &&
               debug_segment_count[i] && !debug_upload_error[i] && !debug_route_busy[i]))
             ready = 0;
+    for (i = 0; i < 2; i++)
+        if ((batch & (1u << i)) && upload[i].session &&
+            (!upload[i].verified || debug_segment_count[i] != upload[i].total ||
+             route_cache_crc(i) != upload[i].expected_crc)) ready = 0;
     /*第二批起点必须为暂存区；连跑还要求第一批上传终点与其衔接。*/
     if (ready && (batch & 2u))
     {
@@ -718,7 +912,7 @@ uint8_t route_debug_finished(uint8_t batch)
     return finished;
 }
 
-uint8_t route_debug_next(uint8_t batch, RouteDebugLeg *leg)
+static uint8_t route_debug_read(uint8_t batch, RouteDebugLeg *leg, uint8_t consume)
 {
     uint8_t index, segment, point, ready = 0;
     if (batch < 1 || batch > 2 || !leg) return 0;
@@ -747,13 +941,26 @@ uint8_t route_debug_next(uint8_t batch, RouteDebugLeg *leg)
                 segment++;
                 point = 1;
             }
-            debug_read_segment[index] = segment;
-            debug_read_point[index] = point;
+            if (consume)
+            {
+                debug_read_segment[index] = segment;
+                debug_read_point[index] = point;
+            }
             ready = 1;
         }
     }
     taskEXIT_CRITICAL();
     return ready;
+}
+
+uint8_t route_debug_peek(uint8_t batch, RouteDebugLeg *leg)
+{
+    return route_debug_read(batch, leg, 0);
+}
+
+uint8_t route_debug_next(uint8_t batch, RouteDebugLeg *leg)
+{
+    return route_debug_read(batch, leg, 1);
 }
 
 void route_debug_release(uint8_t batch)
@@ -762,6 +969,57 @@ void route_debug_release(uint8_t batch)
     taskENTER_CRITICAL();
     debug_route_busy[batch - 1] = 0;
     taskEXIT_CRITICAL();
+}
+
+void route_debug_status(uint8_t batch, RouteDebugStatus *out)
+{
+    uint8_t index, segment, point;
+    RouteDebugStatus status = {0};
+    status.state = ROUTE_READ_INDEX;
+    if (!out) return;
+    if (batch < 1 || batch > 2) { *out = status; return; }
+    index = batch - 1;
+    taskENTER_CRITICAL();
+    status.segment = segment = debug_read_segment[index];
+    status.count = debug_segment_count[index];
+    status.point = point = debug_read_point[index];
+    status.busy = debug_route_busy[index];
+    status.error = debug_upload_error[index];
+    if (status.count <= ROUTE_DEBUG_SEG_MAX && segment <= status.count)
+    {
+        if (segment > 0)
+        {
+            DebugRouteSegment *previous = &debug_segments[index][segment - 1u];
+            if (previous->count && previous->count <= ROUTE_MAX_PT)
+            {
+                status.previous_x = previous->x[previous->count - 1u];
+                status.previous_y = previous->y[previous->count - 1u];
+            }
+        }
+        if (!status.busy) status.state = ROUTE_READ_UNLOCKED;
+        else if (segment == status.count) status.state = ROUTE_READ_END;
+        else
+        {
+            DebugRouteSegment *next = &debug_segments[index][segment];
+            if (next->count >= 2u && next->count <= ROUTE_MAX_PT && point && point < next->count)
+            {
+                status.has_leg = 1;
+                status.leg.action = point == 1u ? next->action :
+                    (next->action == CMD_ACT_BACK ? CMD_ACT_BACK : CMD_ACT_FWD);
+                status.leg.station = (uint8_t)(next->cmd == CMD_ROUTE && next->count == 2u &&
+                    next->x[0] == next->x[1] && next->y[0] == next->y[1]);
+                status.leg.from_x = next->x[point - 1u];
+                status.leg.from_y = next->y[point - 1u];
+                status.leg.to_x = next->x[point];
+                status.leg.to_y = next->y[point];
+                status.state = (point > 1u || !segment ||
+                    (next->x[0] == status.previous_x && next->y[0] == status.previous_y)) ?
+                    ROUTE_READ_OK : ROUTE_READ_GAP;
+            }
+        }
+    }
+    taskEXIT_CRITICAL();
+    *out = status;
 }
 
 /* ================= 坐标回传：按命令字 02 帧经 UART7(ZigBee) 发回网页 =================

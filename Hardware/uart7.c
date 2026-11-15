@@ -42,7 +42,7 @@ void UART7_ZigBee_Init(uint32_t baud)
     /*NVIC：抢占优先级6（数值≥5，落在 configMAX_SYSCALL_INTERRUPT_PRIORITY
       管辖范围内，将来如需在 ISR 里调 FreeRTOS FromISR API 是安全的）*/
     NVIC_InitStructure.NVIC_IRQChannel = UART7_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 6;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;  /*路线上传窗口全局最高(ISR无FromISR合法); 一键启动后降7, 06恢复0*/
     NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
     NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&NVIC_InitStructure);

@@ -15,6 +15,7 @@ typedef struct
     int32_t  turns[ODOM_ENC_NUM];      /*累计圈数*/
     float    speed_mm_s[ODOM_ENC_NUM]; /*测量轮速度(mm/s)*/
     uint8_t  online[ODOM_ENC_NUM];     /*站号1通信状态*/
+    uint8_t  valid_streak;            /*连续有效位置回包数；任一次读取失败清零，饱和255*/
     float    yaw_deg;                 /*当前陀螺仪航向*/
 } OdomData_t;
 

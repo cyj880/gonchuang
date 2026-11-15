@@ -3,6 +3,10 @@
 
 #include "stm32f4xx.h"
 
+/* 路线规划网页当前使用20请求/21保存ACK：LEN16、SESSION32、SEQ8、CRC16。
+   每段ACTION+CMD+坐标同帧；BEGIN/DATA/COMMIT逐帧确认，提交后才允许启动。
+   格式详见docs/串口协议.md顶部；下方01/03/04保留旧调试兼容接口。 */
+
 /* 智能搬运赛场路线坐标帧接收（与网页版上位机"发送坐标"配套，移植自触摸屏例程）
    帧格式：AA 55 | 01 | BATCH | N | X1L X1H Y1L Y1H | ... | SUM | 0D 0A
    坐标 mm 小端；SUM = 01+BATCH+N+全部坐标字节 累加和低8位
@@ -133,6 +137,7 @@ uint8_t cmd_get(ZbeeCmd *c);                     /* 取走一条新命令，1=�
 void cmd_last(ZbeeCmd *c, uint8_t *cnt);         /* LCD 只读最后命令 */
 void cmd_tx_ack(const ZbeeCmd *c);               /* 按原命令字+载荷回应答帧(任务上下文) */
 uint8_t route_debug_take(uint8_t batch);          /*1/2单批；3原子检查并锁定两批*/
+uint8_t route_upload_processing(void); /*最后一帧保存/ACK正在收尾，启动事件可短暂等待*/
 uint8_t route_debug_finished(uint8_t batch);      /*缓存点序正常耗尽，区别于不连续路段*/
 
 typedef struct
@@ -143,6 +148,16 @@ typedef struct
 } RouteDebugLeg;
 
 uint8_t route_debug_next(uint8_t batch, RouteDebugLeg *leg); /*顺序取出下一个点对*/
+uint8_t route_debug_peek(uint8_t batch, RouteDebugLeg *leg); /*只查看，不推进；校验通过才next提交*/
+enum { ROUTE_READ_OK, ROUTE_READ_UNLOCKED, ROUTE_READ_END,
+       ROUTE_READ_GAP, ROUTE_READ_INDEX };
+typedef struct
+{
+    uint8_t segment, count, point, busy, error, state, has_leg;
+    uint16_t previous_x, previous_y;
+    RouteDebugLeg leg;
+} RouteDebugStatus;
+void route_debug_status(uint8_t batch, RouteDebugStatus *out); /*只读缓存及游标，故障显示用*/
 void route_debug_release(uint8_t batch);        /*结束/中止后允许重新上传*/
 
 typedef struct

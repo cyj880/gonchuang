@@ -18,6 +18,7 @@
 #define RDK_GRAB_CMD    0x11u       /* RDK→STM32: 物料状态帧 LEN=2(STATE,COLOR), 停稳期间10Hz持续 */
 #define RDK_GRAB_ACK_CMD 0x18u      /* RDK→STM32: 追踪命令应答 ACK(LEN=1 COLOR), 与UART7 0x18舵机帧同号不同串口 */
 #define RDK_PARTIAL_TIMEOUT_MS 50u
+#define RDK_MODE_RETRY_MS 500u /* 首个对应模式的有效结果前持续重发；只用RTOS tick */
 
 static volatile uint8_t  rdk_enabled;
 static volatile uint8_t  rdk_valid;
@@ -47,6 +48,9 @@ static TickType_t stack_last_tick;
 static uint8_t rx_buf[32];
 static uint8_t rx_index;
 static TickType_t rx_last_tick;
+static volatile uint8_t rdk_first_pending;
+static uint8_t rdk_first_mode;
+static TickType_t rdk_mode_tx_tick;
 
 static void rdk_tx_byte(uint8_t byte)
 {
@@ -65,6 +69,14 @@ static void rdk_send_mode(uint8_t mode)
     rdk_tx_byte((uint8_t)(RDK_MODE_CMD + 0x01u + mode));
     rdk_tx_byte(0x0Du);
     rdk_tx_byte(0x0Au);
+}
+
+static void rdk_start_vision_mode(uint8_t mode)
+{
+    rdk_first_mode = mode;
+    rdk_mode_tx_tick = xTaskGetTickCount();
+    rdk_first_pending = 1; /* 先开等待，避免快速回包后又被置回等待。 */
+    rdk_send_mode(mode);
 }
 
 void RDK_Center_Init(uint32_t baud)
@@ -93,7 +105,7 @@ void RDK_Center_Init(uint32_t baud)
 
     nvic.NVIC_IRQChannel = USART3_IRQn;
     /* FromISR API要求优先级数值>=5；与UART7/UART8保持一致。 */
-    nvic.NVIC_IRQChannelPreemptionPriority = 6;
+    nvic.NVIC_IRQChannelPreemptionPriority = 5;  /*=MAX_SYSCALL; 到站时IMU/Encoder降15让路, 5即数据流最高(2026-11-14)*/
     nvic.NVIC_IRQChannelSubPriority = 0;
     nvic.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&nvic);
@@ -123,6 +135,7 @@ static uint8_t rdk_accept_stack(const uint8_t *p, TickType_t now)
     next.fresh = 1;
     stack_result = next;
     stack_last_tick = now;
+    if (rdk_first_mode == RDK_MODE_STACK) rdk_first_pending = 0;
     return 1;
 }
 
@@ -161,6 +174,8 @@ static uint8_t rdk_accept_ring(const uint8_t *payload, uint8_t length, uint8_t c
     next.fresh = 1;
     ring_result = next;
     ring_last_tick = now;
+    if (command == RDK_RING_IDENTIFIED && rdk_first_mode == RDK_MODE_RING)
+        rdk_first_pending = 0; /* 空结果也是有效模式回包；旧0x12不能确认。 */
     return 1;
 }
 
@@ -204,6 +219,7 @@ static void rdk_rx_byte(uint8_t byte, TickType_t now)
             rdk_last_tick = now;
             rdk_sequence++;
             rdk_valid_frames++;
+            if (rdk_first_mode == RDK_MODE_TURNTABLE) rdk_first_pending = 0;
             rdk_rx_drop(7);
         }
         else if (rdk_grab_arm_enabled && rx_buf[0] == 0xAAu)
@@ -327,6 +343,7 @@ void RDK_Center_IRQHandler(void)
 void RDK_Center_Enable(uint8_t enable)
 {
     taskENTER_CRITICAL();
+    rdk_first_pending = 0; /* 06、退出、切换接收通道均取消旧重发。 */
     rdk_enabled = enable ? 1 : 0;
     rdk_ring_enabled = 0;
     rdk_stack_enabled = 0;
@@ -343,7 +360,7 @@ void RDK_Ring_Start(void)
     taskENTER_CRITICAL();
     rdk_ring_enabled = 1;
     taskEXIT_CRITICAL();
-    rdk_send_mode(RDK_MODE_RING);
+    rdk_start_vision_mode(RDK_MODE_RING);
 }
 
 uint8_t RDK_Ring_Active(void) { return rdk_ring_enabled; }
@@ -373,7 +390,7 @@ void RDK_Stack_Start(void)
     taskENTER_CRITICAL();
     rdk_stack_enabled = 1;
     taskEXIT_CRITICAL();
-    rdk_send_mode(RDK_MODE_STACK);
+    rdk_start_vision_mode(RDK_MODE_STACK);
 }
 
 uint8_t RDK_Stack_Active(void) { return rdk_stack_enabled; }
@@ -408,7 +425,7 @@ void RDK_Center_Clear(void)
 
 void RDK_Center_SendTurntable(void)
 {
-    rdk_send_mode(RDK_MODE_TURNTABLE);
+    rdk_start_vision_mode(RDK_MODE_TURNTABLE);
 }
 
 /* AA 55 10 01 02 13 0D 0A: 全物料识别模式(RDK端模式02)。 */
@@ -492,6 +509,7 @@ void RDK_Center_SendIdle(void)
 uint8_t RDK_Center_SendGrabColor(uint8_t color)
 {
     if (color < 1u || color > 6u) return 0;
+    rdk_first_pending = 0; /* 颜色命令保持单发，不能被旧视觉模式重发覆盖。 */
     rdk_tx_byte(0xAAu);
     rdk_tx_byte(0x55u);
     rdk_tx_byte(RDK_MODE_CMD);
@@ -506,14 +524,25 @@ uint8_t RDK_Center_SendGrabColor(uint8_t color)
 
 void RDK_Center_Poll(void)
 {
+    TickType_t now = xTaskGetTickCount();
+    uint8_t resend = 0;
     taskENTER_CRITICAL();
     if (rx_index && xTaskGetTickCount() - rx_last_tick > pdMS_TO_TICKS(RDK_PARTIAL_TIMEOUT_MS))
     {
         rx_index = 0;
         rdk_errors++;
     }
+    if (rdk_first_pending && now - rdk_mode_tx_tick >= pdMS_TO_TICKS(RDK_MODE_RETRY_MS))
+    {
+        rdk_mode_tx_tick = now;
+        resend = 1;
+    }
     taskEXIT_CRITICAL();
+    /* 仅重发模式字节，不清接收缓存/结果、不重启视觉或机械流程。 */
+    if (resend && rdk_first_pending) rdk_send_mode(rdk_first_mode);
 }
+
+uint8_t RDK_VisionWaitingFirst(void) { return rdk_first_pending; }
 
 uint8_t RDK_CenterValid(void) { return rdk_valid; }
 int16_t RDK_CenterX(void) { return rdk_x; }
