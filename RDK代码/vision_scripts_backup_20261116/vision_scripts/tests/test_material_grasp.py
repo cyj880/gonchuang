@@ -474,6 +474,7 @@ class GraspWorkerTests(unittest.TestCase):
 
             def feed(frames):
                 for image in frames:
+                    time.sleep(0.08)  # 模拟12.5fps；不能用零间隔帧验证运动/停稳。
                     source = time.monotonic_ns()
                     worker.submit(image, source)
                     deadline = time.monotonic() + 2

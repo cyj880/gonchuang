@@ -4,8 +4,8 @@
 camera_base.py —— 相机采集与去畸变公共模块（vision_scripts 文件夹自包含）
 
 从 ~/logistics_ws/ring_hough_standalone.py 原样提取的两个类，行为不变：
-    Camera       V4L2 + MJPG + 640x480@30，后台线程只保留最新帧（信箱模式），
-                 连续读帧失败自动重开（自救）；
+    Camera       V4L2 + MJPG + 640x480@30，独立采集进程+监督线程，只保留最新帧（信箱模式），
+                 异常或2秒无新帧后有界终止并重开，启动超时5秒；
     Undistorter  读 c100_v7 标定 yaml → getOptimalNewCameraMatrix(alpha=0) +
                  initUndistortRectifyMap(CV_16SC2) 预计算 map，每帧仅 remap；
                  yaml 缺失/损坏时回退到内嵌同数值标定。
@@ -25,6 +25,7 @@ C100 实测要点（沿用 ring_hough_standalone 的结论）：
 """
 
 import os
+import multiprocessing
 import threading
 import time
 
@@ -49,76 +50,171 @@ DEFAULT_CALIB = '/home/sunrise/logistics_vision_data/calibration/camera_640x480.
 # ---------------------------------------------------------------------------
 # 摄像头：V4L2 + MJPG + 640x480@30，后台线程只留最新帧
 # ---------------------------------------------------------------------------
-class Camera:
-    def __init__(self, device, width, height, fps):
-        self._open(device, width, height, fps)
-        self._lock = threading.Lock()
-        self._frame = None            # 最新一帧，被主循环取走即置 None
-        self._stop_evt = threading.Event()
-        self._fail_count = 0
-        self._fail_cycles = 0
-        self._thread = threading.Thread(target=self._read_loop, daemon=True)
-        self._thread.start()
-
-    def _open(self, device, width, height, fps):
-        self.device = device
-        self.cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-        if not self.cap.isOpened():
+def _camera_capture(connection, device, width, height, fps):
+    """唯一拥有V4L2句柄的进程；父进程可终止被底层read/open阻塞的采集。"""
+    cap = None
+    try:
+        cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        if not cap.isOpened():
             raise RuntimeError(f'无法打开摄像头 {device}')
-        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-        self.cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        self.cap.set(cv2.CAP_PROP_FPS, fps)
-        # 回读实际生效值（照搬 camera_capture_node.py 的做法）
-        self.real_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.real_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.real_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        fourcc_int = int(self.cap.get(cv2.CAP_PROP_FOURCC))
-        self.real_fourcc = ''.join(chr((fourcc_int >> (8 * i)) & 0xFF)
-                                   for i in range(4))
-        print(f'[camera] {device} 实际生效: {self.real_w}x{self.real_h}@'
-              f'{self.real_fps:.0f} fourcc={self.real_fourcc}')
-        if (self.real_w, self.real_h) != (width, height):
-            print(f'[camera][警告] 实际分辨率与请求的 {width}x{height} 不一致，'
-                  f'请以实际分辨率重新标定！')
-
-    def _read_loop(self):
-        while not self._stop_evt.is_set():
-            ok, frame = self.cap.read()
-            if not ok:
-                self._fail_count += 1
-                if self._fail_count >= 50:      # 连续失败自动重开（自救）
-                    print('[camera][警告] 连续读帧失败，尝试重新打开设备')
-                    self.cap.release()
-                    time.sleep(0.3)
-                    try:
-                        self._open(self.device, self.real_w, self.real_h,
-                                   self.real_fps)
-                    except RuntimeError:
-                        pass
-                    self._fail_cycles += 1
-                    self._fail_count = 0
-                    if self._fail_cycles >= 3:
-                        print('[camera][提示] 多次重开无效，可能是 UVC 状态卡死，'
-                              '可执行: sudo modprobe -r uvcvideo && '
-                              'sudo modprobe uvcvideo 重载驱动')
+        for prop, value in ((cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG')),
+                            (cv2.CAP_PROP_FRAME_WIDTH, width),
+                            (cv2.CAP_PROP_FRAME_HEIGHT, height),
+                            (cv2.CAP_PROP_FPS, fps)):
+            cap.set(prop, value)
+        fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        metadata = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                    cap.get(cv2.CAP_PROP_FPS),
+                    ''.join(chr((fourcc >> (8 * i)) & 0xFF) for i in range(4)))
+        connection.send(('opened', metadata))
+        failed = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                failed += 1
+                if failed >= 50:
+                    raise RuntimeError('连续读帧失败50次')
                 time.sleep(0.02)
                 continue
-            self._fail_count = 0
-            with self._lock:
-                self._frame = frame             # 覆盖旧帧，只保最新
+            failed = 0
+            connection.send(('frame', time.monotonic_ns(), frame))
+    except Exception as exc:
+        try:
+            connection.send(('error', str(exc)))
+        except (OSError, EOFError):
+            pass
+    finally:
+        connection.close()
+        if cap is not None:
+            cap.release()  # 即使驱动在release卡住，父进程的有界终止仍可接管。
+
+
+class Camera:
+    OPEN_TIMEOUT_S = 5.0
+    FRAME_TIMEOUT_S = 2.0
+    FRAME_TTL_NS = 300_000_000
+    RETRY_S = 0.3
+
+    def __init__(self, device, width, height, fps):
+        self.device = device
+        self._requested = (width, height, fps)  # 重开固定沿用请求，不将坏回读值写回相机。
+        self._ctx = multiprocessing.get_context('spawn')
+        self._lock = threading.Lock()
+        self._frame = None
+        self._frame_ns = 0
+        self._stop_evt = threading.Event()
+        self._process = self._connection = None
+        self._last_warning = ''
+        self.recoveries = 0
+        try:
+            self._start_capture()
+        except Exception as exc:
+            self._stop_capture()
+            raise RuntimeError(f'相机初始化失败: {exc}') from exc
+        self._thread = threading.Thread(target=self._read_loop, daemon=True,
+                                        name='camera-supervisor')
+        self._thread.start()
+
+    def _start_capture(self):
+        reader, writer = self._ctx.Pipe(duplex=False)
+        process = self._ctx.Process(target=_camera_capture,
+                                    args=(writer, self.device, *self._requested),
+                                    daemon=True, name='camera-capture')
+        self._connection, self._process = reader, process
+        try:
+            process.start()
+        finally:
+            writer.close()
+        deadline = time.monotonic() + self.OPEN_TIMEOUT_S
+        while not self._stop_evt.is_set() and time.monotonic() < deadline:
+            if reader.poll(0.05):
+                message = reader.recv()
+                if message[0] != 'opened':
+                    raise RuntimeError(str(message[1]))
+                metadata = message[1]
+                if hasattr(self, 'real_w') and metadata[:2] != (self.real_w, self.real_h):
+                    raise RuntimeError('重开后分辨率变化，拒绝沿用旧去畸变映射')
+                self.real_w, self.real_h, self.real_fps, self.real_fourcc = metadata
+                print(f'[camera] {self.device} 实际生效: {self.real_w}x{self.real_h}@'
+                      f'{self.real_fps:.0f} fourcc={self.real_fourcc}')
+                self._last_frame_at = time.monotonic()
+                return
+            if not process.is_alive():
+                raise RuntimeError('相机采集进程在打开阶段退出')
+        raise RuntimeError('相机打开超时或已中止')
+
+    def _stop_capture(self):
+        # 只由初始化/监督线程或监督线程退出后的close调用，不跨线程release句柄。
+        process, connection = self._process, self._connection
+        if process is not None and process.pid is not None:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=0.5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=0.5)
+            if process.is_alive():
+                # 不能不断产生新进程占用同一个设备；旧进程退出前只保持离线。
+                return False
+            process.close()
+        if connection is not None:
+            connection.close()
+        self._process = self._connection = None
+        return True
+
+    def _read_loop(self):
+        try:
+            while not self._stop_evt.is_set():
+                try:
+                    if self._connection is None:
+                        self._start_capture()
+                    if self._connection.poll(0.05):
+                        message = self._connection.recv()
+                        if message[0] == 'error':
+                            raise RuntimeError(str(message[1]))
+                        if message[0] == 'frame':
+                            _, source_ns, frame = message
+                            if 0 <= time.monotonic_ns() - source_ns <= self.FRAME_TTL_NS:
+                                with self._lock:
+                                    self._frame, self._frame_ns = frame, source_ns
+                                self._last_frame_at = time.monotonic()
+                                self._last_warning = ''
+                    if not self._process.is_alive():
+                        raise RuntimeError('相机采集进程退出')
+                    if time.monotonic() - self._last_frame_at >= self.FRAME_TIMEOUT_S:
+                        raise RuntimeError('相机2秒无新帧，重建采集进程')
+                except Exception as exc:
+                    with self._lock:
+                        self._frame, self._frame_ns = None, 0
+                    if str(exc) != self._last_warning:
+                        print(f'[camera][警告] {exc}')
+                        self._last_warning = str(exc)
+                    # 底层进程未退出时不再打开设备；所有等待均可被close唤醒。
+                    while not self._stop_capture():
+                        if self._stop_evt.wait(self.RETRY_S):
+                            return
+                    self.recoveries += 1
+                    self._stop_evt.wait(self.RETRY_S)
+        finally:
+            self._stop_capture()
+
+    def read_sample(self):
+        """取最新帧和真实采集时刻；断流/过期不重复交付旧画面。"""
+        with self._lock:
+            frame, source = self._frame, self._frame_ns
+            self._frame, self._frame_ns = None, 0
+        if source and 0 <= time.monotonic_ns() - source <= self.FRAME_TTL_NS:
+            return frame, source
+        return None, 0
 
     def read(self):
-        """取走最新帧；无新帧返回 None（主循环复用上一帧画面即可）。"""
-        with self._lock:
-            frame, self._frame = self._frame, None
-        return frame
+        return self.read_sample()[0]
 
     def close(self):
         self._stop_evt.set()
-        self._thread.join(timeout=1.0)
-        self.cap.release()
+        self._thread.join(timeout=2.0)
+        # 设备由子进程独占，禁止父线程并发调用cap.release/read。
 
 
 # ---------------------------------------------------------------------------

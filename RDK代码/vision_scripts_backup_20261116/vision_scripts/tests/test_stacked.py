@@ -7,6 +7,7 @@ r=26/33/40/47；基准线上下过 (320, 240±74)（线偏移 75mm≈0.5×间距
 import math
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -162,6 +163,7 @@ class StackedWireTests(unittest.TestCase):
         manager = Mock(active_mode='stacked')
         link = Mock()
         publisher = main.VisionPublisher(link, {'stacked': worker}, manager)
+        worker.latest_source_ns = time.monotonic_ns()
         publisher._next_stacked_tx = 0.0
         publisher._publish_stacked()
         self.assertEqual(link.send.call_count, 1)

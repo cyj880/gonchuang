@@ -169,6 +169,28 @@ static void lcd_odom_center_line(void)
             return;
         }
     }
+    {
+        MotorGrabRegion_t region;
+        if (Motor_GrabGetRegion(&region))
+        {
+            static const char *const names[] = {"NONE", "NEAR", "LEFT", "RIGHT"};
+            char line[22];
+            LCD_SetColor(LCD_CYAN);
+            snprintf(line, sizeof(line), "RAW REGION %u %s", (unsigned)region.region,
+                     region.region <= RDK_GRAB_REGION_RIGHT ? names[region.region] : "INVALID");
+            LCD_Printf(0, 64, LCD_6X8, "%-21s", line);
+            LCD_Printf(0, 76, LCD_6X8, "WAIT TARGET          ");
+            snprintf(line, sizeof(line), "B%u PICK%u COLOR%u", (unsigned)region.batch,
+                     (unsigned)region.pick, (unsigned)region.color);
+            LCD_Printf(0, 86, LCD_6X8, "%-21s", line);
+            LCD_Printf(0, 98, LCD_6X8, "GRAB NOT STARTED     ");
+            LCD_Printf(0, 110, LCD_6X8, "RX LATCHED           ");
+            LCD_Printf(0, 122, LCD_6X8, "06 TO ABORT          ");
+            LCD_Printf(0, 134, LCD_6X8, "                     ");
+            LCD_Printf(0, 146, LCD_6X8, "                     ");
+            return;
+        }
+    }
     Motor_GrabGetStatus(&grab);
     if (grab.active)
     {
@@ -180,7 +202,10 @@ static void lcd_odom_center_line(void)
         angle10 = (long)(arm.angle_deg * 10.0f);
         target10 = (long)(arm.target_deg * 10.0f);
         LCD_SetColor(grab.waiting ? LCD_YELLOW : LCD_GREEN);
-        if (grab.stage)
+        if (grab.stage == 3u)
+            snprintf(line, sizeof(line), "NEAR G%uS%u %s", (unsigned)grab.pick, (unsigned)grab.step,
+                     !grab.started ? "SEND" : (grab.servo ? "SERVO" : waiting[grab.waiting & 7u]));
+        else if (grab.stage)
             snprintf(line, sizeof(line), "RAW %s WAIT %s", grab.stage == 1u ? "PRE" : "POST",
                      waiting[grab.waiting & 7u]);
         else
@@ -204,7 +229,8 @@ static void lcd_odom_center_line(void)
         LCD_Printf(0, 110, LCD_6X8, "%-21s", line);
         snprintf(line, sizeof(line), "Icmd:%6d mA", (int)arm.current_command);
         LCD_Printf(0, 122, LCD_6X8, "%-21s", line);
-        LCD_Printf(0, 134, LCD_6X8, "L1s B2s RM1.5s       ");
+        LCD_Printf(0, 134, LCD_6X8, grab.stage == 3u ?
+                   "T1s L.3s B/R.8s     " : "L1s B2s RM1.5s       ");
         snprintf(line, sizeof(line), "step time:%2lus", (unsigned long)(grab.elapsed_ms / 1000u));
         LCD_Printf(0, 146, LCD_6X8, "%-21s", line);
         return;
@@ -257,16 +283,16 @@ static void lcd_odom_center_line(void)
     else if (RDK_GrabActive())
     {
         /* 原料区夹取等待页: ACK/最近0x11报告 + 原始字节, 判断链路卡在哪 */
-        uint8_t ack_seen, st, cl;
+        uint8_t ack_seen;
+        RDK_GrabReport report;
         char line[22];
-        RDK_GrabPeek(&ack_seen, &st, &cl);
-        LCD_SetColor((st != 0xFFu && st == 5u) ? LCD_GREEN : LCD_YELLOW);
-        if (st == 0xFFu)
-            snprintf(line, sizeof(line), "G S:-- C:--");
+        RDK_GrabPeek(&ack_seen, &report);
+        LCD_SetColor(report.state == RDK_GRAB_STATE_READY ? LCD_GREEN : LCD_YELLOW);
+        if (report.state == 0xFFu)
+            snprintf(line, sizeof(line), "G S:-- C:-- R:--");
         else
-            snprintf(line, sizeof(line), "G S:%u C:%u %s",
-                     (unsigned)st, (unsigned)cl,
-                     st == 5u ? "READY" : (st == 1u ? "EMPTY" : "WAIT"));
+            snprintf(line, sizeof(line), "G S:%u C:%u R:%u A:%c", (unsigned)report.state,
+                     (unsigned)report.color, (unsigned)report.region, ack_seen ? 'Y' : 'N');
         LCD_Printf(0, 86, LCD_6X8, "%-21s", line);
         {
             uint8_t tap[8], i;

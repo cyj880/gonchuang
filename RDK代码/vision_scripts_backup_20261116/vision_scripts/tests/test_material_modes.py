@@ -93,6 +93,7 @@ class MaterialIntegrationTests(unittest.TestCase):
         return worker
 
     def process(self, worker, frame=None):
+        time.sleep(0.04)  # 覆盖真实工作线程，同时满足测速最小20ms帧间隔。
         source = time.monotonic_ns()
         worker.submit(self.frame if frame is None else frame, source)
         wait_for(lambda: worker.latest_source_ns == source)

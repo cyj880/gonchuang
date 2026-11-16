@@ -268,7 +268,7 @@ def encode_stacked_result(result):
 
 
 class FrameParser:
-    """增量解析器：容忍噪声、正确分帧（移植原实现）。"""
+    """STM32模式命令增量解析；合法长度只有1/2，保留跨间隔拆包。"""
 
     def __init__(self):
         self._buffer = bytearray()
@@ -290,7 +290,15 @@ class FrameParser:
             if len(self._buffer) < 4:
                 break
             length = self._buffer[3]
-            if length > 64:
+            if self._buffer[2] != COMMAND or length not in (1, 2):
+                del self._buffer[0]
+                continue
+            if len(self._buffer) >= 5:
+                mode = self._buffer[4]
+                if mode not in MODE_NAMES or length != (2 if mode == MATERIAL_TRACK else 1):
+                    del self._buffer[0]
+                    continue
+            if length == 2 and len(self._buffer) >= 6 and not 1 <= self._buffer[5] <= 6:
                 del self._buffer[0]
                 continue
             total = 2 + 1 + 1 + length + 1 + len(TAIL)
@@ -501,7 +509,12 @@ class SerialLink(threading.Thread):
             decoded = decode_mode(payload)
             if decoded is None:
                 continue
-            self.on_mode(mode_command(*decoded))
+            try:
+                self.on_mode(mode_command(*decoded))
+            except Exception as exc:
+                # 一条命令失败不丢弃本次read中已经解析出的后续命令。
+                print(f'[serial][警告] 模式命令处理失败: {exc}')
+                continue
             if decoded[0] == MATERIAL_TRACK:
                 # 命令应答（0x18）：重臂完成后立即回执，含同色重复命令
                 self.send(encode_material_track_ack(decoded[1]))
@@ -706,12 +719,7 @@ class VisionPublisher(threading.Thread):
             sites = list(self.workers['ring'].latest_sites)
             source_ns = self.workers['ring'].latest_source_ns
             yaw = self.workers['ring'].latest_yaw
-        now_ns = int(time.monotonic() * 1e9)
-        valid = (type(source_ns) is int and source_ns > 0 and
-                 source_ns <= now_ns and
-                 now_ns - source_ns <= 300_000_000 and
-                 source_ns >= self._mode_since * 1e9 - 1e6 and
-                 source_ns > self._last_source_ns)
+        valid = self._source_fresh(source_ns) and source_ns > self._last_source_ns
         if valid:
             # yaw：worker 发布值（FULL=线角/基线角 EMA）优先，PARTIAL 为
             # None 时编码器按站点坐标现算（原行为）。
@@ -736,15 +744,13 @@ class VisionPublisher(threading.Thread):
             self._latest_time = time.monotonic()
             self._last_source_ns = source_ns
             self._pending = True
-        fresh = (self._latest_time is not None and
-                 time.monotonic() - self._latest_time <= 0.3)
+        fresh = self._source_fresh(self._last_source_ns)
         if not fresh:
             self.link.send(encode_identified_ring_result([]))
         elif self._pending:
-            self.link.send(self._latest_frame)
-            self._tx_ages.append((time.monotonic() - self._latest_time) *
-                                 1000.0)
-            self._pending = False
+            if self.link.send(self._latest_frame):
+                self._tx_ages.append((time.monotonic_ns() - self._last_source_ns) / 1e6)
+                self._pending = False
         now = time.monotonic()
         if now - self._stats_time >= 5.0:
             ages = sorted(self._tx_ages)
@@ -755,6 +761,11 @@ class VisionPublisher(threading.Thread):
             self._tx_ages.clear()
             self._stats_time = now
 
+    def _source_fresh(self, source_ns):
+        return (type(source_ns) is int and source_ns > 0 and
+                source_ns >= self._mode_since_ns and
+                0 <= time.monotonic_ns() - source_ns <= 300_000_000)
+
     def _publish_turntable(self):
         now = time.monotonic()
         if now < self._next_turntable_tx:
@@ -762,7 +773,9 @@ class VisionPublisher(threading.Thread):
         self._next_turntable_tx = now + self.turntable_period
         with self.workers['turntable'].lock:
             latest = dict(self.workers['turntable'].latest)
-        if latest.get('detected') and latest.get('center_u') is not None:
+            source = self.workers['turntable'].latest_source_ns
+        if (self._source_fresh(source) and latest.get('detected') and
+                latest.get('center_u') is not None):
             frame = legacy_center_frame((latest['center_u'],
                                          latest['center_v']))
             self.link.send(frame)
@@ -809,6 +822,9 @@ class VisionPublisher(threading.Thread):
         self._next_stacked_tx = now + self.stacked_period
         with self.workers['stacked'].lock:
             result = dict(self.workers['stacked'].latest)
+            source = self.workers['stacked'].latest_source_ns
+        if not self._source_fresh(source):
+            result = {'detected': False}
         self.link.send(encode_stacked_result(result))
 
     def stop(self):
@@ -914,12 +930,15 @@ class FrameDispatcher(threading.Thread):
 
     def run(self):
         while not self._stop_evt.is_set():
-            frame = self.cam.read()
+            read_sample = getattr(self.cam, 'read_sample', None)
+            if callable(read_sample):
+                frame, source_ns = read_sample()
+            else:
+                frame, source_ns = self.cam.read(), time.monotonic_ns()
             if frame is None:
                 time.sleep(0.002)
                 continue
             self.seq += 1
-            source_ns = time.monotonic_ns()
             with self.lock:
                 self.latest_frame = frame
             with self.manager._lock:

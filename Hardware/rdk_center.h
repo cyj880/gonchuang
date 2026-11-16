@@ -51,9 +51,15 @@ void RDK_Center_SendTurntable(void); /*AA55模式4：转盘识别，首个圆心
 void RDK_Center_SendIdle(void);      /*AA55模式0：退出识别，显示相机画面*/
 void RDK_Center_SendAllMaterials(void); /*AA55模式2：全物料识别（尚未接入流程）*/
 void RDK_Center_SendStackDetect(void);  /*AA55模式5：码垛识别（第二轮暂存/1D通过RDK_Stack_Start启用接收）*/
-void RDK_GrabArmEnable(uint8_t enable); /*开/关物料状态帧0x11+追踪ACK 0x18接收(USART3)*/
-uint8_t RDK_GrabTakeReport(uint8_t *state, uint8_t *color); /*取走0x11报告(读清), 5=READY*/
-void RDK_GrabPeek(uint8_t *ack_seen, uint8_t *state, uint8_t *color); /*只读最近值(LCD)*/
+enum { RDK_GRAB_STATE_READY = 5 };
+enum { RDK_GRAB_REGION_NONE, RDK_GRAB_REGION_NEAR, RDK_GRAB_REGION_LEFT, RDK_GRAB_REGION_RIGHT };
+typedef struct
+{
+    uint8_t state, color, region; /* 新版0x11 LEN=3；1中下/2左上/3右上 */
+} RDK_GrabReport;
+void RDK_GrabArmEnable(uint8_t enable, uint8_t expected_color); /* enable=1时颜色须1~6；关闭传0,0 */
+uint8_t RDK_GrabTakeReport(RDK_GrabReport *out); /* 读清；首个匹配READY不被后续帧覆盖 */
+void RDK_GrabPeek(uint8_t *ack_seen, RDK_GrabReport *out); /* 只读；无报告state=0xFF */
 uint8_t RDK_GrabActive(void);               /*夹取接收通道是否打开*/
 uint8_t RDK_Center_SendGrabColor(uint8_t color); /*AA55 10 02 03 COLOR：第一件夹取颜色1~6，非法返回0*/
 void RDK_Center_Poll(void);

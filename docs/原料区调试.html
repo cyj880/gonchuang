@@ -9,8 +9,8 @@
 </head>
 <body>
 <span class="badge">原料区 · 独立调试</span>
-<h1 style="margin-top:15px">一键定位并抓取三块</h1>
-<p>将车摆在原料区、朝向作业位置。启动时将当前朝向设为 <b>yaw 90°</b>，自动准备机构、视觉定位、依次抓取并装车，三块收起后停车。</p>
+<h1 style="margin-top:15px">一键定位与中下区抓取</h1>
+<p>将车摆在原料区、朝向作业位置。启动时将当前朝向设为 <b>yaw 90°</b>，自动准备机构、视觉定位并接收新版RDK三区报告。中下区报告会自动抓取；左上/右上区显示WAIT TARGET等待机构参数。三块均完成时收起停车。</p>
 <main>
 <section class="card">
 <h2 style="margin-top:0;font-size:19px">连接与启动</h2>
@@ -26,14 +26,16 @@
 <section class="card">
 <h2 style="margin-top:0;font-size:19px">本次执行流程</h2>
 <ol>
-<li>当前朝向记为90°；A槽30°，同步带7040、RM455°准备，夹爪25°张开。</li>
-<li>视觉中心定位到(320,240)±3像素；RM285°与丝杆21000准备抓取。</li>
-<li>只发送一次当前颜色，等RDK抓取触发；总等待30秒，超时停车。</li>
-<li>79°夹紧等400ms → 丝杆12500 → 同步带1400与RM107° → 丝杆19500 → 25°松开等400ms。</li>
-<li>前两块返回7040 / 285° / 21000，并将槽位转到150° / 270°，继续下一块。</li>
-<li>第三块收尾到同步带1400、RM107°、丝杆12500、夹爪25°、A槽30°，独立调试停车；里程计全程持续读取。</li>
+<li>当前朝向记为90°；A槽30°，同步带7040、RM455°、丝杆100脉冲准备，夹爪25°张开；丝杆优先到位反馈，最多等1秒。</li>
+<li>视觉中心定位到(320,240)±3像素；停车100ms建立四轮位置保持后，仅RM转到290°，取消丝杆21000指令及等待。</li>
+<li>只发送一次当前颜色，等待新版10字节0x11状态帧：STATE=5、颜色匹配且REGION=1/2/3；首个匹配报告最多等30秒。</li>
+<li>锁存首个匹配区域：1=中下NEAR自动抓取，2=左上LEFT/3=右上RIGHT停在WAIT TARGET，等待对应机构参数。</li>
+<li>中下区：RM290°与丝杆21000同时下发，最多等1秒 → 79.5°夹紧等400ms → 丝杆14200固定等300ms → 同步带1400与RM101°同时下发，最多等800ms → 25°直接张开等100ms。</li>
+<li>前两块：同步带7100、丝杆100、RM290°同时返回，最多等1秒；270°舵机转下一槽，不等待。然后单发下一块颜色，重新等区域报告。</li>
+<li>第三块：同步带1400、丝杆12500、RM101°收起，最多等1秒；270°舵机回A槽30°，不等待。本页独立1E完成后停车；真实路线沿原回位流程继续。</li>
+<li>06随时中止并清除记录。等待每块首报告最多30秒，左上/右上WAIT TARGET不受此超时限制。旧LEN=2帧不兼容。</li>
 </ol>
-<p class="note">丝杆/同步带只等9F主动到位通知，不进行位置回读；丝杆最多等1秒、同步带最多等2秒，未确认也放行，已确认则提前继续。放行不代表实际到位。RM反馈有效时最多等3秒，提前到位则立即继续，未到位也放行；RM反馈失效仍停车并蜂鸣约5秒。屏幕9F:Y/N表示是否收到主动到位帧。舵机槽位只下发角度、不等待反馈。</p>
+<p class="note">丝杆/同步带只等9F主动到位通知，不进行位置回读；丝杆最多等1秒、同步带最多等2秒，未确认也放行，已确认则提前继续。放行不代表实际到位。RM反馈有效时最多等1.5秒，提前到位则立即继续，未到位也放行；RM反馈失效仍停车并蜂鸣约5秒。屏幕9F:Y/N表示是否收到主动到位帧。舵机槽位只下发角度、不等待反馈。</p>
 </section>
 <section class="card wide"><div class="row" style="margin-top:0"><b>串口记录</b><button id="clear">清空</button><button id="copy">复制启动帧</button></div><small id="frames"></small><pre id="log" aria-live="polite">等待连接…</pre></section>
 </main>
@@ -55,7 +57,7 @@ async function command(bytes){if(pending)throw Error('上一条指令尚未确�
 async function readLoop(selected){try{reader=selected.readable.getReader();while(reading&&port===selected){const result=await reader.read();if(result.done)break;feed(result.value)}}catch(e){log('接收结束：'+e.message)}finally{if(reader){reader.releaseLock();reader=null}reading=false;cancelPending(Error('串口断开'));if(port===selected){try{await txChain}catch(e){}try{await selected.close()}catch(e){}port=null;$('connection').textContent='已断开';controls()}}}
 $('connect').onclick=async()=>{if(port||busy)return;busy=true;controls();try{if(!navigator.serial)throw Error('需要使用Chrome或Edge打开本页');const selected=await navigator.serial.requestPort();await selected.open({baudRate:Number($('baud').value),dataBits:8,stopBits:1,parity:'none',flowControl:'none'});port=selected;reading=true;rx=[];running=false;$('connection').textContent='已连接 @115200';status('已连接，可以启动原料区。');readLoop(selected)}catch(e){status(e.message)}finally{busy=false;controls()}};
 $('disconnect').onclick=async()=>{epoch++;reading=false;cancelPending(Error('主动断开'));if(reader)try{await reader.cancel()}catch(e){}status('已断开；断开串口不会自动停止车端动作。');controls()};
-$('start').onclick=async()=>{if(busy||running)return;let digits;try{digits=taskBytes()}catch(e){status(e.message);return}busy=true;const token=++epoch;controls();try{status('正在注入任务码…');await command(frame(0x1B,digits));if(token!==epoch)return;status('正在启动原料区…');running=true;await command(frame(0x1E,[Number($('batch').value)]));if(token!==epoch)return;status('车端已确认启动，当前朝向已记为90°。正在执行原料区流程，完成与故障请看车载屏。')}catch(e){if(token===epoch)status(e.message)}finally{busy=false;controls()}};
+$('start').onclick=async()=>{if(busy||running)return;let digits;try{digits=taskBytes()}catch(e){status(e.message);return}busy=true;const token=++epoch;controls();try{status('正在注入任务码…');await command(frame(0x1B,digits));if(token!==epoch)return;status('正在启动原料区…');running=true;await command(frame(0x1E,[Number($('batch').value)]));if(token!==epoch)return;status('车端已确认启动，当前朝向已记为90°。正在定位并等待三区报告，中下区自动抓取，左上/右上停在WAIT TARGET；进度与故障请看车载屏。')}catch(e){if(token===epoch)status(e.message)}finally{busy=false;controls()}};
 $('abort').onclick=async()=>{epoch++;cancelPending(Error('已中止'));busy=true;controls();try{await command(frame(6));running=false;status('车端已确认中止，机构停止，夹爪保持当前角度。')}catch(e){status(e.message)}finally{busy=false;controls()}};
 $('clear').onclick=()=>{$('log').textContent=''};
 $('copy').onclick=async()=>{try{await navigator.clipboard.writeText(hex(frame(0x1E,[Number($('batch').value)])));status('已复制启动帧')}catch(e){status('启动帧已显示在串口记录上方，可手动复制')}};

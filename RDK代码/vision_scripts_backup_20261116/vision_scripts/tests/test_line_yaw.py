@@ -277,16 +277,16 @@ class PublisherResilienceTests(unittest.TestCase):
             self.assertTrue(t.is_alive())      # 修复前：首个坏结果即死
             self.assertGreaterEqual(link.send.call_count, 1)
             # 场景恢复为合法 3 站（新 source_ns）→ 真实帧恢复
-            worker.latest_sites = [{'x': 100, 'y': 110, 'id': 1},
-                                   {'x': 260, 'y': 110, 'id': 2},
-                                   {'x': 420, 'y': 110, 'id': 3}]
-            worker.latest_source_ns = time.monotonic_ns()
             count = link.send.call_count
+            with worker.lock:
+                worker.latest_sites = [{'x': 100, 'y': 110, 'id': 1},
+                                       {'x': 260, 'y': 110, 'id': 2},
+                                       {'x': 420, 'y': 110, 'id': 3}]
+                worker.latest_source_ns = time.monotonic_ns()
             deadline = time.monotonic() + 2
-            while link.send.call_count <= count and time.monotonic() < deadline:
+            while not any(c.args[0][4] == 3 for c in link.send.call_args_list[count:]) and time.monotonic() < deadline:
                 time.sleep(0.005)
-            self.assertGreater(link.send.call_count, count)
-            self.assertEqual(link.send.call_args.args[0][4], 3)
+            self.assertTrue(any(c.args[0][4] == 3 for c in link.send.call_args_list[count:]))
         finally:
             pub._stop_evt.set()                    # 停手动线程（pub.stop 会
             t.join(timeout=2.0)                    # join 未 start 的自身）

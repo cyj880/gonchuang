@@ -101,11 +101,16 @@ typedef struct
 } MotorGrabFault_t;
 /* 原料区故障快照：物料/步骤从1起；步骤0表示抓取前准备或等RDK。 */
 void Motor_GrabGetFault(MotorGrabFault_t *out);
+typedef struct
+{
+    uint8_t batch, pick, color, region; /* batch/pick从1起；region=1中下/2左上/3右上 */
+} MotorGrabRegion_t;
+uint8_t Motor_GrabGetRegion(MotorGrabRegion_t *out); /* 1=已收区域等待机构参数；只读原子快照 */
 enum { MOTOR_GRAB_WAIT_LIFT = 1, MOTOR_GRAB_WAIT_BELT = 2, MOTOR_GRAB_WAIT_RM = 4 };
 typedef struct
 {
     uint8_t active, pick, step, started, servo, axes, waiting;
-    uint8_t stage, vision_tx; /*stage:0抓取序列、1到站准备、2对位后准备；vision_tx仅表示STM32已下发mode4，不是RDK应答。*/
+    uint8_t stage, vision_tx; /*stage:0纯动作抓取、1到站准备、2对位后准备、3中下区抓取；vision_tx仅表示STM32已下发mode4，不是RDK应答。*/
     uint8_t feedback; /*丝杆/同步带9F主动到位帧标志，位定义同MOTOR_GRAB_WAIT_*。*/
     int32_t lift_target, belt_target; /*丝杆为负坐标；目标仅对应axes中的轴。*/
     uint32_t elapsed_ms;

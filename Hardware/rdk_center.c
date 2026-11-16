@@ -15,7 +15,7 @@
 #define RDK_STACK_CMD   0x14u        /* RDK→STM32: 码垛单中心点(LEN固定7) */
 #define RDK_RING_RESULT 0x12u
 #define RDK_RING_IDENTIFIED 0x13u
-#define RDK_GRAB_CMD    0x11u       /* RDK→STM32: 物料状态帧 LEN=2(STATE,COLOR), 停稳期间10Hz持续 */
+#define RDK_GRAB_CMD    0x11u       /* RDK→STM32: 物料状态帧 LEN=3(STATE,COLOR,REGION), 停稳期间10Hz持续 */
 #define RDK_GRAB_ACK_CMD 0x18u      /* RDK→STM32: 追踪命令应答 ACK(LEN=1 COLOR), 与UART7 0x18舵机帧同号不同串口 */
 #define RDK_PARTIAL_TIMEOUT_MS 50u
 #define RDK_MODE_RETRY_MS 500u /* 首个对应模式的有效结果前持续重发；只用RTOS tick */
@@ -37,8 +37,9 @@ static volatile uint8_t rdk_ring_enabled;
 static volatile uint8_t rdk_stack_enabled;
 static volatile uint8_t rdk_grab_arm_enabled; /* 1=允许接收物料状态帧0x11与追踪ACK 0x18 */
 static volatile uint8_t rdk_grab_report;      /* 收到0x11状态帧, 由MotorTask取走(读清) */
-static volatile uint8_t rdk_grab_state;       /* 最近一帧的STATE: 5=READY可夹取 1=盘停稳但区内无物料 */
-static volatile uint8_t rdk_grab_color;       /* 最近一帧的跟踪颜色 1~6 */
+static RDK_GrabReport rdk_grab_result; /* ISR写，任务临界区内读取；首个匹配READY后冻结 */
+static volatile uint8_t rdk_grab_expected_color;
+static volatile uint8_t rdk_grab_latched;
 static volatile uint8_t rdk_grab_ack;         /* 收到0x18追踪命令应答, 由MotorTask取走(读清) */
 static volatile uint8_t rdk_grab_ack_color;   /* ACK里的颜色 1~6 */
 static RDK_RingResult ring_result;
@@ -224,35 +225,44 @@ static void rdk_rx_byte(uint8_t byte, TickType_t now)
         }
         else if (rdk_grab_arm_enabled && rx_buf[0] == 0xAAu)
         {
-            /* 2026-11-13协议(交接文档14.5): 两帧都收——
-               0x11 物料状态帧: AA 55 11 02 STATE COLOR CK 0D 0A,
-                 CK=(0x11+0x02+STATE+COLOR)&0xFF; STATE 5=READY可夹取,
-                 1=盘停稳但区内无物料; 停稳期间10Hz持续发送, 未停稳静默;
-                 motor_task收到 STATE==5 且 COLOR==期望 才夹取并关通道。
-               0x18 追踪命令应答: AA 55 18 01 COLOR CK 0D 0A,
-                 CK=(0x18+0x01+COLOR)&0xFF; 每条颜色命令重臂后立即回帧。 */
+            /* 新版三区报告：AA55 11 03 STATE COLOR REGION CK 0D0A，10字节。
+               仅接收LEN=3；0x18 LEN=1颜色ACK仍为诊断，不锁存区域。 */
             if (rx_index < 3) return;
             if (rx_buf[1] != 0x55u ||
                 (rx_buf[2] != RDK_GRAB_CMD && rx_buf[2] != RDK_GRAB_ACK_CMD))
             { rdk_rx_drop(1); continue; }
             if (rx_buf[2] == RDK_GRAB_CMD)
             {
-                /* 总长=2帧头+CMD+LEN+2载荷+CK+2帧尾=9字节。 */
-                if (rx_index < 9) return;
-                if (rx_buf[3] != 0x02u ||
-                    rx_buf[4] > 6u || rx_buf[5] < 1u || rx_buf[5] > 6u ||
-                    rx_buf[6] != (uint8_t)(RDK_GRAB_CMD + 0x02u + rx_buf[4] + rx_buf[5]) ||
-                    rx_buf[7] != 0x0Du || rx_buf[8] != 0x0Au)
+                if (rx_index < 4) return;
+                if (rx_buf[3] != 0x03u)
                 {
                     rdk_errors++;
                     rdk_rx_drop(1);
                     continue;
                 }
-                rdk_grab_state = rx_buf[4];
-                rdk_grab_color = rx_buf[5];
-                rdk_grab_report = 1;
+                if (rx_index < 10) return;
+                if (rx_buf[4] > 6u || rx_buf[5] < 1u || rx_buf[5] > 6u ||
+                    rx_buf[6] > RDK_GRAB_REGION_RIGHT ||
+                    rx_buf[7] != (uint8_t)(RDK_GRAB_CMD + 0x03u + rx_buf[4] + rx_buf[5] + rx_buf[6]) ||
+                    rx_buf[8] != 0x0Du || rx_buf[9] != 0x0Au)
+                {
+                    rdk_errors++;
+                    rdk_rx_drop(1);
+                    continue;
+                }
+                if (!rdk_grab_latched)
+                {
+                    rdk_grab_result.state = rx_buf[4];
+                    rdk_grab_result.color = rx_buf[5];
+                    rdk_grab_result.region = rx_buf[6];
+                    if (rx_buf[4] == RDK_GRAB_STATE_READY &&
+                        rx_buf[5] == rdk_grab_expected_color &&
+                        rx_buf[6] >= RDK_GRAB_REGION_NEAR)
+                        rdk_grab_latched = 1; /* 首个匹配READY冻结；读清不重新解锁。 */
+                    rdk_grab_report = 1; /* 结构字段写完后发布。 */
+                }
                 rdk_valid_frames++;
-                rdk_rx_drop(9);
+                rdk_rx_drop(10);
                 continue;
             }
             /* 0x18 ACK: LEN=1，总长8字节。 */
@@ -347,6 +357,7 @@ void RDK_Center_Enable(uint8_t enable)
     rdk_enabled = enable ? 1 : 0;
     rdk_ring_enabled = 0;
     rdk_stack_enabled = 0;
+    RDK_GrabArmEnable(0, 0); /* 切换视觉通道也清旧抓取锁存。 */
     memset(&ring_result, 0, sizeof(ring_result));
     memset(&stack_result, 0, sizeof(stack_result));
     rx_index = 0;
@@ -435,51 +446,43 @@ void RDK_Center_SendAllMaterials(void)
 }
 
 /* 打开/关闭统一夹取触发帧的接收通道(平时全关, 字节直接丢弃)。 */
-void RDK_GrabArmEnable(uint8_t enable)
+void RDK_GrabArmEnable(uint8_t enable, uint8_t expected_color)
 {
     taskENTER_CRITICAL();
-    rdk_grab_arm_enabled = enable ? 1u : 0u;
-    rdk_grab_report = 0;
-    rdk_grab_state = 0;
-    rdk_grab_color = 0;      /*LCD不沿用上一块的READY/颜色。*/
+    rdk_grab_arm_enabled = (uint8_t)(enable && expected_color >= 1u && expected_color <= 6u);
+    rdk_grab_expected_color = rdk_grab_arm_enabled ? expected_color : 0u;
+    rdk_grab_report = rdk_grab_latched = 0;
+    memset(&rdk_grab_result, 0, sizeof(rdk_grab_result));
     rdk_grab_ack = 0;
-    rdk_grab_ack_color = 0;  /*清残留: Peek的ack_seen按ack_color非零判定, 跨块会假显ACK:Y*/
-    rx_index = 0;
+    rdk_grab_ack_color = 0;
+    rx_index = 0; /* 每块/06均清半帧，不能将上一块尾部拼入新报告。 */
     taskEXIT_CRITICAL();
 }
 
-/* 取走0x11状态报告: 1=收到过(取走即清零), STATE/COLOR带出最近值。 */
-uint8_t RDK_GrabTakeReport(uint8_t *state, uint8_t *color)
+/* 读清报告标志，首个匹配READY的冻结状态保持到关闭或下一次开启。 */
+uint8_t RDK_GrabTakeReport(RDK_GrabReport *out)
 {
     uint8_t got;
-
+    if (!out) return 0;
     taskENTER_CRITICAL();
     got = rdk_grab_report;
     if (got)
     {
-        *state = rdk_grab_state;
-        *color = rdk_grab_color;
+        *out = rdk_grab_result;
         rdk_grab_report = 0;
     }
     taskEXIT_CRITICAL();
     return got;
 }
 
-/* 只读最近报告/ACK状态(不清零, LCD诊断用); 无报告时STATE=0xFF。 */
-void RDK_GrabPeek(uint8_t *ack_seen, uint8_t *state, uint8_t *color)
+/* 无报告时state=0xFF；诊断读取不消费报告、不解锁首帧。 */
+void RDK_GrabPeek(uint8_t *ack_seen, RDK_GrabReport *out)
 {
+    if (!ack_seen || !out) return;
     taskENTER_CRITICAL();
     *ack_seen = rdk_grab_ack_color ? 1u : 0u;
-    if (rdk_grab_color)
-    {
-        *state = rdk_grab_state;
-        *color = rdk_grab_color;
-    }
-    else
-    {
-        *state = 0xFFu;
-        *color = 0u;
-    }
+    *out = rdk_grab_result;
+    if (!out->color) out->state = 0xFFu;
     taskEXIT_CRITICAL();
 }
 

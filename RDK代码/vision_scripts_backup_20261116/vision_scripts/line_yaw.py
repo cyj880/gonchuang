@@ -120,7 +120,8 @@ class BandLineFinder:
                                 minLineLength=int(min_span),
                                 maxLineGap=25)
         best = None
-        for item in found[:, 0] if found is not None else []:
+        # OpenCV4常见(N,1,4)，OpenCV5可返回(N,4)，统一为逐条端点。
+        for item in np.asarray(found).reshape(-1, 4) if found is not None else []:
             x1, y1, x2, y2 = map(int, item)
             if x2 < x1:
                 x1, y1, x2, y2 = x2, y2, x1, y1
