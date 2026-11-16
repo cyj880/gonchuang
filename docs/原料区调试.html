@@ -9,12 +9,17 @@
 </head>
 <body>
 <span class="badge">原料区 · 独立调试</span>
-<h1 style="margin-top:15px">一键定位与中下区抓取</h1>
-<p>将车摆在原料区、朝向作业位置。启动时将当前朝向设为 <b>yaw 90°</b>，自动准备机构、视觉定位并接收新版RDK三区报告。中下区报告会自动抓取；左上/右上区显示WAIT TARGET等待机构参数。三块均完成时收起停车。</p>
+<h1 style="margin-top:15px">一键定位与三区抓取</h1>
+<p>将车摆在原料区、朝向作业位置。启动时将当前朝向设为 <b>yaw 90°</b>，自动准备机构、视觉定位并接收新版RDK三区报告。三个区域报告均会按对应目标自动抓取，每块返回后再识别下一物料。三块均完成时收起停车。</p>
+<p class="note"><a href="粗加工与暂存区调试.html">切换到粗加工 / 暂存区独立调试</a></p>
 <main>
 <section class="card">
 <h2 style="margin-top:0;font-size:19px">连接与启动</h2>
 <div class="row"><select id="baud" aria-label="串口波特率"><option>115200</option></select><button id="connect">连接串口</button><button id="disconnect" disabled>断开</button><span id="connection">未连接</span></div>
+<label for="lightPct">灯光目标亮度：<span id="lightValue">0</span>%</label>
+<input type="range" id="lightPct" value="0" min="0" max="100" step="1" style="padding:0">
+<div class="row"><button id="lightApply" disabled>设置灯光亮度</button><button id="lightOff" disabled>关闭灯光</button></div>
+<small>PI6接灯光驱动器PWM端并共地，1kHz、高电平有效。上电默认关闭；拖动后点击设置，收到车端确认才显示成功。运行中也可调光。</small>
 <label for="task">任务码</label><input id="task" value="156+123+516+231" maxlength="15" autocomplete="off" spellcheck="false">
 <small>启动时先注入此任务码，收到车端确认后再启动原料区。</small>
 <label for="batch">本次抓取批次</label><select id="batch"><option value="1">第一批：156</option><option value="2">第二批：516</option></select>
@@ -25,15 +30,16 @@
 </section>
 <section class="card">
 <h2 style="margin-top:0;font-size:19px">本次执行流程</h2>
+<p class="note">原料区角度保持本次标定：夹紧87.5°、张开25°，270°槽位30°/150°/270°。本轮非原料区夹爪加8°调整不叠加到本页流程。</p>
 <ol>
-<li>当前朝向记为90°；A槽30°，同步带7040、RM455°、丝杆100脉冲准备，夹爪25°张开；丝杆优先到位反馈，最多等1秒。</li>
-<li>视觉中心定位到(320,240)±3像素；停车100ms建立四轮位置保持后，仅RM转到290°，取消丝杆21000指令及等待。</li>
+<li>当前朝向记为90°；A槽30°，同步带7040、RM455°、丝杆2000脉冲准备，夹爪25°张开；丝杆优先到位反馈，最多等1秒。</li>
+<li>视觉中心定位到(320,240)±3像素；停车100ms建立四轮位置保持后，仅RM转到435°，丝杆保持2000，取消丝杆21000指令及等待。</li>
 <li>只发送一次当前颜色，等待新版10字节0x11状态帧：STATE=5、颜色匹配且REGION=1/2/3；首个匹配报告最多等30秒。</li>
-<li>锁存首个匹配区域：1=中下NEAR自动抓取，2=左上LEFT/3=右上RIGHT停在WAIT TARGET，等待对应机构参数。</li>
-<li>中下区：RM290°与丝杆21000同时下发，最多等1秒 → 79.5°夹紧等400ms → 丝杆14200固定等300ms → 同步带1400与RM101°同时下发，最多等800ms → 25°直接张开等100ms。</li>
-<li>前两块：同步带7100、丝杆100、RM290°同时返回，最多等1秒；270°舵机转下一槽，不等待。然后单发下一块颜色，重新等区域报告。</li>
-<li>第三块：同步带1400、丝杆12500、RM101°收起，最多等1秒；270°舵机回A槽30°，不等待。本页独立1E完成后停车；真实路线沿原回位流程继续。</li>
-<li>06随时中止并清除记录。等待每块首报告最多30秒，左上/右上WAIT TARGET不受此超时限制。旧LEN=2帧不兼容。</li>
+<li>锁存首个匹配区域并自动抓取：1中下同步带7150/RM180°/丝杆22000；2左上同步带6450/RM610°/丝杆22000；3右上同步带7850/RM610°/丝杆22000。首组并行，最多等1秒。</li>
+<li>三区共用：87.5°夹紧等400ms → 仅右上RM单独到450°（到位或最多等1秒，中下/左上跳过）→ 丝杆14200固定等300ms → 同步带1540与RM18°同时下发，最多等800ms → 25°直接张开等100ms。</li>
+<li>前两块：同步带7100、丝杆2000、RM435°同时返回，最多等2秒；270°舵机转下一槽，不等待。然后单发下一块颜色，重新等区域报告。</li>
+<li>第三块：先同时下发同步带1540、丝杆12500、RM18°收起；从下发起满2秒后，270°舵机再回A槽30°，不等舵机反馈，随后继续。采用RTOS tick计时，不阻塞其他任务；三轴提前到位也不提前转舵机。本页独立1E完成后停车；真实路线沿原回位流程继续。</li>
+<li>06随时中止并清除记录。等待每块首报告最多30秒，抓取期间使用各动作独立等待时间。旧LEN=2帧不兼容。</li>
 </ol>
 <p class="note">丝杆/同步带只等9F主动到位通知，不进行位置回读；丝杆最多等1秒、同步带最多等2秒，未确认也放行，已确认则提前继续。放行不代表实际到位。RM反馈有效时最多等1.5秒，提前到位则立即继续，未到位也放行；RM反馈失效仍停车并蜂鸣约5秒。屏幕9F:Y/N表示是否收到主动到位帧。舵机槽位只下发角度、不等待反馈。</p>
 </section>
@@ -47,20 +53,24 @@ const hex=b=>Array.from(b,x=>x.toString(16).padStart(2,'0').toUpperCase()).join(
 function frame(cmd,payload=[]){return [170,85,cmd,...payload,(cmd+payload.reduce((a,b)=>a+b,0))&255,13,10]}
 function log(text){const time=new Date().toLocaleTimeString('zh-CN',{hour12:false});if($('log').textContent==='等待连接…')$('log').textContent='';$('log').textContent+='['+time+'] '+text+'\n';if($('log').textContent.length>24000)$('log').textContent=$('log').textContent.slice(-16000);$('log').scrollTop=$('log').scrollHeight}
 function status(text){$('status').textContent=text}
-function controls(){const live=!!port&&reading;$('start').disabled=!live||busy||running;$('connect').disabled=!!port||busy;$('disconnect').disabled=!live;$('abort').disabled=!live;$('task').disabled=busy||running;$('batch').disabled=busy||running}
+function controls(){const live=!!port&&reading;$('start').disabled=!live||busy||running;$('connect').disabled=!!port||busy;$('disconnect').disabled=!live;$('abort').disabled=!live;$('lightApply').disabled=!live||busy;$('lightOff').disabled=!live||busy;$('task').disabled=busy||running;$('batch').disabled=busy||running}
 function taskBytes(){const text=$('task').value.trim();if(!/^[1-6]{3}\+[1-6]{3}\+[1-6]{3}\+[1-6]{3}$/.test(text))throw Error('任务码须为四组三位1～6的数字，用加号分隔');const groups=text.split('+');if([0,2].some(i=>new Set(groups[i]).size!==3)||[1,3].some(i=>[...groups[i]].sort().join('')!=='123'))throw Error('每批三种颜色不能重复，环号必须是1/2/3的排列');if([...groups[2]].some(c=>!groups[0].includes(c)))throw Error('两批应包含相同三种颜色');const digits=groups.join('');return Array.from({length:6},(_,i)=>parseInt(digits.slice(i*2,i*2+2),16))}
 function preview(){try{taskBytes();const groups=$('task').value.trim().split('+');$('batch').options[0].text='第一批：'+groups[0];$('batch').options[1].text='第二批：'+groups[2];const group=groups[$('batch').value==='1'?0:2];$('order').textContent=[...group].map((c,i)=>names[c]+' → '+['A槽30°','B槽150°','C槽270°'][i]).join('，');$('frames').textContent='启动：'+hex(frame(0x1E,[Number($('batch').value)]))+'  |  中止：'+hex(frame(6))}catch(e){$('order').textContent=e.message}}
 function cancelPending(error){if(pending){const p=pending;pending=null;clearTimeout(p.timer);p.reject(error)}}
-function feed(bytes){rx.push(...bytes);while(rx.length){if(rx[0]!==170){rx.shift();continue}if(rx.length<2)return;if(rx[1]!==85){rx.shift();continue}if(rx.length<3)return;const lengths={6:6,0x1B:12,0x1E:7};const length=lengths[rx[2]];if(!length){rx.shift();continue}if(rx.length<length)return;const f=rx.slice(0,length);const sum=f.slice(2,-3).reduce((a,b)=>a+b,0)&255;if(f[length-2]!==13||f[length-1]!==10||f[length-3]!==sum){rx.shift();continue}rx.splice(0,length);log('RX '+hex(f));if(pending&&hex(pending.frame)===hex(f)){const p=pending;pending=null;clearTimeout(p.timer);p.resolve()}}}
+function feed(bytes){rx.push(...bytes);while(rx.length){if(rx[0]!==170){rx.shift();continue}if(rx.length<2)return;if(rx[1]!==85){rx.shift();continue}if(rx.length<3)return;const lengths={6:6,0x1B:12,0x1E:7,0x1F:7};const length=lengths[rx[2]];if(!length){rx.shift();continue}if(rx.length<length)return;const f=rx.slice(0,length);const sum=f.slice(2,-3).reduce((a,b)=>a+b,0)&255;if(f[length-2]!==13||f[length-1]!==10||f[length-3]!==sum){rx.shift();continue}rx.splice(0,length);log('RX '+hex(f));if(pending&&hex(pending.frame)===hex(f)){const p=pending;pending=null;clearTimeout(p.timer);p.resolve()}}}
 function write(bytes){const selected=port;const job=txChain.catch(()=>{}).then(async()=>{if(!selected||selected!==port||!reading)throw Error('串口已断开');const w=selected.writable.getWriter();try{await w.write(new Uint8Array(bytes));log('TX '+hex(bytes))}finally{w.releaseLock()}});txChain=job;return job}
 async function command(bytes){if(pending)throw Error('上一条指令尚未确认');let waiter;const ack=new Promise((resolve,reject)=>{waiter={frame:bytes,resolve,reject,timer:setTimeout(()=>{if(pending===waiter){pending=null;reject(Error('3秒内未收到车端确认，请看车载屏；本页不会自动重发启动指令'))}},3000)};pending=waiter});const sent=write(bytes).catch(e=>{cancelPending(e);throw e});await Promise.all([sent,ack])}
 async function readLoop(selected){try{reader=selected.readable.getReader();while(reading&&port===selected){const result=await reader.read();if(result.done)break;feed(result.value)}}catch(e){log('接收结束：'+e.message)}finally{if(reader){reader.releaseLock();reader=null}reading=false;cancelPending(Error('串口断开'));if(port===selected){try{await txChain}catch(e){}try{await selected.close()}catch(e){}port=null;$('connection').textContent='已断开';controls()}}}
 $('connect').onclick=async()=>{if(port||busy)return;busy=true;controls();try{if(!navigator.serial)throw Error('需要使用Chrome或Edge打开本页');const selected=await navigator.serial.requestPort();await selected.open({baudRate:Number($('baud').value),dataBits:8,stopBits:1,parity:'none',flowControl:'none'});port=selected;reading=true;rx=[];running=false;$('connection').textContent='已连接 @115200';status('已连接，可以启动原料区。');readLoop(selected)}catch(e){status(e.message)}finally{busy=false;controls()}};
 $('disconnect').onclick=async()=>{epoch++;reading=false;cancelPending(Error('主动断开'));if(reader)try{await reader.cancel()}catch(e){}status('已断开；断开串口不会自动停止车端动作。');controls()};
-$('start').onclick=async()=>{if(busy||running)return;let digits;try{digits=taskBytes()}catch(e){status(e.message);return}busy=true;const token=++epoch;controls();try{status('正在注入任务码…');await command(frame(0x1B,digits));if(token!==epoch)return;status('正在启动原料区…');running=true;await command(frame(0x1E,[Number($('batch').value)]));if(token!==epoch)return;status('车端已确认启动，当前朝向已记为90°。正在定位并等待三区报告，中下区自动抓取，左上/右上停在WAIT TARGET；进度与故障请看车载屏。')}catch(e){if(token===epoch)status(e.message)}finally{busy=false;controls()}};
+$('start').onclick=async()=>{if(busy||running)return;let digits;try{digits=taskBytes()}catch(e){status(e.message);return}busy=true;const token=++epoch;controls();try{status('正在注入任务码…');await command(frame(0x1B,digits));if(token!==epoch)return;status('正在启动原料区…');running=true;await command(frame(0x1E,[Number($('batch').value)]));if(token!==epoch)return;status('车端已确认启动，当前朝向已记为90°。正在定位并等待三区报告，按区域自动抓取三块，返回后发送下一物料颜色；进度与故障请看车载屏。')}catch(e){if(token===epoch)status(e.message)}finally{busy=false;controls()}};
 $('abort').onclick=async()=>{epoch++;cancelPending(Error('已中止'));busy=true;controls();try{await command(frame(6));running=false;status('车端已确认中止，机构停止，夹爪保持当前角度。')}catch(e){status(e.message)}finally{busy=false;controls()}};
 $('clear').onclick=()=>{$('log').textContent=''};
 $('copy').onclick=async()=>{try{await navigator.clipboard.writeText(hex(frame(0x1E,[Number($('batch').value)])));status('已复制启动帧')}catch(e){status('启动帧已显示在串口记录上方，可手动复制')}};
+$('lightPct').oninput=()=>{$('lightValue').textContent=$('lightPct').value};
+async function setLight(percent){if(busy)return;if(!Number.isInteger(percent)||percent<0||percent>100){status('灯光亮度须为0～100的整数');return}busy=true;controls();try{await command(frame(0x1F,[percent]));status('车端已确认灯光亮度：'+percent+'%')}catch(e){status(e.message)}finally{busy=false;controls()}}
+$('lightApply').onclick=()=>setLight(Number($('lightPct').value));
+$('lightOff').onclick=()=>{$('lightPct').value='0';$('lightValue').textContent='0';return setLight(0)};
 $('task').oninput=preview;$('batch').onchange=preview;preview();controls();
 </script>
 </body>

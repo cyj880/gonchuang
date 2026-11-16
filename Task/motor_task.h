@@ -48,10 +48,12 @@
        ZigBee(UART7) 收到的脉冲定距命令（串口助手调车 + 里程计标定）        */
 #define MOTOR_TASK_AUTO_DEMO     0
 
-/* 路线扫码调试开关：0=原到站停鸣500ms后继续(调试阶段)；1=启用缓行找码。
+/* 路线扫码调试开关：0=原到站停鸣500ms后继续(无视觉调试阶段)；1=启用缓行找码。
    打开扫码后：到扫码区自动创建UART8转发任务(向显示屏转发任务码)，
-   扫码成功即删除该任务；开关为0时两者都不会发生。 */
-#define MOTOR_ROUTE_QR_SCAN_ENABLE 0
+   扫码成功即删除该任务；开关为0时两者都不会发生。
+   2026-11-16 重新开启：扫码区按 debug_qr_scan_dir 方向 5RPM 缓行找码，
+   扫到码即停车并上屏任务码；300000 脉冲(约458mm)内未扫到则报 no next。 */
+#define MOTOR_ROUTE_QR_SCAN_ENABLE 1
 
 /* ==================== 对外接口 ==================== */
 
@@ -105,12 +107,12 @@ typedef struct
 {
     uint8_t batch, pick, color, region; /* batch/pick从1起；region=1中下/2左上/3右上 */
 } MotorGrabRegion_t;
-uint8_t Motor_GrabGetRegion(MotorGrabRegion_t *out); /* 1=已收区域等待机构参数；只读原子快照 */
+uint8_t Motor_GrabGetRegion(MotorGrabRegion_t *out); /* 1=三区抓取进行中；只读原子快照 */
 enum { MOTOR_GRAB_WAIT_LIFT = 1, MOTOR_GRAB_WAIT_BELT = 2, MOTOR_GRAB_WAIT_RM = 4 };
 typedef struct
 {
     uint8_t active, pick, step, started, servo, axes, waiting;
-    uint8_t stage, vision_tx; /*stage:0纯动作抓取、1到站准备、2对位后准备、3中下区抓取；vision_tx仅表示STM32已下发mode4，不是RDK应答。*/
+    uint8_t stage, vision_tx, region; /*stage:0纯动作抓取、1到站准备、2对位后准备、3三区抓取；vision_tx仅表示STM32已下发mode4，不是RDK应答。*/
     uint8_t feedback; /*丝杆/同步带9F主动到位帧标志，位定义同MOTOR_GRAB_WAIT_*。*/
     int32_t lift_target, belt_target; /*丝杆为负坐标；目标仅对应axes中的轴。*/
     uint32_t elapsed_ms;

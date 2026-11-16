@@ -6,6 +6,7 @@
 #include "arm_m2006.h"
 #include "lift_zdt.h"
 #include "belt_zdt.h"
+#include "Light.h"
 
 /* ================= 帧接收状态机（串口中断里逐字节喂入） =================
    当前网页20/21保存应答协议：CRC帧先发布单帧信箱，route_rx_poll任务中保存/回读确认。
@@ -93,9 +94,12 @@ static uint16_t route_crc_byte(uint16_t crc, uint8_t byte)
    无锁时两帧字节交错 -> 网页与串口助手都收到坏帧。帧级锁保证一帧完整发完。 */
 static SemaphoreHandle_t s_uart7_tx_mutex;
 static StaticSemaphore_t s_uart7_tx_mutex_mem;
+/* 独立亮度信箱，不能覆盖运动/06命令；未处理的连续设置以最后一条为准。 */
+static volatile uint16_t light_request;
 
 void route_rx_init(void)
 {
+    light_request = 0;
     s_uart7_tx_mutex = xSemaphoreCreateMutexStatic(&s_uart7_tx_mutex_mem);
 }     /* [0]=第一批 [1]=第二批 */
 
@@ -192,6 +196,8 @@ void route_rx_byte(uint8_t ch)
         else if (ch == CMD_BELT_POS) { rx_p_idx = 0; rx_p_len = 4; rx_state = RX_P_DATA; }
         else if (ch == CMD_GRAB_SEQ) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_TASK_INJECT) { rx_p_idx = 0; rx_p_len = 6; rx_state = RX_P_DATA; }
+        else if (ch == CMD_STATION_RUN) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
+        else if (ch == CMD_LIGHT_PWM) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_RAW_RUN) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_PLACE_SEQ) { rx_p_idx = 0; rx_p_len = 1; rx_state = RX_P_DATA; }
         else if (ch == CMD_POS_ABORT || ch == CMD_RUNALL || ch == CMD_STACK_ALIGN)
@@ -316,13 +322,14 @@ void route_rx_byte(uint8_t ch)
             else if (rx_cmd == CMD_POS_ADV) bmax = 5;              /*0直线/1右前/2绝对yaw/3左转/4右转/5右后*/
             else if (rx_cmd == CMD_DEBUG_RUN) bmax = 3;            /*1批次1/2批次2/3两批连续*/
             else if (rx_cmd == CMD_GRAB_SEQ) bmax = 3;             /*0=按当前序号 1~3=固定第几块*/
+            else if (rx_cmd == CMD_LIGHT_PWM) bmax = 100;          /* PI6亮度百分比 */
             else if (rx_cmd == CMD_RAW_RUN) bmax = 2;              /*独立原料区批次1/2*/
-            else if (rx_cmd == CMD_PLACE_SEQ) bmax = 4;            /*1首轮粗加工/2次轮粗加工/3首轮暂存/4次轮暂存*/
+            else if (rx_cmd == CMD_STATION_RUN || rx_cmd == CMD_PLACE_SEQ) bmax = 4;            /*1首轮粗加工/2次轮粗加工/3首轮暂存/4次轮暂存*/
             else if (rx_cmd == CMD_TASK_INJECT) bmax = 0xFF;       /*任务码压缩字节, 半字节校验在应用层*/
             else if (rx_cmd == CMD_CHAIN)  bmax = 4;              /*方向: 仅1=右前 4=左前合法(见下)*/
             else { rx_state = RX_H1; break; }
             if (rx_cmd == CMD_CHAIN && ch != 1 && ch != 4) { rx_state = RX_H1; break; }
-            if ((rx_cmd == CMD_DEBUG_RUN || rx_cmd == CMD_PLACE_SEQ || rx_cmd == CMD_RAW_RUN) && ch < 1)
+            if ((rx_cmd == CMD_DEBUG_RUN || rx_cmd == CMD_PLACE_SEQ || rx_cmd == CMD_RAW_RUN || rx_cmd == CMD_STATION_RUN) && ch < 1)
             { rx_state = RX_H1; break; }
             if (ch > bmax) { rx_state = RX_H1; break; }
             rx_p_dir = ch;                 /*复用: 03存方向, 05存子命令*/
@@ -349,7 +356,7 @@ void route_rx_byte(uint8_t ch)
                 rx_cmd == CMD_DEBUG_RUN || rx_cmd == CMD_RDK_CENTER || rx_cmd == CMD_RING_ALIGN ||
                 rx_cmd == CMD_ARM_ANGLE || rx_cmd == CMD_LIFT_POS ||
                 rx_cmd == CMD_SERVO_ANGLE || rx_cmd == CMD_BELT_POS ||
-                rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_TASK_INJECT || rx_cmd == CMD_PLACE_SEQ || rx_cmd == CMD_RAW_RUN)
+                rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_TASK_INJECT || rx_cmd == CMD_PLACE_SEQ || rx_cmd == CMD_RAW_RUN || rx_cmd == CMD_LIGHT_PWM || rx_cmd == CMD_STATION_RUN)
             {
                 /* 位置命令在帧尾通过后再提交（见 RX_T2） */
                 rx_state = RX_T1;
@@ -385,7 +392,11 @@ void route_rx_byte(uint8_t ch)
     case RX_T2:
         if (ch == FRAME_TAIL2)
         {
-            if (rx_cmd == CMD_PULSE)
+            if (rx_cmd == CMD_LIGHT_PWM)
+            {
+                light_request = (uint16_t)(0x100u | rx_p_dir); /* 帧尾通过才发布 */
+            }
+            else if (rx_cmd == CMD_PULSE)
             {
                 uint32_t pl = (uint32_t)rx_p_bytes[0] |
                               ((uint32_t)rx_p_bytes[1] << 8) |
@@ -403,7 +414,7 @@ void route_rx_byte(uint8_t ch)
             }
             else if (rx_cmd == CMD_BELT_POS)
             {
-                /* P=绝对坐标0~10000：上电位0、抓取1400、中心7050。 */
+                /* P=绝对坐标0~10000：上电位0、抓取1540、中心7050。 */
                 int32_t sv = (int32_t)((uint32_t)rx_p_bytes[0] |
                                ((uint32_t)rx_p_bytes[1] << 8) |
                                ((uint32_t)rx_p_bytes[2] << 16) |
@@ -612,7 +623,7 @@ void route_rx_byte(uint8_t ch)
                 if (g_cmd.cnt < 255) g_cmd.cnt++;
                 g_cmd.ready = 1;
             }
-            else if (rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_PLACE_SEQ || rx_cmd == CMD_RAW_RUN)
+            else if (rx_cmd == CMD_GRAB_SEQ || rx_cmd == CMD_PLACE_SEQ || rx_cmd == CMD_RAW_RUN || rx_cmd == CMD_STATION_RUN)
             {
                 g_cmd.type = rx_cmd;
                 g_cmd.param = rx_p_dir;                  /*1A块序选择 / 1C站点选择*/
@@ -820,6 +831,21 @@ static void route_upload_poll(void)
    route_echo_flush: 把回传FIFO里校验通过的整帧逐字节经 UART7 原样发回网页(逐帧原样回传) */
 void route_rx_poll(void)
 {
+    uint16_t request;
+    uint32_t irq_mask = __get_PRIMASK();
+    /* UART7上传期优先级0，BASEPRI临界区屏蔽不了；仅几条指令原子取信箱。 */
+    __disable_irq();
+    request = light_request;
+    light_request = 0;
+    __set_PRIMASK(irq_mask);
+    if (request & 0x100u)
+    {
+        ZbeeCmd ack = {0};
+        ack.type = CMD_LIGHT_PWM;
+        ack.param = (uint8_t)request;
+        Light_SetPercent((uint8_t)request);
+        cmd_tx_ack(&ack); /* 实际应用后ACK，ISR不发送、不控制PWM。 */
+    }
     route_upload_poll(); /* 存储/校验/ACK均在任务处理，UART7 ISR不等待。 */
     if (rx_state != RX_H1)
     {
@@ -1191,6 +1217,7 @@ void cmd_tx_ack(const ZbeeCmd *c)
             plen = 2;
         }
         break;
+    case CMD_LIGHT_PWM:
     case CMD_DEBUG_RUN:
         pl[0] = (uint8_t)(p & 0xFF); /*13=启动调试路线, 载荷为批次*/
         plen = 1;
@@ -1198,6 +1225,7 @@ void cmd_tx_ack(const ZbeeCmd *c)
     case CMD_GRAB_SEQ:
     case CMD_PLACE_SEQ:
     case CMD_RAW_RUN:
+    case CMD_STATION_RUN:
         pl[0] = (uint8_t)(p & 0xFF); /*1A块序选择 / 1C站点选择*/
         plen = 1;
         break;

@@ -9,7 +9,7 @@
 #define ARM_M2006_DIRECTION      1.0f
 #define ARM_M2006_MOVE_TIMEOUT_MS 5000u /* 独立RM动作/旧伸出流程超时10→5秒 */
 #define ARM_M2006_MIN_TARGET_DEG 0        /* 负方向机械堵转, 禁止负目标 */
-#define ARM_M2006_MAX_TARGET_DEG 500
+#define ARM_M2006_MAX_TARGET_DEG 650      /* RM绝对角度上限，串口解析与驱动共用 */
 
 typedef struct
 {

@@ -277,6 +277,8 @@ class PublisherResilienceTests(unittest.TestCase):
             self.assertTrue(t.is_alive())      # 修复前：首个坏结果即死
             self.assertGreaterEqual(link.send.call_count, 1)
             # 场景恢复为合法 3 站（新 source_ns）→ 真实帧恢复
+            # Windows单调钟可能同一tick返回相同值，模拟下一相机帧而非重用同一时刻。
+            time.sleep(0.04)
             count = link.send.call_count
             with worker.lock:
                 worker.latest_sites = [{'x': 100, 'y': 110, 'id': 1},

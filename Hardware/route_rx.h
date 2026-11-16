@@ -96,10 +96,12 @@
 #define CMD_ARM_ANGLE    0x16    /* UART7: AA55 16 ANGLE_L ANGLE_H SUM 0D0A */
 #define CMD_LIFT_POS     0x17    /* UART7: AA55 17 P0 P1 P2 P3 SUM 0D0A，uint32小端 */
 #define CMD_SERVO_ANGLE  0x18    /* UART7: AA55 18 A1L A1H A2L A2H SUM 0D0A，两个uint16小端 */
-#define CMD_BELT_POS     0x19    /* UART7: AA55 19 P0 P1 P2 P3 SUM 0D0A，0~10000，0上电/1400抓取/7050中心 */
+#define CMD_BELT_POS     0x19    /* UART7: AA55 19 P0 P1 P2 P3 SUM 0D0A，0~10000，0上电/1540抓取/7050中心 */
 #define CMD_GRAB_SEQ     0x1A    /* UART7: AA55 1A M SUM 0D0A，M:00=按当前序号自动 01~03=固定第几块 */
 #define CMD_TASK_INJECT  0x1B    /* UART7: AA55 1B D0..D5 SUM 0D0A，12位任务码压缩6字节(D_i=digit[2i]<<4|digit[2i+1], 每半字节1~6) */
 #define CMD_STACK_ALIGN  0x1D    /* UART7: AA55 1D SUM 0D0A, 启动码垛对位(0x14单中心点闭环) */
+#define CMD_STATION_RUN  0x22    /* AA55 22 S SUM 0D0A：独立站点视觉+取放，S同1C(1~4) */
+#define CMD_LIGHT_PWM    0x1F    /* AA55 1F P SUM 0D0A：PI6亮度P=0~100，执行后原样ACK */
 #define CMD_RAW_RUN      0x1E    /*AA55 1E B SUM 0D0A：B=1/2，当前朝向记90°，独立原料区全流程*/
 #define CMD_PLACE_SEQ    0x1C    /* UART7: AA55 1C S SUM 0D0A，1首轮粗加工/2次轮粗加工/3首轮暂存/4次轮暂存，直接放三块 */
 /* 14调试帧方向：1正向、0禁用、-1反向，至少启用一轴；短帧AA 55 14 14 0D 0A使用默认方向。 */

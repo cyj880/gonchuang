@@ -2,6 +2,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "LED.h"
+#include "Light.h"
 #include "Servo.h"
 #include "Buzzer.h"
 #include "Delay.h"
@@ -23,11 +24,11 @@
 #include "belt_zdt.h"
 
 /* ---- 放料夹爪角度调节（180°舵机，单位：度，范围0~180；修改后重新编译烧录）----
-   两轮粗加工、第一轮暂存及网页1C放料共用；原料区1A抓取角度独立。
+   两轮粗加工、两轮暂存及网页1C放料/取回共用；原料区1A/1E抓取角度独立。
    当前角度越大夹得越紧：夹紧力度不足可适当增大，松不开可适当减小松开角度。
    放料到位后先稳定等待800ms，直接到松开角度并等400ms。 */
-#define PLACE_CLAW_CLOSE_DEG   79.5f  /* 夹紧物料的角度(2026-11-08机械-30°, 原109.5°) */
-#define PLACE_CLAW_OPEN_DEG    28.0f  /* 完全松开物料的角度(机械-30°, 原48°) */
+#define PLACE_CLAW_CLOSE_DEG   87.5f  /* 非原料区夹紧角：原79.5°加8°；原料区参数独立 */
+#define PLACE_CLAW_OPEN_DEG    30.0f  /* 粗加工/暂存放料及取回张开角：36°→30°；原料区参数独立 */
 
 /* 导出给motor_task.c使用，只需修改上方两个#define。 */
 const float g_place_claw_close_deg = PLACE_CLAW_CLOSE_DEG;
@@ -119,6 +120,7 @@ int main(void)
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_4);
 
     /* 时钟已由 startup 文件中的 SystemInit() 配置为 168MHz（HSE 12MHz） */
+    Light_Init();          /* PI6灯光PWM，上电默认关闭 */
     LED_Init();
     LED_Green_On();         /* 板载绿色指示灯 PF14 常亮 */
     LED_Red_On();           /* 板载红色指示灯 PE11 常亮 */
@@ -195,8 +197,8 @@ int main(void)
     startup_create_task(OdomTask, "Odom", 2048, 3);    /* 连续RS485里程计 */
     startup_create_task(LCD_Task, "LCD", 1024, 1);     /* TFT显示 */
 //    UART8_ReportTask 不在此创建：由 MotorTask 在到扫码区开始找码时动态创建
-//    (qr_report_handle)，扫码成功后删除——开关见 motor_task.h 的
-//    MOTOR_ROUTE_QR_SCAN_ENABLE（调试阶段为0，到扫码区不会创建）。
+//    (qr_report_handle)，之后全程保留1s轮询转发任务码/状态行——开关见
+//    motor_task.h 的 MOTOR_ROUTE_QR_SCAN_ENABLE（当前=1，到扫码区自动创建）。
 
     LCD_ShowString(0, 72, "Starting RTOS...", LCD_6X8);
     vTaskStartScheduler();

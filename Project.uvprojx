@@ -885,6 +885,16 @@
           <GroupName>Hardware</GroupName>
           <Files>
             <File>
+              <FileName>Light.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Hardware\Light.c</FilePath>
+            </File>
+            <File>
+              <FileName>Light.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Hardware\Light.h</FilePath>
+            </File>
+            <File>
               <FileName>LED.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\Hardware\LED.c</FilePath>

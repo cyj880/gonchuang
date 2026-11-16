@@ -19,11 +19,11 @@
    实车方向反了改 LIFT_POS_DOWN_DIR。 */
 /* 手册5.3.12(Emm固件0xFD)：速度字段0000-0BB8=0-3000RPM。
  * 丝杆正常定位速度统一3000RPM，自动流程及独立0x17调试共用。
- * 加速度0-255档，每(256-acc)*50us加减1RPM → acc=255即50us/RPM(20000RPM/s)，
- * 为曲线加减速最快档；acc=0为不加减速直接启动。竖直丝杆负荷重，高速更易
+ * 加速度0-255档，每(256-acc)*50us加减1RPM → 当前acc=248为400us/RPM(2500RPM/s)，
+ * acc=255为曲线最快档；acc=0为不加减速直接启动。竖直丝杆负荷重，高速更易
  * 触发堵转保护(屏显Protect!)，先降档再降速。 */
 #define LIFT_POS_SPEED_RPM         3000u
-#define LIFT_POS_ACC               255u
+#define LIFT_POS_ACC               248u   /* 正常定位加速度档位：255→248；自动流程及0x17共用 */
 #define LIFT_POS_MAX_PUL           63775u /* 新丝杆全行程上限：原255100/4；坐标0=回零最高点 */
 #define LIFT_POS_DOWN_DIR          1u      /* 下行dir字节: 0=CW(向上) 1=CCW(向下) */
 

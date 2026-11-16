@@ -48,7 +48,7 @@ DEFAULT_CALIB = '/home/sunrise/logistics_vision_data/calibration/camera_640x480.
 
 
 # ---------------------------------------------------------------------------
-# 摄像头：V4L2 + MJPG + 640x480@30，后台线程只留最新帧
+# 摄像头：V4L2 + MJPG + 640x480@30，独立采集进程、监督线程只留最新帧
 # ---------------------------------------------------------------------------
 def _camera_capture(connection, device, width, height, fps):
     """唯一拥有V4L2句柄的进程；父进程可终止被底层read/open阻塞的采集。"""
@@ -136,6 +136,8 @@ class Camera:
                 if hasattr(self, 'real_w') and metadata[:2] != (self.real_w, self.real_h):
                     raise RuntimeError('重开后分辨率变化，拒绝沿用旧去畸变映射')
                 self.real_w, self.real_h, self.real_fps, self.real_fourcc = metadata
+                if (self.real_w, self.real_h) != self._requested[:2]:
+                    print('[camera][警告] 实际分辨率不同于请求，请核对相机配置及标定')
                 print(f'[camera] {self.device} 实际生效: {self.real_w}x{self.real_h}@'
                       f'{self.real_fps:.0f} fourcc={self.real_fourcc}')
                 self._last_frame_at = time.monotonic()

@@ -24,7 +24,7 @@ def fake_capture(connection, device, width, height, fps):
     if first:
         Path(device).touch()
     connection.send(('opened', (width, height, fps, 'MJPG')))
-    connection.send(('frame', time.monotonic_ns(), np.full((4, 4, 3), 1 if first else 2, np.uint8)))
+    connection.send(('frame', time.monotonic_ns(), np.full((height, width, 3), 1 if first else 2, np.uint8)))
     if first:
         if device.endswith('exit'):
             connection.close()
@@ -33,7 +33,7 @@ def fake_capture(connection, device, width, height, fps):
         threading.Event().wait()
     try:
         while True:
-            connection.send(('frame', time.monotonic_ns(), np.full((4, 4, 3), 2, np.uint8)))
+            connection.send(('frame', time.monotonic_ns(), np.full((height, width, 3), 2, np.uint8)))
             time.sleep(0.03)
     except (BrokenPipeError, EOFError, OSError):
         pass
@@ -166,6 +166,22 @@ class CameraTests(unittest.TestCase):
         self.assertEqual(connection.send.call_args.args[0], ('error', 'read failed'))
         handle.release.assert_called_once()
         connection.close.assert_called_once()
+
+    def test_failed_reads_report_and_retain_mjpg_setting_order(self):
+        handle = Mock()
+        handle.isOpened.return_value = True
+        handle.get.side_effect = [0, 640, 480, 30]
+        handle.read.return_value = (False, None)
+        connection = Mock()
+        with patch.object(cv2, 'VideoCapture', return_value=handle), \
+                patch.object(camera_base.time, 'sleep'):
+            camera_base._camera_capture(connection, 'fake', 640, 480, 30)
+        self.assertEqual(handle.read.call_count, 50)
+        self.assertEqual(connection.send.call_args.args[0][0], 'error')
+        self.assertEqual([call.args[0] for call in handle.set.call_args_list],
+                         [cv2.CAP_PROP_FOURCC, cv2.CAP_PROP_FRAME_WIDTH,
+                          cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS])
+        handle.release.assert_called_once()
 
     def test_open_fail_and_no_frame_have_bounded_recovery(self):
         for suffix in ('hang', 'exit'):

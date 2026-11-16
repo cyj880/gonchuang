@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>粗加工与暂存区调试</title>
+<style>
+:root{font-family:"Microsoft YaHei",system-ui,sans-serif;color:#18312d;background:#edf3ef;font-size:15px}*{box-sizing:border-box}body{max-width:1050px;margin:0 auto;padding:36px 20px}h1{font-size:30px;margin:0 0 8px}p{line-height:1.7;color:#557069}small{color:#587269}main{display:grid;grid-template-columns:1.1fr 1fr;gap:18px;margin-top:25px}.card{background:white;border:1px solid #d5e3db;border-radius:16px;padding:24px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0}button,input,select{font:inherit;border-radius:9px;border:1px solid #c9d8ce;padding:11px 14px}button{cursor:pointer;background:#f0f5f1;color:#203b32}button:disabled{opacity:.45;cursor:default}.primary{background:#176b50;color:white;border-color:#176b50;font-weight:bold;padding:16px 20px}.stop{background:#b73535;color:white;border-color:#b73535;font-weight:bold}input{width:100%;letter-spacing:1px}label{display:block;margin-top:18px;font-weight:bold}select{background:white}.status{padding:12px 15px;background:#e3eee7;border-radius:9px;line-height:1.6}ol{padding-left:24px;line-height:1.8}li{padding:5px 0}pre{background:#132820;color:#c9e4d1;border-radius:12px;min-height:160px;max-height:300px;overflow:auto;padding:16px;white-space:pre-wrap;word-break:break-all;font:12px/1.8 Consolas,monospace}.wide{grid-column:1/-1}.badge{display:inline-block;color:#176b50;background:#dfede4;padding:5px 10px;border-radius:20px;font-size:12px}table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}td,th{padding:9px;border-bottom:1px solid #e1e9e3;text-align:left}.note{font-size:13px}a{color:#176b50}@media(max-width:750px){main{grid-template-columns:1fr}.wide{grid-column:auto}body{padding:24px 14px}.card{padding:20px}}
+</style>
+</head>
+<body>
+<span class="badge">粗加工 / 暂存 · 独立调试</span>
+<h1 style="margin-top:15px">一键校准与站点取放</h1>
+<p>将车摆在粗加工区或暂存区的作业位置，摄像头朝向目标圆环，三块物料按本批顺序装在A/B/C槽。选择站点后可一键完成视觉校准与取放；粗加工放完再取回，暂存只放置，独立调试结束保持停车。</p>
+<p class="note"><a href="原料区调试.html">切换到原料区独立调试</a></p>
+<main>
+<section class="card">
+<h2 style="margin-top:0;font-size:19px">连接与启动</h2>
+<div class="row"><select id="baud" aria-label="串口波特率"><option>115200</option></select><button id="connect">连接串口</button><button id="disconnect" disabled>断开</button><span id="connection">未连接</span></div>
+<label for="lightPct">灯光目标亮度：<span id="lightValue">0</span>%</label>
+<input type="range" id="lightPct" value="0" min="0" max="100" step="1" style="padding:0">
+<div class="row"><button id="lightApply" disabled>设置灯光亮度</button><button id="lightOff" disabled>关闭灯光</button></div>
+<small>PI6接灯光驱动器PWM端并共地，1kHz、高电平有效。上电默认关闭；拖动后点击设置，收到车端确认才显示成功。运行中也可调光。</small>
+<label for="task">任务码</label><input id="task" value="156+123+516+231" maxlength="15" autocomplete="off" spellcheck="false">
+<small>启动时先注入此任务码，收到车端确认后再启动本站流程。</small>
+<label for="batch">调试站点</label><select id="batch"><option value="1">第一轮粗加工区</option><option value="2">第二轮粗加工区</option><option value="3">第一轮暂存区</option><option value="4">第二轮暂存区（码垛）</option></select>
+<label for="runMode">执行范围</label><select id="runMode"><option value="full">视觉校准 → 自动取放</option><option value="mechanism">仅机构取放（跳过视觉）</option></select>
+<p id="order" class="note"></p>
+<div class="row"><button id="start" class="primary" disabled>一键启动本站</button><button id="abort" class="stop" disabled>立即中止 06</button></div>
+<div id="status" class="status" role="status">连接UART7对应串口后即可启动。请使用Chrome或Edge。</div>
+<p class="note">main.c的IMU_Select：0=HWT101（当前选择，TX接PG9、共地，上位机已设100Hz，STM32只接收，等HWT:READY）；1=轮趣（TX接PG9，原921600，等LQ :READY）。共地、仅接所选一款，修改后重新编译上电。网页串口仍为UART7 115200。本站独立调试完成后保持停车；重新开始前先点“立即中止”解除本页运行锁。车载屏可查看流程与 no next 具体原因。</p>
+</section>
+<section class="card">
+<h2 style="margin-top:0;font-size:19px">本次执行流程</h2>
+<p id="summary" class="note"></p>
+<ol>
+<li id="visionFlow"></li>
+<li>完整模式校准完成后，当前航向重标为粗加工270°或暂存0°；退出视觉，停车100ms，建立四轮位置保持。仅机构模式直接从位置保持开始。</li>
+<li>按任务码顺序使用A/B/C槽（30°/150°/270°，舵机不等待）。首块同步带1540、RM18°、丝杆21500取料；87.5°夹紧，固定等400ms。</li>
+<li>丝杆先抬至15000（第二轮暂存为1000），再下发同步带与RM到目标环，随后丝杆单独下放；按现有站点超时和到位规则衔接。下放时提前转270°舵机到下一物料原槽，不等反馈。</li>
+<li>放置目标如下表；下放等待结束后稳定100ms，夹爪30°直接张开、驻留100ms。前两块先回取料高度，再收同步带/RM并取下一块。</li>
+<li id="finishFlow"></li>
+<li>运行中可调灯光；06中止机构及底盘，保持夹爪和灯光亮度。进度与到位/超时故障请查看车载屏，网页只确认指令被接受，不将ACK视为动作完成。</li>
+</ol>
+<table><thead><tr><th>圆环</th><th>同步带</th><th>RM</th><th>丝杆</th></tr></thead><tbody id="targets"></tbody></table>
+<p class="note">无需上传路线，不消费路线缓存。仅本页完整模式会把当前朝向作为本站名义航向，不会额外原地转弯。第二轮暂存须预先摆好第一轮物料，并按同色第一轮物料所在环码垛。首个有效视觉结果未到时，每500ms重发本站模式；超时放行不代表机械实际到位。</p>
+</section>
+<section class="card wide"><div class="row" style="margin-top:0"><b>串口记录</b><button id="clear">清空</button><button id="copy">复制启动帧</button></div><small id="frames"></small><pre id="log" aria-live="polite">等待连接…</pre></section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let port=null,reader=null,reading=false,busy=false,running=false,pending=null,rx=[],txChain=Promise.resolve(),epoch=0;
+const names={1:'红',2:'黄',3:'蓝',4:'绿',5:'黑',6:'浅蓝'};
+const hex=b=>Array.from(b,x=>x.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+function frame(cmd,payload=[]){return [170,85,cmd,...payload,(cmd+payload.reduce((a,b)=>a+b,0))&255,13,10]}
+function log(text){const time=new Date().toLocaleTimeString('zh-CN',{hour12:false});if($('log').textContent==='等待连接…')$('log').textContent='';$('log').textContent+='['+time+'] '+text+'\n';if($('log').textContent.length>24000)$('log').textContent=$('log').textContent.slice(-16000);$('log').scrollTop=$('log').scrollHeight}
+function status(text){$('status').textContent=text}
+function controls(){const live=!!port&&reading;$('start').disabled=!live||busy||running;$('connect').disabled=!!port||busy;$('disconnect').disabled=!live;$('abort').disabled=!live;$('lightApply').disabled=!live||busy;$('lightOff').disabled=!live||busy;$('task').disabled=busy||running;$('batch').disabled=busy||running;$('runMode').disabled=busy||running}
+function taskBytes(){const text=$('task').value.trim();if(!/^[1-6]{3}\+[1-6]{3}\+[1-6]{3}\+[1-6]{3}$/.test(text))throw Error('任务码须为四组三位1～6的数字，用加号分隔');const groups=text.split('+');if([0,2].some(i=>new Set(groups[i]).size!==3)||[1,3].some(i=>[...groups[i]].sort().join('')!=='123'))throw Error('每批三种颜色不能重复，环号必须是1/2/3的排列');if([...groups[2]].some(c=>!groups[0].includes(c)))throw Error('两批应包含相同三种颜色');const digits=groups.join('');return Array.from({length:6},(_,i)=>parseInt(digits.slice(i*2,i*2+2),16))}
+function selectedCommand(){return frame($('runMode').value==='full'?0x22:0x1C,[Number($('batch').value)])}
+function preview(){try{taskBytes();const groups=$('task').value.trim().split('+'),selection=Number($('batch').value),batch=selection===2||selection===4?2:1,storage=selection>=3,stack=selection===4,full=$('runMode').value==='full';const colors=groups[batch===1?0:2].split('');const rings=stack?colors.map(c=>groups[1][groups[0].indexOf(c)]):groups[batch===1?1:3].split('');$('order').textContent=colors.map((c,i)=>['A槽30°','B槽150°','C槽270°'][i]+'：'+names[c]+' → 圆环'+rings[i]).join('；');$('summary').textContent=(storage?'暂存区':'粗加工区')+' · 第'+batch+'轮 · '+(full?'视觉校准后自动取放':'仅机构取放，不发送视觉模式')+' · 完成后停车';$('visionFlow').textContent=full?'启动时将当前朝向记为'+(storage?'0':'270')+'°；同阶段下发RM190°、同步带7100、夹爪25°张开，丝杆保持当前位置。立即启动'+(stack?'RDK码垛模式5，按单中心XY及视觉Yaw校准。':'RDK三环模式1，依次执行平均XY→视觉Yaw→平均XY校准，中心(320,240)±3像素，Yaw±0.5°。'):'仅机构模式跳过机构伸出和视觉校准，确认车已对准圆环后再启动。';$('finishFlow').textContent=storage?'暂存区：第三块张开固定100ms后，丝杆先单独回12500，固定等1秒，再同时下发同步带1540、RM18°、270°舵机A槽30°。同步带最多500ms、RM最多1000ms，舵机不等；完成后停车，不取回、不加载路线。':'粗加工区：第三块放完后丝杆回25000，按保存的扫码顺序从原目标环取回。同步带/RM先对环（带最多700ms、RM最多800ms），丝杆再下放56750并同拍转原槽（丝杆最多1800ms、舵机不等）；87.5°夹紧后丝杆抬14500（最多600ms），同步带1540与RM18°收回（分别最多500ms/800ms），丝杆20000（最多600ms），30°松开固定100ms放入原A/B/C槽，再丝杆14000（最多500ms）。第三块取回后停车，不加载路线。';$('targets').innerHTML=[[5390,306],[7200,182],[8960,313]].map((v,i)=>'<tr><td>'+(i+1)+'</td><td>'+v[0]+'</td><td>'+v[1]+'°</td><td>'+(stack?32000:56750)+'</td></tr>').join('');$('frames').textContent='启动：'+hex(selectedCommand())+'  |  中止：'+hex(frame(6))}catch(e){$('order').textContent=e.message}}
+function cancelPending(error){if(pending){const p=pending;pending=null;clearTimeout(p.timer);p.reject(error)}}
+function feed(bytes){rx.push(...bytes);while(rx.length){if(rx[0]!==170){rx.shift();continue}if(rx.length<2)return;if(rx[1]!==85){rx.shift();continue}if(rx.length<3)return;const lengths={6:6,0x1B:12,0x1C:7,0x22:7,0x1F:7};const length=lengths[rx[2]];if(!length){rx.shift();continue}if(rx.length<length)return;const f=rx.slice(0,length);const sum=f.slice(2,-3).reduce((a,b)=>a+b,0)&255;if(f[length-2]!==13||f[length-1]!==10||f[length-3]!==sum){rx.shift();continue}rx.splice(0,length);log('RX '+hex(f));if(pending&&hex(pending.frame)===hex(f)){const p=pending;pending=null;clearTimeout(p.timer);p.resolve()}}}
+function write(bytes){const selected=port;const job=txChain.catch(()=>{}).then(async()=>{if(!selected||selected!==port||!reading)throw Error('串口已断开');const w=selected.writable.getWriter();try{await w.write(new Uint8Array(bytes));log('TX '+hex(bytes))}finally{w.releaseLock()}});txChain=job;return job}
+async function command(bytes){if(pending)throw Error('上一条指令尚未确认');let waiter;const ack=new Promise((resolve,reject)=>{waiter={frame:bytes,resolve,reject,timer:setTimeout(()=>{if(pending===waiter){pending=null;reject(Error('3秒内未收到车端确认，请看车载屏；本页不会自动重发启动指令'))}},3000)};pending=waiter});const sent=write(bytes).catch(e=>{cancelPending(e);throw e});await Promise.all([sent,ack])}
+async function readLoop(selected){try{reader=selected.readable.getReader();while(reading&&port===selected){const result=await reader.read();if(result.done)break;feed(result.value)}}catch(e){log('接收结束：'+e.message)}finally{if(reader){reader.releaseLock();reader=null}reading=false;cancelPending(Error('串口断开'));if(port===selected){try{await txChain}catch(e){}try{await selected.close()}catch(e){}port=null;$('connection').textContent='已断开';controls()}}}
+$('connect').onclick=async()=>{if(port||busy)return;busy=true;controls();try{if(!navigator.serial)throw Error('需要使用Chrome或Edge打开本页');const selected=await navigator.serial.requestPort();await selected.open({baudRate:Number($('baud').value),dataBits:8,stopBits:1,parity:'none',flowControl:'none'});port=selected;reading=true;rx=[];running=false;$('connection').textContent='已连接 @115200';status('已连接，可以选择站点并启动。');readLoop(selected)}catch(e){status(e.message)}finally{busy=false;controls()}};
+$('disconnect').onclick=async()=>{epoch++;reading=false;cancelPending(Error('主动断开'));if(reader)try{await reader.cancel()}catch(e){}status('已断开；断开串口不会自动停止车端动作。');controls()};
+$('start').onclick=async()=>{if(busy||running)return;let digits;try{digits=taskBytes()}catch(e){status(e.message);return}busy=true;const token=++epoch;controls();try{status('正在注入任务码…');await command(frame(0x1B,digits));if(token!==epoch)return;const bytes=selectedCommand();status('正在启动所选站点…');running=true;await command(bytes);if(token!==epoch)return;status('车端已确认启动：'+$('batch').selectedOptions[0].text+'，'+($('runMode').value==='full'?'先视觉校准再自动取放。':'直接执行机构取放。')+'完成后停车，进度请看车载屏；重新启动前先点中止。')}catch(e){if(token===epoch)status(e.message)}finally{busy=false;controls()}};
+$('abort').onclick=async()=>{epoch++;cancelPending(Error('已中止'));busy=true;controls();try{await command(frame(6));running=false;status('车端已确认中止，机构停止，夹爪保持当前角度。')}catch(e){status(e.message)}finally{busy=false;controls()}};
+$('clear').onclick=()=>{$('log').textContent=''};
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(hex(selectedCommand()));status('已复制启动帧')}catch(e){status('启动帧已显示在串口记录上方，可手动复制')}};
+$('lightPct').oninput=()=>{$('lightValue').textContent=$('lightPct').value};
+async function setLight(percent){if(busy)return;if(!Number.isInteger(percent)||percent<0||percent>100){status('灯光亮度须为0～100的整数');return}busy=true;controls();try{await command(frame(0x1F,[percent]));status('车端已确认灯光亮度：'+percent+'%')}catch(e){status(e.message)}finally{busy=false;controls()}}
+$('lightApply').onclick=()=>setLight(Number($('lightPct').value));
+$('lightOff').onclick=()=>{$('lightPct').value='0';$('lightValue').textContent='0';return setLight(0)};
+$('task').oninput=preview;$('batch').onchange=preview;$('runMode').onchange=preview;preview();controls();
+</script>
+</body>
+</html>

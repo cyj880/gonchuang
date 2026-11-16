@@ -333,18 +333,19 @@ static void pulse_build(int32_t out[MOTOR_NUM], uint8_t dir, uint32_t n)
 #define RDK_CENTER_SLEW_RPM_S    180.0f  /*视觉速度每秒最大变化，防止突然推车*/
 #define RDK_CENTER_RAW_YAW       90.0f   /*原料区作业航向*/
 #define RDK_RAW_ARM_PRE_DEG      455     /*原料区到站先伸夹爪角度,到位后再识别转盘*/
-#define RDK_RAW_ARM_GRAB_DEG     290     /*对位完成后RM电机预定位角度(2026-11-13, 原285°)*/
+#define RDK_RAW_ARM_GRAB_DEG     435     /* 转盘定位并锁轮后的RM预定位目标 */
 /* 新丝杆：以下丝杆目标均已按旧值除以4，命令与回读直接使用新脉冲值。 */
-#define RDK_RAW_PRE_LIFT_POS     100u    /* 原料区提前准备丝杆绝对目标，不是回零动作 */
+#define RDK_RAW_PRE_LIFT_POS     2000u    /* 原料区提前准备丝杆绝对目标，不是回零动作 */
 #define RDK_RAW_LIFT_POS         21000u  /* 原纯机构抓取序列前两块收尾位置；视觉对位后不再下发 */
-#define RDK_RAW_FINISH_ARM_DEG   101     /*第三块装车后RM收起角度(2026-11-15, 原104°→102°→101°)*/
+#define RDK_RAW_FINISH_ARM_DEG   18      /* 原料区第三块装车后RM收起目标：原101°改为20° */
 #define RDK_RAW_FINISH_LIFT_POS  12500u  /*第三块装车后丝杆收起高度，确认到位再结束/回程*/
 #define RDK_RAW_BELT_POS         7040 /*原料区专用到站/收尾位置，不改变圆环站点中心*/
 #define RDK_RAW_CLAW_CLOSE_DEG   79.5f   /*原料区统一夹紧角度：真实路线及独立1A/1E共用(2026-11-15, 原79°)*/
+#define RDK_RAW_REGION_CLAW_CLOSE_DEG 87.5f /* 三区视觉抓取夹紧角度；纯机构1A沿用原角度 */
 #define RDK_RAW_SERVO180_DEG     25.0f   /*原料区统一张开角度：到站、每块入槽及第三块收尾共用(2026-11-15回调, 原28°)*/
 #define RING_STN_ARM_DEG         190     /*圆环站点(粗加工/暂存)到站预定位: RM电机角度*/
 #define RING_STN_BELT_POS        7100 /*两轮粗加工/两轮暂存共用到站位置，独立于中心标定(2026-11-15, 原7080)*/
-#define RING_STN_SERVO180_DEG    28.0f   /*两轮粗加工/暂存预定位：180°舵机提前张开角度*/
+#define RING_STN_SERVO180_DEG    25.0f   /* 两轮粗加工/暂存驶入及到站预定位张开角；放料松爪仍30° */
 #define GRAB_SERVO_DWELL_MS      400u    /*统一夹取序列: 舵机步进后驻留时间(夹紧用)*/
 #define PLACE_OPEN_DWELL_MS      100u    /*放料/取回松爪驻留: 100ms(2026-11-15, 原400ms)*/
 #define PLACE_RETRIEVE_CLOSE_DWELL_MS 300u /*取回夹紧驻留: 300ms(2026-11-15, 原400ms共用)*/
@@ -459,8 +460,7 @@ typedef enum
     PHASE_RDK_ARM_POST = 18,
     PHASE_STATION_PLACE = 19,
     PHASE_RDK_CHASSIS_HOLD = 20,
-    PHASE_RDK_GRAB_REGION_WAIT = 21, /* 区域2/3等待机构目标参数 */
-    PHASE_RDK_GRAB_NEAR = 22 /* 区域1中下专用取料序列 */
+    PHASE_RDK_GRAB_REGION = 22 /* 三区共用抓取序列，首组目标由报告区域决定 */
 } TaskPhase;
 
 /* 新任务可启动判定: 空闲 或 已完成停车。
@@ -767,14 +767,14 @@ static TickType_t   grab_step_tick = 0;
 static TickType_t   grab_trig_tick = 0;
 static TickType_t   raw_chassis_hold_tick = 0;
 
-/* 前两块收尾回7040/290°/21000；第三块同步带保持1400、RM101°/丝杆12500，舵机转首个待放物料原槽。 */
+/* 前两块收尾回7040/290°/21000；第三块同步带保持1540、RM18°/丝杆12500，舵机转首个待放物料原槽。 */
 enum { GRAB_ST_SERVO180, GRAB_ST_SERVO270, GRAB_ST_ARM, GRAB_ST_LIFT,
        GRAB_ST_BELT, GRAB_ST_BELT_ARM, GRAB_ST_BELT_SERVO270_ARM };
 typedef struct { uint8_t type; float deg; int32_t target; } GrabStep;
 static const GrabStep grab_steps[] = {
     { GRAB_ST_SERVO180, RDK_RAW_CLAW_CLOSE_DEG, 0 }, /*原料区夹紧*/
     { GRAB_ST_LIFT,     0,      12500 }, /*夹住后抬起到原料区搬运高度*/
-    { GRAB_ST_BELT_ARM, 101.0f, BELT_POS_GRAB_PUL },
+    { GRAB_ST_BELT_ARM, 18.0f, BELT_POS_GRAB_PUL },
     { GRAB_ST_LIFT,     0,      19500 },
     { GRAB_ST_SERVO180, RDK_RAW_SERVO180_DEG, 0 }, /*原料区张开*/
     { GRAB_ST_BELT_SERVO270_ARM, 290.0f, RDK_RAW_BELT_POS },
@@ -789,9 +789,14 @@ static const float grab_pick_servo270_drop[3] = {
     SERVO270_SLOT_A_DEG, SERVO270_SLOT_B_DEG, SERVO270_SLOT_C_DEG
 };
 
-/* 中下区专用；纯机构1A仍使用grab_steps，不套用本表。 */
-enum { RAW_NEAR_TARGET, RAW_NEAR_CLOSE, RAW_NEAR_LIFT, RAW_NEAR_TRANSFER,
-       RAW_NEAR_OPEN, RAW_NEAR_RETURN, RAW_NEAR_STEP_COUNT };
+/* 三区首组目标不同；仅右上夹紧后先RM450°，其余搬运/返回共用。 */
+static const struct { uint8_t axes; int32_t belt; int16_t arm; } raw_region_target[3] = {
+    { MOTOR_GRAB_WAIT_RM | MOTOR_GRAB_WAIT_LIFT | MOTOR_GRAB_WAIT_BELT, 7150, 180 }, /* 1中下 */
+    { MOTOR_GRAB_WAIT_RM | MOTOR_GRAB_WAIT_LIFT | MOTOR_GRAB_WAIT_BELT, 6450, 610 }, /* 2左上 */
+    { MOTOR_GRAB_WAIT_RM | MOTOR_GRAB_WAIT_LIFT | MOTOR_GRAB_WAIT_BELT, 7850, 610 }, /* 3右上 */
+};
+enum { RAW_REGION_TARGET, RAW_REGION_CLOSE, RAW_REGION_RIGHT_ARM, RAW_REGION_LIFT, RAW_REGION_TRANSFER,
+       RAW_REGION_OPEN, RAW_REGION_RETURN, RAW_REGION_STEP_COUNT };
 typedef struct {
     uint8_t axes, fixed_wait;
     uint16_t wait_ms;
@@ -799,22 +804,23 @@ typedef struct {
     uint32_t lift;
     int16_t arm;
     float claw;
-} RawNearStep;
-static const RawNearStep raw_near_steps[RAW_NEAR_STEP_COUNT] = {
-    { MOTOR_GRAB_WAIT_RM | MOTOR_GRAB_WAIT_LIFT, 0, 1000, 0, 21000u, 290, 0 },
-    { 0, 1, GRAB_SERVO_DWELL_MS, 0, 0, 0, RDK_RAW_CLAW_CLOSE_DEG },
+} RawRegionStep;
+static const RawRegionStep raw_region_steps[RAW_REGION_STEP_COUNT] = {
+    { MOTOR_GRAB_WAIT_RM | MOTOR_GRAB_WAIT_LIFT | MOTOR_GRAB_WAIT_BELT, 0, 1000, 0, 22000u, 0, 0 },
+    { 0, 1, GRAB_SERVO_DWELL_MS, 0, 0, 0, RDK_RAW_REGION_CLAW_CLOSE_DEG },
+    { MOTOR_GRAB_WAIT_RM, 0, 1000, 0, 0, 450, 0 }, /* 仅右上：先回450°再抬丝杆 */
     { MOTOR_GRAB_WAIT_LIFT, 1, 300, 0, 14200u, 0, 0 },
-    { MOTOR_GRAB_WAIT_BELT | MOTOR_GRAB_WAIT_RM, 0, 800, 1400, 0, 101, 0 },
+    { MOTOR_GRAB_WAIT_BELT | MOTOR_GRAB_WAIT_RM, 0, 800, 1540, 0, 18, 0 },
     { 0, 1, 100, 0, 0, 0, RDK_RAW_SERVO180_DEG },
     { MOTOR_GRAB_WAIT_BELT | MOTOR_GRAB_WAIT_LIFT | MOTOR_GRAB_WAIT_RM,
-      0, 1000, 7100, 100u, 290, 0 },
+      0, 2000, 7100, 2000u, 435, 0 }, /* 前两块返回及第三块收起均最多2秒 */
 };
 static struct {
-    uint8_t step, started, done;
+    uint8_t step, started, done, axes;
     int32_t belt_target;
     uint32_t lift_target;
     int16_t arm_target;
-} raw_near;
+} raw_region;
 
 /* 圆环站点放料及粗加工取回；与原料区grab_steps独立，保存物料/环号/原槽位。 */
 #define PLACE_LIFT_WAIT_LIMIT_MS 1000u   /* 两轮粗加工/暂存：收到9F提前继续，否则1秒放行(2026-11-14, 1.5s全部改1s) */
@@ -823,8 +829,8 @@ static struct {
 #define PLACE_BELT_WAIT_LIMIT_MS 500u    /* 同步带统一：收到9F提前继续，否则0.5秒放行(2026-11-15统一, 原按目标0.75/1.5s) */
 #define PLACE_ARM_WAIT_LIMIT_MS  2000u   /* RM放料对环/到站190°：等待4→2秒 */
 #define PLACE_ARM_WAIT_SHORT_MS  1000u   /* RM取料/取回/收回：等待2→1秒 */
-#define PLACE_ARM_WAIT_TARGET_MS 600u    /* RM取回对环(RETRIEVE_TARGET)：0.6秒(2026-11-15) */
-#define PLACE_ARM_WAIT_RETBELT_MS 800u   /* RM取回收回(RETRIEVE_BELT_ARM)：0.8秒(2026-11-15) */
+#define PLACE_ARM_WAIT_TARGET_MS 800u    /* RM取回对环：最多800ms */
+#define PLACE_ARM_WAIT_RETBELT_MS 800u   /* RM取回收回：最多800ms */
 #define PLACE_SETTLE_MS          100u   /* 放料轴全部到位后，保持夹紧等待机构稳定(2026-11-15, 原800ms) */
 #define PLACE_AXIS_BELT          1u
 #define PLACE_AXIS_LIFT          2u
@@ -832,17 +838,17 @@ static struct {
 #define PLACE_AXES_ALL           (PLACE_AXIS_BELT | PLACE_AXIS_LIFT | PLACE_AXIS_ARM)
 #define CHASSIS_HOLD_SETTLE_MS   100u    /* 原料/圆环站点：停车后等待100ms再锁存四轮位置 */
 enum { PLACE_CHASSIS_HOLD, PLACE_PICK, PLACE_CLOSE, PLACE_PICK_LIFT, PLACE_DROP_BELT_ARM, PLACE_DROP_LIFT, PLACE_SETTLE, PLACE_OPEN,
-       PLACE_LIFT_HOME, PLACE_BELT_HOME,
+       PLACE_LIFT_HOME, PLACE_BELT_HOME, PLACE_STORAGE_FINAL_RETURN,
        PLACE_RETRIEVE_LIFT100, PLACE_RETRIEVE_TARGET, PLACE_RETRIEVE_DROP_LIFT, PLACE_RETRIEVE_CLOSE,
-       PLACE_RETRIEVE_LIFT50, PLACE_RETRIEVE_BELT_ARM,
-       PLACE_RETRIEVE_OPEN, PLACE_ROUTE_RESUME, PLACE_FINISHED };
+       PLACE_RETRIEVE_LIFT50, PLACE_RETRIEVE_BELT_ARM, PLACE_RETRIEVE_SLOT_LIFT,
+       PLACE_RETRIEVE_OPEN, PLACE_RETRIEVE_AFTER_OPEN_LIFT, PLACE_ROUTE_RESUME, PLACE_FINISHED };
 typedef struct {
     uint8_t color[3], ring[3], slot[3];
     uint8_t pick, step, started, axes, belt_done, lift_done, arm_done, manual, retrieve; /* 仅粗加工取回 */
     uint8_t batch, storage; /* 站点标识: 二暂(batch==2且storage)专属参数用 */
     uint8_t chassis_held; /* 位置保持指令已下发；保持期间不能重复FE或重设当前位置 */
     uint16_t lift_wait_ms; /* 按本阶段丝杆绝对目标选择1.5秒或0.5秒，不按移动距离 */
-    uint16_t belt_wait_ms; /* 按本阶段同步带绝对目标选择2秒或1秒 */
+    uint16_t belt_wait_ms; /* 本阶段同步带等待上限：默认500ms，取回对环700ms/收回800ms */
     uint32_t drop_lift_target; /* 本次放料高度：二轮暂存32000，其余56750 */
     TickType_t arm_wait_start; /* 放料RM对环计时起点(DROP_BELT_ARM进入), 总窗1.5s跨两步 */
     uint32_t encoder_sequence; /* 里程计始终读取；离站前检查新在线读数，不暂停/恢复任务 */
@@ -850,7 +856,7 @@ typedef struct {
 } StationPlace;
 static StationPlace station_place;
 static const struct { int32_t belt; int16_t arm; } place_ring_target[3] = {
-    {5425, 427}, {7143, 315}, {8810, 440}   /*2026-11-15: 带全+15、RM全-3°; 2026-11-16 RM微调427/315/440*/
+    {5390, 306}, {7200, 182}, {8960, 313}   /* 当前圆环位置标定；放料及粗加工取回共用 */
 };
 
 static uint8_t      debug_rdk_center_sent = 0;
@@ -867,6 +873,7 @@ static uint32_t       debug_rdk_pos_sequence = 0;
 static TickType_t     debug_rdk_resume_start_tick = 0;
 static uint8_t        debug_rdk_resume_action = 0; /*0中止,2no next,3回原pos*/
 static volatile uint8_t debug_rdk_grab_done = 0;
+static uint8_t station_debug_selection = 0; /* 22独立视觉取放：已保存物料/环号，不消费路线 */
 static uint8_t debug_rdk_ring_serial = 0; /* UART7 standalone completion returns to raw. */
 static uint8_t debug_rdk_stack_mode = 0; /* 当前视觉输入为码垛单中心点mode5（路线或1D调试） */
 static TickType_t debug_rdk_arm_start_tick = 0;
@@ -1021,7 +1028,7 @@ uint8_t Motor_GrabGetRegion(MotorGrabRegion_t *out)
     uint8_t active;
     if (!out) return 0;
     taskENTER_CRITICAL();
-    active = (uint8_t)(phase == PHASE_RDK_GRAB_REGION_WAIT);
+    active = (uint8_t)(phase == PHASE_RDK_GRAB_REGION);
     if (active) *out = grab_region;
     else memset(out, 0, sizeof(*out));
     taskEXIT_CRITICAL();
@@ -1032,7 +1039,7 @@ static void grab_region_clear(void)
 {
     taskENTER_CRITICAL();
     memset(&grab_region, 0, sizeof(grab_region));
-    memset(&raw_near, 0, sizeof(raw_near));
+    memset(&raw_region, 0, sizeof(raw_region));
     taskEXIT_CRITICAL();
     RDK_GrabArmEnable(0, 0);
 }
@@ -1075,19 +1082,21 @@ void Motor_GrabGetStatus(MotorGrabStatus_t *out)
         if (Lift_ZDT_ReachedGet()) out->feedback |= MOTOR_GRAB_WAIT_LIFT;
         if (Belt_ZDT_ReachedGet()) out->feedback |= MOTOR_GRAB_WAIT_BELT;
     }
-    if (phase == PHASE_RDK_GRAB_NEAR && raw_near.step < RAW_NEAR_STEP_COUNT)
+    if (phase == PHASE_RDK_GRAB_REGION && raw_region.step < RAW_REGION_STEP_COUNT)
     {
-        const RawNearStep *step = &raw_near_steps[raw_near.step];
+        const RawRegionStep *step = &raw_region_steps[raw_region.step];
         out->active = 1;
         out->stage = 3;
+        out->region = grab_region.region;
         out->pick = grab_region.pick;
-        out->step = (uint8_t)(raw_near.step + 1u);
-        out->started = raw_near.started;
+        out->step = (uint8_t)(raw_region.step + 1u);
+        out->started = raw_region.started;
         out->servo = (uint8_t)!step->axes;
-        out->axes = step->axes;
-        out->waiting = (uint8_t)(step->axes & ~raw_near.done);
-        out->belt_target = raw_near.belt_target;
-        out->lift_target = -(int32_t)raw_near.lift_target;
+        out->axes = raw_region.started ? raw_region.axes :
+            (raw_region.step == RAW_REGION_TARGET ? raw_region_target[grab_region.region - 1u].axes : step->axes);
+        out->waiting = (uint8_t)(out->axes & ~raw_region.done);
+        out->belt_target = raw_region.belt_target;
+        out->lift_target = -(int32_t)raw_region.lift_target;
         out->elapsed_ms = (uint32_t)((uint64_t)(xTaskGetTickCount() - grab_step_tick) *
                                     1000u / configTICK_RATE_HZ);
         if (Lift_ZDT_ReachedGet()) out->feedback |= MOTOR_GRAB_WAIT_LIFT;
@@ -1347,6 +1356,7 @@ static void debug_route_release(void)
 /* 退出圆环/码垛视觉；里程计全程连续读取。 */
 static void debug_rdk_ring_stop(void)
 {
+    station_debug_selection = 0;
     debug_rdk_ring_serial = 0;
     debug_rdk_stack_mode = 0;
     RingAlign_Stop();
@@ -1437,13 +1447,13 @@ static void debug_no_next_start(void)
         no_next_retry = NEXT_RETRY_FAULT;
         no_next_retry_tick = xTaskGetTickCount();
     }
-    if (phase != PHASE_RDK_GRAB_SEQ && phase != PHASE_RDK_GRAB_NEAR && phase != PHASE_RDK_ARM_POST &&
+    if (phase != PHASE_RDK_GRAB_SEQ && phase != PHASE_RDK_GRAB_REGION && phase != PHASE_RDK_ARM_POST &&
         phase != PHASE_RDK_ARM_PRE && phase != PHASE_RDK_GRAB_TRIG &&
         phase != PHASE_RDK_CHASSIS_HOLD)
         grab_fault.reason = MOTOR_GRAB_FAULT_NONE;
     debug_rdk_ring_stop();
     if (phase == PHASE_RDK_ARM_EXTEND || phase == PHASE_RDK_ARM_PRE ||
-        phase == PHASE_RDK_ARM_POST || phase == PHASE_RDK_GRAB_SEQ || phase == PHASE_RDK_GRAB_NEAR ||
+        phase == PHASE_RDK_ARM_POST || phase == PHASE_RDK_GRAB_SEQ || phase == PHASE_RDK_GRAB_REGION ||
         phase == PHASE_RDK_CHASSIS_HOLD)
         Arm_M2006_Stop();
     raw_debug_full = 0;
@@ -1503,7 +1513,7 @@ static void grab_record_fault(uint8_t reason)
     grab_fault.pick = (uint8_t)(1u + ((grab_pick_fixed != 0xFFu) ?
                                      grab_pick_fixed : grab_pick_index));
     if (grab_fault.pick > 3u) grab_fault.pick = 3u;
-    grab_fault.step = phase == PHASE_RDK_GRAB_NEAR ? (uint8_t)(raw_near.step + 1u) :
+    grab_fault.step = phase == PHASE_RDK_GRAB_REGION ? (uint8_t)(raw_region.step + 1u) :
         ((phase == PHASE_RDK_GRAB_SEQ) ? (uint8_t)(grab_step_index + 1u) : 0u);
     grab_fault.reason = reason;
     if (reason == MOTOR_GRAB_FAULT_ARM)
@@ -1607,7 +1617,7 @@ static void grab_pick_complete(void)
                                grab_pick_index : 2u;
                 if (UART8_Valid() && !g_link.bad)
                     grab_color_start(pick);
-                else if (phase == PHASE_RDK_GRAB_NEAR)
+                else if (phase == PHASE_RDK_GRAB_REGION)
                     grab_fail(MOTOR_GRAB_FAULT_RDK); /* 新序列不能停在完成步反复计数。 */
             }
             else
@@ -1648,22 +1658,28 @@ static void grab_pick_complete(void)
     }
 }
 
-static void raw_near_start(void)
+static void raw_region_start(void)
 {
     if (!grab_manual)
     {
         grab_pick_fixed = 0xFFu;
         grab_trig_auto = 1;
     }
-    memset(&raw_near, 0, sizeof(raw_near));
+    if (grab_region.region < RDK_GRAB_REGION_NEAR || grab_region.region > RDK_GRAB_REGION_RIGHT ||
+        grab_region.pick < 1u || grab_region.pick > 3u)
+    {
+        grab_fail(MOTOR_GRAB_FAULT_RDK);
+        return;
+    }
+    memset(&raw_region, 0, sizeof(raw_region));
     /* 先确认当前物料对应的车载槽，区域号不能代替槽位序号。舵机不等待。 */
     Servo270_SetAngle(grab_pick_servo270_drop[grab_region.pick - 1u]);
-    phase = PHASE_RDK_GRAB_NEAR;
+    phase = PHASE_RDK_GRAB_REGION;
 }
 
-static void raw_near_run(void)
+static void raw_region_run(void)
 {
-    const RawNearStep *step;
+    const RawRegionStep *step;
     TickType_t elapsed;
     if (!raw_chassis_held) Motor_Stop();
     if (!Arm_M2006_Ready())
@@ -1671,61 +1687,74 @@ static void raw_near_run(void)
         grab_fail(MOTOR_GRAB_FAULT_ARM);
         return;
     }
-    if (raw_near.step >= RAW_NEAR_STEP_COUNT)
+    if (raw_region.step >= RAW_REGION_STEP_COUNT)
     {
         grab_pick_complete();
         return;
     }
-    step = &raw_near_steps[raw_near.step];
-    if (!raw_near.started)
+    step = &raw_region_steps[raw_region.step];
+    if (!raw_region.started)
     {
-        raw_near.started = 1;
-        raw_near.done = 0;
-        raw_near.belt_target = step->belt;
-        raw_near.lift_target = step->lift;
-        raw_near.arm_target = step->arm;
-        /* 第三块共用原离站收起目标；前两块返回7100/100/290继续等颜色。 */
-        if (raw_near.step == RAW_NEAR_RETURN && grab_region.pick == 3u)
+        raw_region.started = 1;
+        raw_region.done = 0;
+        raw_region.axes = step->axes;
+        raw_region.belt_target = step->belt;
+        raw_region.lift_target = step->lift;
+        raw_region.arm_target = step->arm;
+        if (raw_region.step == RAW_REGION_TARGET)
         {
-            raw_near.belt_target = BELT_POS_GRAB_PUL;
-            raw_near.lift_target = RDK_RAW_FINISH_LIFT_POS;
-            raw_near.arm_target = RDK_RAW_FINISH_ARM_DEG;
+            uint8_t region = (uint8_t)(grab_region.region - 1u);
+            raw_region.axes = raw_region_target[region].axes;
+            raw_region.belt_target = raw_region_target[region].belt;
+            raw_region.arm_target = raw_region_target[region].arm;
+        }
+        /* 第三块共用原离站收起目标；前两块返回7100/2000/435继续等颜色。 */
+        if (raw_region.step == RAW_REGION_RETURN && grab_region.pick == 3u)
+        {
+            raw_region.belt_target = BELT_POS_GRAB_PUL;
+            raw_region.lift_target = RDK_RAW_FINISH_LIFT_POS;
+            raw_region.arm_target = RDK_RAW_FINISH_ARM_DEG;
         }
         grab_wait_start();
-        if (!step->axes) Servo_SetAngle(step->claw);
+        if (!raw_region.axes) Servo_SetAngle(step->claw);
         else
         {
-            if ((step->axes & MOTOR_GRAB_WAIT_RM) &&
-                !Arm_M2006_SetTargetDeg(raw_near.arm_target))
+            if ((raw_region.axes & MOTOR_GRAB_WAIT_RM) &&
+                !Arm_M2006_SetTargetDeg(raw_region.arm_target))
             {
                 grab_fail(MOTOR_GRAB_FAULT_ARM);
                 return;
             }
-            if (step->axes & MOTOR_GRAB_WAIT_BELT) belt_pos_goto(raw_near.belt_target);
-            if (step->axes & MOTOR_GRAB_WAIT_LIFT)
+            if (raw_region.axes & MOTOR_GRAB_WAIT_BELT) belt_pos_goto(raw_region.belt_target);
+            if (raw_region.axes & MOTOR_GRAB_WAIT_LIFT)
             {
                 Lift_ZDT_ReachedClear();
                 Emm_V5_Pos_Control(LIFT_ZDT_ADDR, LIFT_POS_DOWN_DIR,
                                    LIFT_POS_SPEED_RPM, LIFT_POS_ACC,
-                                   raw_near.lift_target, true, false);
+                                   raw_region.lift_target, true, false);
             }
         }
-        if (raw_near.step == RAW_NEAR_RETURN)
-            Servo270_SetAngle(grab_pick_servo270[grab_region.pick - 1u]); /* 下一槽，不等待。 */
+        if (raw_region.step == RAW_REGION_RETURN && grab_region.pick < 3u)
+            Servo270_SetAngle(grab_pick_servo270[grab_region.pick - 1u]); /* 前两块仍立即换槽。 */
         return;
     }
     elapsed = xTaskGetTickCount() - grab_step_tick;
-    if (step->axes & MOTOR_GRAB_WAIT_BELT)
-        if (Belt_ZDT_ReachedGet()) raw_near.done |= MOTOR_GRAB_WAIT_BELT;
-    if (step->axes & MOTOR_GRAB_WAIT_LIFT)
-        if (Lift_ZDT_ReachedGet()) raw_near.done |= MOTOR_GRAB_WAIT_LIFT;
-    if (step->axes & MOTOR_GRAB_WAIT_RM)
-        if (Arm_M2006_AtTargetWithin(RAW_ARM_POS_TOL_DEG)) raw_near.done |= MOTOR_GRAB_WAIT_RM;
-    /* 丝杆14200固定驻留300ms、舵机固定驻留；并行轴组到位可提前放行。 */
+    if (raw_region.axes & MOTOR_GRAB_WAIT_BELT)
+        if (Belt_ZDT_ReachedGet()) raw_region.done |= MOTOR_GRAB_WAIT_BELT;
+    if (raw_region.axes & MOTOR_GRAB_WAIT_LIFT)
+        if (Lift_ZDT_ReachedGet()) raw_region.done |= MOTOR_GRAB_WAIT_LIFT;
+    if (raw_region.axes & MOTOR_GRAB_WAIT_RM)
+        if (Arm_M2006_AtTargetWithin(RAW_ARM_POS_TOL_DEG)) raw_region.done |= MOTOR_GRAB_WAIT_RM;
+    /* 第三块三轴收起下发满2秒才转A槽；仅结束本任务当前阶段的等待，不阻塞RTOS。 */
     if (elapsed < pdMS_TO_TICKS(step->wait_ms) &&
-        (step->fixed_wait || (raw_near.done & step->axes) != step->axes)) return;
-    raw_near.step++;
-    raw_near.started = 0;
+        (step->fixed_wait || (raw_region.step == RAW_REGION_RETURN && grab_region.pick == 3u) ||
+         (raw_region.done & raw_region.axes) != raw_region.axes)) return;
+    if (raw_region.step == RAW_REGION_RETURN && grab_region.pick == 3u)
+        Servo270_SetAngle(grab_pick_servo270[grab_region.pick - 1u]); /* 只下发一次，不等舵机到位。 */
+    raw_region.step++;
+    if (raw_region.step == RAW_REGION_RIGHT_ARM && grab_region.region != RDK_GRAB_REGION_RIGHT)
+        raw_region.step++; /* 中下/左上不下发450°，直接抬丝杆。 */
+    raw_region.started = 0;
 }
 
 static void debug_rdk_center_return_done(void)
@@ -1847,7 +1876,7 @@ static void debug_rdk_center_found(void)
     }
 }
 
-/* 真实原料区及1E：转盘定位后建立位置保持，仅RM预定位，丝杆保持提前准备的100。 */
+/* 真实原料区及1E：转盘定位后建立位置保持，仅RM预定位，丝杆保持提前准备的2000。 */
 static void debug_raw_chassis_hold_run(void)
 {
     Motor_Stop();
@@ -2321,7 +2350,7 @@ static void debug_approach_start(void)
     belt_pos_goto(point == RP_RAW ? RDK_RAW_BELT_POS : RING_STN_BELT_POS);
     Servo_SetAngle(point == RP_RAW ? RDK_RAW_SERVO180_DEG : RING_STN_SERVO180_DEG);
     if (point == RP_RAW) debug_raw_lift_prepare();
-    /* 180°张开不等待；原料丝杆同时到100，其余站点丝杆及270°保持。 */
+    /* 180°张开不等待；原料丝杆同时到2000，其余站点丝杆及270°保持。 */
 }
 
 static uint8_t debug_approach_matches(RoutePoint point)
@@ -2403,6 +2432,7 @@ static uint32_t ring_now_ms(void)
 
 static void debug_rdk_ring_start(void)
 {
+    station_debug_selection = 0;
     /* 两轮粗加工及第一轮暂存均只启动视觉，不暂停编码器轮询或计数。 */
     debug_rdk_ring_serial = 0;
     debug_rdk_stack_mode = 0;
@@ -2416,6 +2446,7 @@ static void debug_rdk_ring_start(void)
 /* 模式5码垛对位：路线完成后接第二轮暂存放料；独立1D只对位停车。 */
 static void debug_rdk_stack_start(uint8_t standalone)
 {
+    station_debug_selection = 0;
     debug_rdk_ring_serial = standalone;
     debug_rdk_stack_mode = 1;
     Motor_Stop();
@@ -2438,7 +2469,7 @@ static void debug_raw_prepare_run(void)
         return;
     }
     belt_done = grab_axis_done(0); /* 提前张爪不能绕过机构等待。 */
-    lift_done = grab_axis_done(1); /* 提前准备的100：到位或自下发满原1秒上限。 */
+    lift_done = grab_axis_done(1); /* 提前准备的2000：到位或自下发满原1秒上限。 */
     if (!belt_servo_done && belt_done)
     {
         belt_servo_done = 1;
@@ -2478,7 +2509,7 @@ static void debug_raw_prepare(void)
             grab_fail(MOTOR_GRAB_FAULT_ARM);
             return;
         }
-        debug_raw_lift_prepare(); /* 未提前准备的独立1E/站点同样先到100。 */
+        debug_raw_lift_prepare(); /* 未提前准备的独立1E/站点同样先到2000。 */
     }
     debug_rdk_arm_start_tick = grab_step_tick;
     phase = PHASE_RDK_ARM_PRE;
@@ -2499,7 +2530,7 @@ static void debug_station_work_start(void)
     else if (point == RP_ROUGH || point == RP_STORAGE)
     {
         irq_station_enter();               /* Encoder让路15；HWT101保持4，轮趣沿用降级 */
-        /* 圆环站点到站预定位: RM电机190°/同步带7100/180°舵机28°, 发完即进校准,
+        /* 圆环站点到站预定位: RM电机190°/同步带7100/180°舵机25°, 发完即进校准,
            机构动作与视觉校准并行(校准本身不动机构)。 */
         if (debug_approach_matches(point))
         {
@@ -2588,6 +2619,18 @@ static uint8_t station_place_begin(uint8_t batch, uint8_t storage, uint8_t manua
 static void station_place_start(void)
 {
     RoutePoint point = debug_point_at(debug_route_leg.from_x, debug_route_leg.from_y);
+    if (station_debug_selection)
+    {
+        /* 复用22入口已校验/保存的同一批计划；独立完成只能停车。 */
+        float heading = station_place.storage ? 0.0f : 270.0f;
+        debug_rdk_ring_stop();
+        irq_station_leave();
+        IMU_SetYaw(heading);
+        yaw_hold = yaw_abs360_to_signed(heading);
+        line_yaw_reset();
+        phase = PHASE_STATION_PLACE;
+        return;
+    }
     if (!debug_route_active ||
         !((point == RP_ROUGH && (debug_route_batch == 1 || debug_route_batch == 2)) ||
           (point == RP_STORAGE && (debug_route_batch == 1 || debug_route_batch == 2))))
@@ -2608,10 +2651,42 @@ static void station_place_start(void)
     }
 }
 
+/* 独立站点全流程：机构准备与视觉并行，完成后接原1C手动取放状态机。 */
+static uint8_t station_debug_start(uint8_t selection)
+{
+    uint8_t batch = (selection == 2u || selection == 4u) ? 2u : 1u;
+    uint8_t storage = (uint8_t)(selection >= 3u);
+    if (selection < 1u || selection > 4u || !PHASE_CAN_START(phase) ||
+        debug_route_active || debug_pause_active || RDK_Ring_Active() || RDK_Stack_Active() ||
+        !Arm_M2006_Ready() || IMU_ConfigStatus() != IMU_CONFIG_READY || !IMU_UpdateSequence())
+        return 0;
+    /* 开始前校验并保存三块颜色/环号/原槽，避免校准完再发现任务无效。 */
+    if (!station_place_begin(batch, storage, 1)) return 0;
+    array_mode = 0;
+    leg1_next_valid = 0;
+    Motor_Enable(true);
+    IMU_SetYaw(storage ? 0.0f : 270.0f); /* 当前摆放朝向作为本站名义航向，不额外转弯。 */
+    irq_station_enter();
+    debug_ring_arm_start_tick = xTaskGetTickCount();
+    if (!Arm_M2006_SetTargetDeg(RING_STN_ARM_DEG))
+    {
+        station_place_fail();
+        return 0;
+    }
+    belt_pos_goto(RING_STN_BELT_POS);
+    Servo_SetAngle(RING_STN_SERVO180_DEG);
+    RingAlign_ResetYawSign();
+    if (storage && batch == 2u) debug_rdk_stack_start(0);
+    else debug_rdk_ring_start();
+    station_debug_selection = selection;
+    return 1;
+}
+
 /* 一组目标在同一拍下发，中间不等待；axes允许单独抬升/收同步带。 */
 static void station_place_move(uint8_t axes, int32_t belt, int16_t arm, uint32_t lift)
 {
     station_place.axes = axes;
+    station_place.belt_wait_ms = PLACE_BELT_WAIT_LIMIT_MS; /* 每组先恢复默认，再由阶段覆盖 */
     station_place.lift_wait_ms = (lift <= PLACE_LIFT_LOW_POS_PUL) ?
         PLACE_LIFT_LOW_WAIT_MS : PLACE_LIFT_WAIT_LIMIT_MS;
 
@@ -2640,13 +2715,13 @@ static uint8_t station_place_move_done(void)
        超时只放行状态机，不停止轴；并行组仍等其他轴确认或各自超时。 */
     if (axes & PLACE_AXIS_BELT)
         station_place.belt_done |= (uint8_t)(Belt_ZDT_ReachedGet() ||
-            elapsed >= pdMS_TO_TICKS(PLACE_BELT_WAIT_LIMIT_MS));
+            elapsed >= pdMS_TO_TICKS(station_place.belt_wait_ms));
     if (axes & PLACE_AXIS_LIFT)
         station_place.lift_done |= (uint8_t)(Lift_ZDT_ReachedGet() ||
             elapsed >= pdMS_TO_TICKS(station_place.lift_wait_ms));
     if (axes & PLACE_AXIS_ARM)
     {
-        /* RM等待按步骤分流：放料对环2秒 / 取回对环0.6秒 / 其余(取料/取回/收回)1秒 */
+        /* RM等待按步骤分流：放料对环2秒 / 取回对环0.8秒 / 其余(取料/取回/收回)1秒 */
         uint16_t arm_wait;
         if (station_place.step == PLACE_DROP_BELT_ARM)
             arm_wait = PLACE_ARM_WAIT_LIMIT_MS;
@@ -2685,7 +2760,7 @@ static void station_place_run(void)
         case PLACE_PICK:
             /* 仅首块执行取料定位；后续已在返回阶段全部到位，直接进入夹紧。 */
             Servo270_SetAngle(grab_pick_servo270_drop[station_place.slot[station_place.pick]]);
-            station_place_move(PLACE_AXES_ALL, BELT_POS_GRAB_PUL, 101, 21500u);
+            station_place_move(PLACE_AXES_ALL, BELT_POS_GRAB_PUL, 18, 21500u);
             break;
         case PLACE_CLOSE: Servo_SetAngle(g_place_claw_close_deg); break;
         case PLACE_PICK_LIFT:
@@ -2724,20 +2799,20 @@ static void station_place_run(void)
             }
             else
             {
-                /* 暂存最后一块(2026-11-15边走边收): 松爪后同拍——恢复行车档+
-                   丝杆12500收起+带1400+RM101°+预转A槽30°, 等待0.1s后车轮直接走,
-                   丝杆/带/RM收回行驶中继续(ZDT自主完成)。 */
-                irq_station_leave();
-                Servo270_SetAngle(SERVO270_SLOT_A_DEG);
-                station_place_move(PLACE_AXES_ALL, BELT_POS_GRAB_PUL, 101, 12500u);
-                station_place.lift_wait_ms = 100u;
+                /* 暂存第三块先单独抬丝杆，固定1秒后才收带/RM及转槽。 */
+                station_place_move(PLACE_AXIS_LIFT, 0, 0, 12500u);
             }
             break;
+        case PLACE_STORAGE_FINAL_RETURN:
+            irq_station_leave();
+            Servo270_SetAngle(SERVO270_SLOT_A_DEG); /* 与带/RM同阶段下发，不等反馈。 */
+            station_place_move(PLACE_AXIS_BELT | PLACE_AXIS_ARM, BELT_POS_GRAB_PUL, 18, 0);
+            break;
         case PLACE_BELT_HOME:
-            /* 前两块: 同步带1400与RM101°并行返回, 到位后直接夹紧下一块。
-               暂存第三块的收回已并入LIFT_HOME(四轴同拍+0.3s后直接起步)。 */
+            /* 前两块: 同步带1540与RM18°并行返回, 到位后直接夹紧下一块。
+               暂存第三块另走丝杆固定1秒后收带/RM的独立阶段。 */
             station_place_move(PLACE_AXIS_BELT | PLACE_AXIS_ARM,
-                               BELT_POS_GRAB_PUL, 101, 0);
+                               BELT_POS_GRAB_PUL, 18, 0);
             break;
         case PLACE_RETRIEVE_LIFT100:
             /* 第三块放开后先抬到取回准备高度，同步带保持在上一目标环位置；
@@ -2749,19 +2824,19 @@ static void station_place_run(void)
         {
             uint8_t ring = (uint8_t)(station_place.ring[station_place.pick] - 1u);
             /* 只同步带和RM同时对准圆环；270°舵机改到丝杆下放同拍再转(2026-11-15)。
-               带/RM等待覆盖0.6s(取回对环, 不走按目标的分档)。 */
+               取回对环：同步带最多700ms、RM最多800ms。 */
             station_place_move(PLACE_AXIS_BELT | PLACE_AXIS_ARM, place_ring_target[ring].belt,
                                place_ring_target[ring].arm, 0);
-            station_place.belt_wait_ms = 600u;
+            station_place.belt_wait_ms = 700u;
             break;
         }
         case PLACE_RETRIEVE_DROP_LIFT:
         {
             /* 丝杆下放到放料高度的同拍，270°舵机转到该物料原槽位
                (接收位置)——与放料序列的下放预转模式对称，不等待舵机。
-               等待覆盖0.7s(取回下放, 不走按目标的1s档, 2026-11-15) */
+               等待覆盖1.8s(取回下放，不走默认1秒档) */
             station_place_move(PLACE_AXIS_LIFT, 0, 0, station_place.drop_lift_target);
-            station_place.lift_wait_ms = 700u;   /*move后覆盖: 0.7s放行*/
+            station_place.lift_wait_ms = 1800u;  /* 取回下放56750：主动到位提前继续，否则1.8秒放行 */
             Servo270_SetAngle(grab_pick_servo270_drop[station_place.slot[station_place.pick]]);
             break;
         }
@@ -2769,15 +2844,23 @@ static void station_place_run(void)
             Servo_SetAngle(g_place_claw_close_deg);
             break;
         case PLACE_RETRIEVE_LIFT50:
-            /* 提起到14500(2026-11-15, 原12500→13900→14200→14500); 等待0.2s(覆盖按目标的1s档) */
+            /* 提起到14500；主动到位提前继续，否则最多600ms */
             station_place_move(PLACE_AXIS_LIFT, 0, 0, 14500u);
-            station_place.lift_wait_ms = 200u;
+            station_place.lift_wait_ms = 600u;
             break;
         case PLACE_RETRIEVE_BELT_ARM:
-            /* 取回收回: 带0.8s/RM0.8s放行(覆盖按目标的分档, 2026-11-15) */
+            /* 取回收回：同步带最多500ms、RM最多800ms */
             station_place_move(PLACE_AXIS_BELT | PLACE_AXIS_ARM,
-                               BELT_POS_GRAB_PUL, 101, 0);
-            station_place.belt_wait_ms = 800u;
+                               BELT_POS_GRAB_PUL, 18, 0);
+            station_place.belt_wait_ms = 500u;
+            break;
+        case PLACE_RETRIEVE_SLOT_LIFT:
+            station_place_move(PLACE_AXIS_LIFT, 0, 0, 20000u);
+            station_place.lift_wait_ms = 600u;
+            break;
+        case PLACE_RETRIEVE_AFTER_OPEN_LIFT:
+            station_place_move(PLACE_AXIS_LIFT, 0, 0, 14000u);
+            station_place.lift_wait_ms = 500u;
             break;
         case PLACE_RETRIEVE_OPEN:
             Servo_SetAngle(g_place_claw_open_deg);
@@ -2820,6 +2903,8 @@ static void station_place_run(void)
             return;
         }
     }
+    else if (station_place.step == PLACE_LIFT_HOME && station_place.pick == 2u && station_place.storage)
+        done = (uint8_t)((xTaskGetTickCount() - station_place.tick) >= pdMS_TO_TICKS(1000u));
     else if (station_place.step == PLACE_SETTLE)
         done = (uint8_t)((xTaskGetTickCount() - station_place.tick) >=
                          pdMS_TO_TICKS(PLACE_SETTLE_MS));
@@ -2846,29 +2931,24 @@ static void station_place_run(void)
     if (station_place.step == PLACE_OPEN && station_place.pick == 2u &&
         station_place.retrieve)
     {
-        /* 第三块放开后直接进入取回准备，不先回50000/1400。 */
+        /* 第三块放开后直接进入取回准备，不先回50000/1540。 */
         UART8_PlaceOk();   /*粗加工第三块已放到站点环上: 放置正确+1*/
         station_place.pick = 0;
         station_place.step = PLACE_RETRIEVE_LIFT100;
     }
     else if (station_place.step == PLACE_LIFT_HOME)
     {
-        if (station_place.pick < 2u)
-            station_place.step = PLACE_BELT_HOME;   /*前两块: 再收带/RM后夹紧下一块*/
-        else if (station_place.manual)
-        {
-            /* 独立放料调试: 四轴收回完成即停车 */
-            station_place.step = PLACE_FINISHED;
-            phase = PHASE_DONE;
-        }
+        station_place.step = station_place.pick < 2u ? PLACE_BELT_HOME : PLACE_STORAGE_FINAL_RETURN;
+    }
+    else if (station_place.step == PLACE_STORAGE_FINAL_RETURN)
+    {
+        station_place.step = PLACE_FINISHED;
+        if (station_place.manual) phase = PHASE_DONE;
         else
         {
-            /* 暂存最后一块(边走边收): 四轴收回已同拍下发, 车轮直接走——
-               行驶中发模式0退视觉/加载下一段; 带/RM收回继续(ZDT自主完成)。 */
             debug_rdk_ring_stop();
             if (debug_leg_load()) debug_leg_start();
             else debug_no_next_start();
-            station_place.step = PLACE_FINISHED;
         }
     }
     else if (station_place.step == PLACE_BELT_HOME)
@@ -2886,12 +2966,12 @@ static void station_place_run(void)
                 station_place.step = PLACE_ROUTE_RESUME;
         }
         else
-            /* 丝杆21500、同步带1400、RM101°已分别确认，直接夹紧下一块。 */
+            /* 丝杆21500、同步带1540、RM18°已分别确认，直接夹紧下一块。 */
             station_place.step = PLACE_CLOSE;
     }
-    else if (station_place.step == PLACE_RETRIEVE_OPEN)
+    else if (station_place.step == PLACE_RETRIEVE_AFTER_OPEN_LIFT)
     {
-        /* 松爪(物料落原槽)完成即收尾判定(2026-11-15删除LIFT_HOME抬起步骤) */
+        /* 松爪后先抬至14000并结束等待，再计数、转下一块或续路。 */
         UART8_GrabOk();   /*一块粗加工取回完成(物料已落回车上槽位): 抓取正确+1*/
         if (++station_place.pick == 3u)
         {
@@ -3128,7 +3208,7 @@ static void turn_run_start(float start_yaw, float delta, uint8_t accumulate)
     phase = PHASE_TURN;
 }
 
-/* 同步带绝对坐标0~10000：上电位0、抓取1400、中心7050。
+/* 同步带绝对坐标0~10000：上电位0、抓取1540、中心7050。
    dir表示绝对目标符号，不按当前到目标的增减切换；驱动器自行决定运动方向。 */
 static void belt_pos_goto(int32_t target)
 {
@@ -3513,7 +3593,7 @@ void MotorTask(void *pvParameters)
                     RDK_Ring_Active())
                     break;
                 Motor_Stop();                /*调试期间底盘保持停车*/
-                /* 新坐标: 上电位0、抓取1400、中心7050，绝对定位。 */
+                /* 新坐标: 上电位0、抓取1540、中心7050，绝对定位。 */
                 belt_pos_goto((int32_t)c.param);
                 cmd_tx_ack(&c);
                 break;
@@ -3537,6 +3617,10 @@ void MotorTask(void *pvParameters)
                     cmd_tx_ack(&c);
             }
             break;
+
+            case CMD_STATION_RUN: /*22：独立粗加工/暂存：视觉对位后取放，结束停车*/
+                if (station_debug_start((uint8_t)c.param)) cmd_tx_ack(&c);
+                break;
 
             case CMD_PLACE_SEQ:                  /*0x1C: 独立放三块，粗加工再取回；不做视觉、不消费路线*/
                 if (!PHASE_CAN_START(phase) || debug_route_active || debug_pause_active ||
@@ -3582,7 +3666,7 @@ void MotorTask(void *pvParameters)
                                   (uint8_t)(c.param - 1u) : 0xFFu;
                 {
                     /* 2026-11-03: 任务码已注入时与路线流程一致——发颜色给RDK,
-                       等新版0x11三区报告，匹配后停在WAIT TARGET(30s首报告超时no next);
+                       等新版0x11三区报告，匹配后按区域自动抓取(30s首报告超时no next);
                        未注入/无效时无颜色可发, 退回纯动作调试直接夹。 */
                     uint8_t pick = (grab_pick_fixed != 0xFFu) ? grab_pick_fixed :
                                    (grab_pick_index < 3u ? grab_pick_index : 2u);
@@ -3828,7 +3912,7 @@ void MotorTask(void *pvParameters)
         /*---- 转盘定位后机构预定位：底盘保持固定位置，里程计持续读取 ----*/
         if (phase == PHASE_RDK_ARM_POST)
         {
-            /* 对位完成仅等待RM290°，丝杆保持100，不下发21000也不再等待丝杆。 */
+            /* 对位完成仅等待RM435°，丝杆保持2000，不下发21000也不再等待丝杆。 */
 
             if (!raw_chassis_held) Motor_Stop();
             if (!Arm_M2006_Ready())
@@ -3877,10 +3961,9 @@ void MotorTask(void *pvParameters)
                 taskENTER_CRITICAL();
                 grab_region.color = report.color;
                 grab_region.region = report.region;
-                phase = PHASE_RDK_GRAB_REGION_WAIT;
                 taskEXIT_CRITICAL();
-                RDK_GrabArmEnable(0, 0); /* 首个匹配报告已保存；区域2/3仍等待参数。 */
-                if (report.region == RDK_GRAB_REGION_NEAR) raw_near_start();
+                RDK_GrabArmEnable(0, 0); /* 先关闭重复报告，再按已锁存区域开始一次抓取。 */
+                raw_region_start();
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
@@ -3890,18 +3973,9 @@ void MotorTask(void *pvParameters)
             continue;
         }
 
-        if (phase == PHASE_RDK_GRAB_REGION_WAIT)
+        if (phase == PHASE_RDK_GRAB_REGION)
         {
-            /* 区域2/3暂不夹取、不计数、不续路，等待用户补充机构目标。
-               已位置保持时不能重复FE停车，否则会破坏四轮位置保持。 */
-            if (!raw_chassis_held) Motor_Stop();
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-
-        if (phase == PHASE_RDK_GRAB_NEAR)
-        {
-            raw_near_run();
+            raw_region_run();
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
@@ -3955,7 +4029,7 @@ void MotorTask(void *pvParameters)
                             grab_fail(MOTOR_GRAB_FAULT_ARM);
                         else
                         {
-                            /* 第三块(收尾)同步带保持1400取料位不回7040(2026-11-07)；
+                            /* 第三块(收尾)同步带保持1540取料位不回7040(2026-11-07)；
                                前两块仍回7040原料区中心。 */
                             belt_pos_goto(last ? BELT_POS_GRAB_PUL : st->target);
                             /* 粗加工先放扫码块序0，复用其车载槽位映射，不按环号选槽；
