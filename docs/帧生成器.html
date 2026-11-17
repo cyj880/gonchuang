@@ -241,8 +241,8 @@ function render() {
   } else if (cur === 'stationrun') {
     h = `<div class="row"><label for="stationSelect">独立站点</label><select id="stationSelect"><option value="1">第一轮粗加工</option><option value="2">第二轮粗加工</option><option value="3">第一轮暂存</option><option value="4">第二轮暂存码垛</option></select></div><div class="hint">先注入任务码并摆好车和A/B/C物料。当前朝向记为粗加工270°/暂存0°，同时准备RM190°、同步带7100、夹爪25°；立即开启视觉校准，完成后自动取放。粗加工放三块再取回，暂存只放三块，均停车结束，不消费路线。<a href="粗加工与暂存区调试.html">打开独立调试网页</a>；06中止。</div>`;
   } else if (cur === 'light') {
-    h = `<div class="row"><label for="lightPct">灯光亮度(0~100%)</label><input type="number" id="lightPct" value="0" min="0" max="100" step="1"></div>
-         <div class="hint">PI6接灯光驱动器PWM控制端并共地，3.3V逻辑、高电平有效、1kHz。0%关闭、100%全亮；上电默认关闭，不保存亮度。生成后点击串口助手的“发送当前面板帧”；车端应用后原样回应答。运行中也可调光，不改变底盘/机构状态；06中止保留灯光亮度。</div>`;
+    h = `<div class="row"><label for="lightPct">灯光亮度(0~100%)</label><input type="number" id="lightPct" value="60" min="0" max="100" step="1"></div>
+         <div class="hint">PI6接灯光驱动器PWM控制端并共地，3.3V逻辑、高电平有效、1kHz。0%关闭、100%全亮；上电默认60%占空比，不保存亮度。生成后点击串口助手的“发送当前面板帧”；车端应用后原样回应答。运行中也可调光，不改变底盘/机构状态；06中止保留灯光亮度。</div>`;
   } else if (cur === 'servo') {
     h = `<div class="row"><label for="srv180">180°舵机角度(0~180°)</label><input type="number" id="srv180" value="108" min="0" max="180" step="1"></div>
          <div class="row"><label for="srv270">270°舵机角度(0~270°)</label><input type="number" id="srv270" value="30" min="0" max="270" step="1"></div>

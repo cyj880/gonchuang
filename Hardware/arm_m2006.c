@@ -14,7 +14,7 @@
 #define ARM_SPEED_KP           3.0f    /* 速度跟踪/制动比例同步提高，避免高速目标下内环跟随滞后 */
 #define ARM_SPEED_KI           0.1f
 #define ARM_SPEED_ILIMIT       5000.0f /*速度环积分提供静摩擦/负载保持力，饱和时禁止继续同向积累*/
-#define ARM_SPEED_MAX_RPM      16000.0f /* 转子上限8000→16000；输出轴约444RPM */
+#define ARM_SPEED_MAX_RPM      17600.0f /* 转子速度上限提高10%：16000→17600；输出轴约489RPM */
 #define ARM_SPEED_RAMP_RPM_S   24000.0f /* 加速6000→24000；相同行程半时长所需斜率为4倍 */
 #define ARM_BRAKE_RPM_S       48000.0f /* 制动12000→48000；sqrt限速对应2倍目标转速 */
 #define ARM_CURRENT_MAX        10000.0f

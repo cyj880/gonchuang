@@ -1,6 +1,7 @@
 #include "Light.h"
 
 #define LIGHT_PWM_PERIOD 1000u
+#define LIGHT_STARTUP_PERCENT 0u  /* 上电默认补光占空比，单位%(2026-11-17: 60→0上电熄灭) */
 
 void Light_Init(void)
 {
@@ -30,7 +31,7 @@ void Light_Init(void)
     oc.TIM_OutputState = TIM_OutputState_Enable;
     oc.TIM_OCPolarity = TIM_OCPolarity_High;
     oc.TIM_OCIdleState = TIM_OCIdleState_Reset;
-    oc.TIM_Pulse = 0;
+    oc.TIM_Pulse = LIGHT_STARTUP_PERCENT * (LIGHT_PWM_PERIOD / 100u);
     TIM_OC2Init(TIM8, &oc);
     TIM_OC2PreloadConfig(TIM8, TIM_OCPreload_Enable);
     GPIO_PinAFConfig(GPIOI, GPIO_PinSource6, GPIO_AF_TIM8);

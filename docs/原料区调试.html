@@ -16,10 +16,10 @@
 <section class="card">
 <h2 style="margin-top:0;font-size:19px">连接与启动</h2>
 <div class="row"><select id="baud" aria-label="串口波特率"><option>115200</option></select><button id="connect">连接串口</button><button id="disconnect" disabled>断开</button><span id="connection">未连接</span></div>
-<label for="lightPct">灯光目标亮度：<span id="lightValue">0</span>%</label>
-<input type="range" id="lightPct" value="0" min="0" max="100" step="1" style="padding:0">
+<label for="lightPct">灯光目标亮度：<span id="lightValue">60</span>%</label>
+<input type="range" id="lightPct" value="60" min="0" max="100" step="1" style="padding:0">
 <div class="row"><button id="lightApply" disabled>设置灯光亮度</button><button id="lightOff" disabled>关闭灯光</button></div>
-<small>PI6接灯光驱动器PWM端并共地，1kHz、高电平有效。上电默认关闭；拖动后点击设置，收到车端确认才显示成功。运行中也可调光。</small>
+<small>PI6接灯光驱动器PWM端并共地，1kHz、高电平有效。上电默认60%占空比；拖动后点击设置，收到车端确认才显示成功。运行中也可调光。</small>
 <label for="task">任务码</label><input id="task" value="156+123+516+231" maxlength="15" autocomplete="off" spellcheck="false">
 <small>启动时先注入此任务码，收到车端确认后再启动原料区。</small>
 <label for="batch">本次抓取批次</label><select id="batch"><option value="1">第一批：156</option><option value="2">第二批：516</option></select>

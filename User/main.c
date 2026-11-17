@@ -120,7 +120,7 @@ int main(void)
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_4);
 
     /* 时钟已由 startup 文件中的 SystemInit() 配置为 168MHz（HSE 12MHz） */
-    Light_Init();          /* PI6灯光PWM，上电默认关闭 */
+    Light_Init();          /* PI6灯光PWM，上电默认60%占空比 */
     LED_Init();
     LED_Green_On();         /* 板载绿色指示灯 PF14 常亮 */
     LED_Red_On();           /* 板载红色指示灯 PE11 常亮 */
